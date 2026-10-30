@@ -257,7 +257,8 @@ def link_guests(binary, directory, captures):
         terminal.send(b"\x13")
         terminal.until(lambda: "appears more than once" in terminal.text() or "DuplicateCalendarAttendee" in terminal.text())
         provider_counts(binary, client_dir, fixture, 0)
-        fill(terminal, "Guests", "guest@example.test, second@example.test")
+        # Ordinary single-line Mail syntax; the provider still gets bare emails.
+        fill(terminal, "Guests", '"Guest, One" <guest@example.test>, second@example.test')
         toggle(terminal, "Video: None", "Video: Generate Google Meet link")
         toggle(terminal, "Video: Generate Google Meet link", "Video: Paste meeting link")
         fill(terminal, "Meeting link", "http://unsafe.example.test/room")
@@ -845,9 +846,9 @@ def open_guest_contacts(terminal, keyboard=True):
     if keyboard:
         terminal.send(b"\x00")  # Actual legacy Ctrl+Space -> vaxis Ctrl+@.
     else:
-        if terminal.screen.locate("[Ctrl+Space Contacts]") is None:
+        if terminal.screen.locate("[Ctrl+Space Contacts · recent mail]") is None:
             next_control(terminal)
-        click(terminal, *point(terminal, "[Ctrl+Space Contacts]"))
+        click(terminal, *point(terminal, "[Ctrl+Space Contacts · recent mail]"))
     terminal.until(lambda: "Add a guest from Contacts" in terminal.text())
 
 
@@ -936,6 +937,98 @@ def guest_contacts(binary, directory, captures):
     return {"writes": 0, "widths": [132, 48], "destinationAccount": True, "rawCtrlSpace": True,
             "explicitSecondEmail": True, "caseInsensitiveDedup": True, "reviewedOnly": True, "contactsUnchanged": True}
 
+def guest_recent(binary, directory, captures):
+    for columns, rows in ((132, 38), (48, 24)):
+        owned = directory / str(columns)
+        fixture = Invitations(owned)
+        contacts_fixture(fixture)
+        # Invitations starts with Inbox-only mail. Add an explicit synthetic
+        # Sent message rather than assuming its fixture has correspondents.
+        provider_file = fixture.root / "accounts" / (ACCOUNTS[1].split("@")[0] + ".json")
+        provider = json.loads(provider_file.read_text())
+        recent_message = fixture.message(ACCOUNTS[1], 99, False)
+        recent_message.update(id="recent-guest-sent", threadId="recent-guest-thread", labelIds=["SENT"])
+        for header in recent_message["payload"]["headers"]:
+            if header["name"] == "From":
+                header["value"] = ACCOUNTS[1]
+            elif header["name"] == "To":
+                header["value"] = "Robin Recent <robin.recent@example.test>"
+        provider["messages"].append(recent_message)
+        provider_file.write_text(json.dumps(provider) + "\n")
+        client_dir = owned / "client"
+        # Synthetic fixture only: cache the destination account's bounded Sent
+        # head and contacts, then pick a sent recipient who is not saved.
+        with Client(binary, client_dir, extra=fixture.options()) as client:
+            saved = {email["address"].lower() for contact in client.request("contacts.list", ACCOUNTS[1])["contacts"]
+                     for email in contact.get("emails", [])}
+            sent_head = client.request("mail.list", ACCOUNTS[1], label="SENT", limit=32).get("messages", [])
+            sent = [client.request("mail.read", ACCOUNTS[1], messageId=item["id"]) for item in sent_head]
+            cached = {item["address"].lower() for item in client.request("mail.recipients", ACCOUNTS[1], cacheOnly=True)["recipients"]}
+        excluded = saved | {account.lower() for account in ACCOUNTS}
+        person = next((entry["address"] for message in sent for entry in message.get("to", [])
+                       if isinstance(entry, dict) and entry.get("address", "").lower() in cached
+                       and entry["address"].lower() not in excluded), None)
+        require(person, "fixture has no cached Sent recipient outside saved contacts")
+        terminal = start(binary, client_dir, fixture, columns=columns, rows=rows)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            terminal.send(b"ga")
+            terminal.until(lambda: "Show calendars · all accounts" in terminal.text() and "9 checked" in terminal.text()
+                           and "[Enter Apply]" in terminal.text() and "[Loading calendars" not in terminal.text())
+            terminal.send(b"\r")
+            terminal.until(lambda: "All accounts" in terminal.text() and "9 selected calendars" in terminal.text())
+            terminal.send(b"n")
+            terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
+            toggle(terminal, "[Calendar:", "Choose destination calendar")
+            for _ in range(3):
+                terminal.send(b"j")
+                terminal.gap(.05)
+            terminal.send(b"\r")
+            terminal.until(lambda: "New event" in terminal.text() and ACCOUNTS[1] in terminal.text())
+            first, _ = new_dates()
+            ordinary_fields(terminal, "Guest recent mail " + str(columns), first)
+            fill(terminal, "Guests", "typed@example.test")
+            # Mail stays on ACCOUNTS[0]; the picker reads the Calendar destination.
+            open_guest_contacts(terminal)
+            terminal.until(lambda: "Add a guest from Contacts or recent mail" in terminal.text() and ACCOUNTS[1] in terminal.text()
+                           and "Loading this account" not in terminal.text())
+            terminal.send(person.encode())
+            terminal.until(lambda: person in terminal.text() and "No matching contacts" not in terminal.text())
+            capture(terminal, captures, "compose-guests-recent-" + str(columns))
+            provider_counts(binary, client_dir, fixture, 0)
+            terminal.send(b"\r")
+            terminal.until(lambda: "Add a guest from Contacts" not in terminal.text())
+            require(person in row_text(terminal, "Guests:"), "recent-mail recipient did not reach Guests")
+            provider_counts(binary, client_dir, fixture, 0)
+            review(terminal, "Guest recent mail " + str(columns), binary, client_dir, fixture, 0)
+            entries = []
+            for path in (client_dir / "cache").rglob("calendar-state.json"):
+                document = json.loads(path.read_text())
+                if document.get("account") == ACCOUNTS[1]:
+                    entries += [entry["review"] for entry in document["entries"] if entry.get("review")]
+            reviewed = next(item for item in entries if item["intent"]["kind"] == "insert_event")
+            raw = json.dumps(reviewed)
+            require(person in raw and "typed@example.test" in raw, "review did not keep typed guest and add the recent recipient")
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "[Esc Cancel]" in terminal.text() and "Review new event" not in terminal.text())
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "Discard your unsaved event?" in terminal.text())
+            terminal.send(b"\x04")
+            wait_calendar(terminal)
+            with Client(binary, client_dir, extra=fixture.options()) as client:
+                require(not client.request("draft.list")["drafts"], "Calendar guest picker created a Mail draft")
+                require(provider_state(client, ACCOUNTS[1])["writes"] == 0, "recent-mail guest choice wrote destination Calendar")
+            provider_counts(binary, client_dir, fixture, 0)
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+    return {"writes": 0, "widths": [132, 48], "destinationAccount": True, "recentNotSaved": True,
+            "typedGuestPreserved": True, "reviewedOnly": True}
+
 def guest_fallback(binary, directory, captures):
     for columns, rows in ((132, 38), (48, 24)):
         for phase in ("empty", "unavailable"):
@@ -950,12 +1043,21 @@ def guest_fallback(binary, directory, captures):
                 open_new(terminal)
                 fill(terminal, "Guests", "manual@example.test")
                 open_guest_contacts(terminal)
+                if phase == "empty":
+                    # Cached recent mail may still list correspondents; prove
+                    # the empty address book with a query nothing matches.
+                    terminal.until(lambda: "Loading this account" not in terminal.text())
+                    terminal.send(b"zz-no-such-guest")
+                    # A loaded-list miss is not claimed as a Contacts miss.
+                    terminal.until(lambda: "No loaded match" in terminal.text() and "Ctrl+F Search Contacts" in terminal.text())
+                    terminal.send(b"\x06")
                 terminal.until(lambda: ("No matching contacts" if phase == "empty" else "Ctrl+R Retry") in terminal.text())
                 require("Or type email addresses in Guests." in terminal.text(), "narrow picker hid manual email fallback")
                 capture(terminal, captures, "compose-guests-" + phase + "-" + str(columns))
                 # Empty/disabled Add has no changing paint; do not require a
                 # new synchronized frame for each intermediate Tab stop.
-                terminal.send(b"\t\t\t\r")
+                # Search, results, [Search Contacts], Add, then Back.
+                terminal.send(b"\t\t\t\t\r")
                 terminal.until(lambda: "Add a guest from Contacts" not in terminal.text())
                 require("manual@example.test" in row_text(terminal, "Guests:"), "unavailable contact lookup changed typed guest")
                 terminal.send(b"\x1b")
@@ -972,6 +1074,217 @@ def guest_fallback(binary, directory, captures):
     return {"writes": 0, "widths": [132, 48], "states": ["empty", "unavailable"], "manualFallbackVisible": True,
             "typedGuestPreserved": True, "backKeyboard": True}
 
+def guest_search(binary, directory, captures):
+    """Ctrl+F routing beside loaded local matches, partial warnings, named guests.
+
+    The synthetic contacts fixture serves its whole address book to both
+    contacts.list and contacts.search, so this PTY case proves only the TUI
+    routing and display: the explicit search is dispatched and applied while
+    loaded matches are already shown. It makes no beyond-the-head claim. The
+    100-row head / 30-row search boundary is proven by the deterministic TUI
+    unit tests and by root's production Gmail dispatch test
+    (src/contact_isolation_tests.zig).
+    """
+    for columns, rows in ((132, 38), (48, 24)):
+        owned = directory / str(columns)
+        fixture = Invitations(owned)
+        (fixture.root / "contacts").mkdir()
+        def person(index, name, email):
+            return {"resourceName": "people/guest-search-%03d" % index, "etag": "guest-search-v%d" % index,
+                    "metadata": {"sources": [{"type": "CONTACT", "id": "guest-search-%03d" % index, "etag": "s%d" % index}]},
+                    "names": [{"displayName": name}], "emailAddresses": [{"value": email}]}
+        # One unreadable record (no resourceName) is omitted with a warning.
+        connections = [{"names": [{"displayName": "Unreadable fixture"}], "emailAddresses": [{"value": "unreadable@example.test"}]},
+                       person(0, "Morgan Beyond", "morgan.beyond@example.test"), person(1, "Robin Other", "robin.other@example.test")]
+        (fixture.root / "contacts" / "personal.json").write_text(json.dumps({"account": ACCOUNTS[0], "connections": connections}) + "\n")
+        client_dir = owned / "client"
+        with Client(binary, client_dir, extra=fixture.options()) as client:
+            head = client.request("contacts.list", ACCOUNTS[0])
+        omitted = head.get("contactWarnings", {}).get("omittedContacts", 0)
+        require(head.get("partial") is True and omitted >= 1, "fixture did not produce a successful partial contacts read")
+        terminal = start(binary, client_dir, fixture, columns=columns, rows=rows)
+        try:
+            open_new(terminal)
+            fill(terminal, "Guests", '"Typed, Person" <typed@example.test>')
+            open_guest_contacts(terminal)
+            terminal.until(lambda: "Loading this account" not in terminal.text())
+            # The successful-but-partial head says so on its own row.
+            terminal.until(lambda: "%d omitted" % omitted in terminal.text())
+            # Typing filters loaded data only: local matches, no search yet.
+            terminal.send(b"Morgan")
+            terminal.until(lambda: "Loaded matches · Ctrl+F Search Contacts" in terminal.text()
+                           and "morgan.beyond@example.test" in terminal.text())
+            require("Contacts search" not in terminal.text(), "typing applied a provider search")
+            provider_counts(binary, client_dir, fixture, 0)
+            # Ctrl+F dispatches and applies the explicit search beside them.
+            terminal.send(b"\x06")
+            terminal.until(lambda: "Contacts search + recent mail" in terminal.text() and "Searching" not in terminal.text())
+            require("morgan.beyond@example.test" in terminal.text() and "omitted" in terminal.text(),
+                    "search hid the selected match or the partial contacts warning")
+            capture(terminal, captures, "compose-guests-search-" + str(columns))
+            terminal.send(b"\r")
+            terminal.until(lambda: "Add a guest from Contacts" not in terminal.text())
+            require("morgan.beyond@example.test" in row_text(terminal, "Guests:"), "searched contact did not reach Guests")
+            fill(terminal, "Title", "Guest search " + str(columns))
+            review(terminal, "Guest search " + str(columns), binary, client_dir, fixture, 0)
+            entries = []
+            for path in (client_dir / "cache").rglob("calendar-state.json"):
+                document = json.loads(path.read_text())
+                if document.get("account") == ACCOUNTS[0]:
+                    entries += [entry["review"] for entry in document["entries"] if entry.get("review")]
+            raw = json.dumps(next(item for item in entries if item["intent"]["kind"] == "insert_event"))
+            require("morgan.beyond@example.test" in raw and "typed@example.test" in raw and "Typed, Person" not in raw,
+                    "review did not keep bare typed and searched guest emails")
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "Review new event" not in terminal.text())
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "Discard your unsaved event?" in terminal.text())
+            terminal.send(b"\x04")
+            wait_calendar(terminal)
+            provider_counts(binary, client_dir, fixture, 0)
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+    return {"writes": 0, "widths": [132, 48], "explicitSearchWithLocalMatches": True, "partialWarning": True,
+            "namedPaste": True, "headBoundary": "TUI unit + root production dispatch test, not this fixture"}
+
+
+def guest_grammar(binary, directory, captures):
+    fixture = Invitations(directory)
+    client_dir = directory / "client"
+    terminal = start(binary, client_dir, fixture, columns=132, rows=38)
+    title = "Fictional pasted guest list"
+    first, _ = new_dates(5)
+    try:
+        open_new(terminal)
+        ordinary_fields(terminal, title, first)
+        duplicate, invalid = "appears more than once", "Check guests"
+
+        def refused(raw, message, previous):
+            # Alternate messages so every refusal is newly observed.
+            fill(terminal, "Guests", raw)
+            terminal.send(b"\x13")
+            terminal.until(lambda: message in terminal.text() and previous not in terminal.text())
+            require("Review new event" not in terminal.text(), "a refused guest list reached Review")
+
+        # Ordinary Mail paste: a duplicate behind display names is refused.
+        refused('Jane <jane@example.test>, "Doe, Jane" <JANE@example.test>', duplicate, invalid)
+        # The field is one line (pasted line breaks become spaces); the shared
+        # grammar still refuses the injected header and a ';'-joined list.
+        refused('Jane <jane@example.test>\r\nBcc: hidden@example.test;', invalid, duplicate)
+        refused('Jane <jane@example.test>, JANE@example.test', duplicate, invalid)
+        refused('jane@example.test; alex@example.test', invalid, duplicate)
+        refused('Alex <alex@example.test>, ALEX@example.test', duplicate, invalid)
+        refused('Jane <jane@example.test>, not an email', invalid, duplicate)
+        provider_counts(binary, client_dir, fixture, 0)
+        fill(terminal, "Guests", '"Doe, Jane" <jane@example.test>, Alex Example <alex@example.test>')
+        review(terminal, title, binary, client_dir, fixture, 0)
+        require("email 2 guests" in terminal.text(), "named paste did not count two guests")
+        confirm(terminal, 1, binary, client_dir, fixture)
+        saved = find_saved(binary, client_dir, fixture, title)
+        require(sorted(entry["email"] for entry in saved["attendees"]) == ["alex@example.test", "jane@example.test"],
+                "provider did not receive exactly the bare guest emails")
+        leave_saved(terminal)
+        terminal.finish()
+        return {"writes": 1, "duplicateRefused": True, "invalidRefused": True, "injectionRefused": True,
+                "semicolonRefused": True, "bareEmails": True}
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
+def field_value(terminal, label):
+    row = row_text(terminal, label + ":")
+    require(row, "form field is not visible: " + label)
+    return row.split(label + ":", 1)[1].replace("▏", " ").split()[0]
+
+
+def shifted(day, days):
+    return (datetime.fromisoformat(day) + timedelta(days=days)).date().isoformat()
+
+
+def day_gap(start_day, end_day):
+    return (datetime.fromisoformat(end_day) - datetime.fromisoformat(start_day)).days
+
+
+def discard_new(terminal):
+    terminal.send(b"\x1b")
+    terminal.until(lambda: "Discard your unsaved event?" in terminal.text())
+    terminal.send(b"\x04")
+    wait_calendar(terminal)
+    terminal.send(b"n")
+    terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
+
+
+def end_follows(binary, directory, captures):
+    fixture = Invitations(directory)
+    client_dir = directory / "client"
+    terminal = start(binary, client_dir, fixture, columns=132, rows=38)
+    title = "Fictional moved start"
+    first, _ = new_dates(9)
+    try:
+        open_new(terminal)
+        fill(terminal, "Title", title)
+        fill(terminal, "Time zone", "UTC")
+        # Only Start fields are edited; End is observed, never filled. The
+        # default can cross midnight, so compare with its shown day gap.
+        gap = day_gap(field_value(terminal, "Start date"), field_value(terminal, "End date"))
+        fill(terminal, "Start date", first)
+        require(field_value(terminal, "End date") == shifted(first, gap), "untouched end date stayed behind the new start date")
+        fill(terminal, "Start time", "23:30")
+        overnight = shifted(first, 1)
+        require(field_value(terminal, "End date") == overnight and field_value(terminal, "End time") == "00:30",
+                "untouched one-hour end did not follow a late start")
+        # Ctrl+S immediately after the start edit reviews the followed end.
+        review(terminal, title, binary, client_dir, fixture, 0)
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "[Esc Cancel]" in terminal.text() and "Review new event" not in terminal.text())
+        # Back from review, End still follows; the repeated review saves it.
+        fill(terminal, "Start time", "22:00")
+        require(field_value(terminal, "End date") == first and field_value(terminal, "End time") == "23:00",
+                "end stopped following after returning from review")
+        review(terminal, title, binary, client_dir, fixture, 0, name="end-follows-repeated")
+        confirm(terminal, 1, binary, client_dir, fixture)
+        saved = find_saved(binary, client_dir, fixture, title)
+        require(saved["start"]["dateTime"].startswith(first + "T22:00:00") and saved["end"]["dateTime"].startswith(first + "T23:00:00"),
+                "start-only edits did not save the moved one-hour interval")
+        leave_saved(terminal)
+        # An end typed back to its own value is still explicit and stays put.
+        terminal.send(b"n")
+        terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
+        fill(terminal, "Title", title + " explicit")
+        kept_day, kept_time = field_value(terminal, "End date"), field_value(terminal, "End time")
+        fill(terminal, "End time", kept_time)
+        fill(terminal, "Start date", first)
+        require(field_value(terminal, "End date") == kept_day and field_value(terminal, "End time") == kept_time,
+                "an explicitly re-entered end moved with the start")
+        # All-day keeps its shown day count while Start moves.
+        discard_new(terminal)
+        gap = day_gap(field_value(terminal, "Start date"), field_value(terminal, "End date"))
+        toggle(terminal, "[ ] All day", "[x] All day")
+        fill(terminal, "Start date", first)
+        require(field_value(terminal, "Last date (included)") == shifted(first, gap), "all-day last date did not follow the start")
+        capture(terminal, captures, "compose-end-follows-all-day")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Discard your unsaved event?" in terminal.text())
+        terminal.send(b"\x04")
+        wait_calendar(terminal)
+        provider_counts(binary, client_dir, fixture, 1)
+        terminal.finish()
+        return {"writes": 1, "startOnly": True, "immediateReview": True, "repeatedReview": True,
+                "explicitEndKept": True, "allDayFollows": True}
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
 def main():
     global NO_COLOR
     parser = argparse.ArgumentParser(description=__doc__)
@@ -980,7 +1293,8 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--case", choices=("timed", "all-day", "link-guests", "cancel-narrow", "edit-latest", "fold-choice",
-                                          "google-meet", "html-notes-readonly", "edit-dst-review-twice", "removed-guests", "recovery-retry", "recovery-restart", "recovery-archive", "cancel-fresh", "guest-contacts", "guest-fallback"))
+                                          "google-meet", "html-notes-readonly", "edit-dst-review-twice", "removed-guests", "recovery-retry", "recovery-restart", "recovery-archive", "cancel-fresh", "guest-contacts", "guest-recent", "guest-fallback",
+                                          "guest-search", "guest-grammar", "end-follows"))
     args = parser.parse_args()
     NO_COLOR = args.no_color
     binary = args.binary.resolve()
@@ -990,7 +1304,8 @@ def main():
              ("google-meet", google_meet), ("html-notes-readonly", html_notes_readonly),
              ("edit-dst-review-twice", edit_dst_review_twice), ("removed-guests", removed_guests),
              ("recovery-retry", recovery_retry), ("recovery-restart", recovery_restart),
-             ("recovery-archive", recovery_archive), ("cancel-fresh", cancel_fresh), ("guest-contacts", guest_contacts), ("guest-fallback", guest_fallback))
+             ("recovery-archive", recovery_archive), ("cancel-fresh", cancel_fresh), ("guest-contacts", guest_contacts), ("guest-recent", guest_recent), ("guest-fallback", guest_fallback),
+             ("guest-search", guest_search), ("guest-grammar", guest_grammar), ("end-follows", end_follows))
     try:
         for name, task in tasks:
             if args.case and args.case != name:

@@ -231,7 +231,11 @@ test "vault storage: early staging refusals wipe the whole borrowed workspace" {
     @memset(&workspace.plaintext, 0xa5);
     @memset(&workspace.ciphertext, 0x5a);
     var source: Slice = .{ .bytes = "unused" };
-    try std.testing.expectError(error.VaultRecordTooLarge, fixture.directory.seal(&key, identity, t.max_record_bytes + 1, source.source(), &workspace, true));
+    try std.testing.expectError(error.VaultRecordTooLarge, fixture.directory.seal(&key, identity, t.max_stream_record_bytes + 1, source.source(), &workspace, true));
+    try std.testing.expectEqual(@as(usize, 0), source.offset);
+    var metadata = identity;
+    metadata.kind = .mail_body;
+    try std.testing.expectError(error.VaultRecordTooLarge, fixture.directory.seal(&key, metadata, t.max_record_bytes + 1, source.source(), &workspace, true));
     try std.testing.expectEqual(@as(usize, 0), source.offset);
     try zero(&workspace.plaintext);
     try zero(&workspace.ciphertext);
@@ -518,49 +522,50 @@ test "vault storage: push JSON serialization exports through an explicit private
     try std.testing.expectEqualStrings("{\"account\":\"synthetic@example.test\",\"message\":\"hello\"}", actual[0..size]);
 }
 
-test "vault storage: 50 MiB attachment push and verified read use one bounded workspace" {
+test "vault storage: 50 MiB and above-metadata-limit attachments use one bounded workspace" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     var key = try crypto.createDataKey(io);
     defer key.wipe();
     var workspace: t.StreamWorkspace = undefined;
-    const identity = try record();
-    const size = 50 * 1024 * 1024;
-    var block: [4093]u8 = @splat(0x6b);
-    var writer: stream.Writer = undefined;
-    try writer.init(&fixture.directory, &key, identity, size, &workspace, false, .{});
-    defer writer.deinit();
-    var left: usize = size;
-    while (left != 0) {
-        const count = @min(left, block.len);
-        try writer.interface.writeAll(block[0..count]);
-        left -= count;
+    for ([_]usize{ 50 * 1024 * 1024, t.max_record_bytes + 1 }) |size| {
+        const identity = try record();
+        var block: [4093]u8 = @splat(0x6b);
+        var writer: stream.Writer = undefined;
+        try writer.init(&fixture.directory, &key, identity, size, &workspace, false, .{});
+        defer writer.deinit();
+        var left: usize = size;
+        while (left != 0) {
+            const count = @min(left, block.len);
+            try writer.interface.writeAll(block[0..count]);
+            left -= count;
+        }
+        try writer.finish();
+        const Pattern = struct {
+            count: usize = 0,
+            committed: bool = false,
+            fn write(context: *anyopaque, bytes: []const u8) !void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                for (bytes) |byte| if (byte != 0x6b) return error.WrongAttachmentByte;
+                self.count += bytes.len;
+            }
+            fn commit(context: *anyopaque) !void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                self.committed = true;
+            }
+            fn abort(_: *anyopaque) void {}
+        };
+        var pattern: Pattern = .{};
+        var reader = try fixture.directory.reader(identity.handle);
+        defer reader.close();
+        try reader.exportVerified(&key, identity, .{ .context = &pattern, .writeFn = Pattern.write, .commitFn = Pattern.commit, .abortFn = Pattern.abort }, &workspace);
+        try std.testing.expectEqual(@as(usize, size), pattern.count);
+        try std.testing.expect(pattern.committed);
+        try zero(&workspace.plaintext);
+        try zero(&workspace.ciphertext);
+        try std.testing.expect(@sizeOf(stream.Writer) < 4096);
+        try std.testing.expect(@sizeOf(t.StreamWorkspace) == 128 * 1024);
     }
-    try writer.finish();
-    const Pattern = struct {
-        count: usize = 0,
-        committed: bool = false,
-        fn write(context: *anyopaque, bytes: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            for (bytes) |byte| if (byte != 0x6b) return error.WrongAttachmentByte;
-            self.count += bytes.len;
-        }
-        fn commit(context: *anyopaque) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.committed = true;
-        }
-        fn abort(_: *anyopaque) void {}
-    };
-    var pattern: Pattern = .{};
-    var reader = try fixture.directory.reader(identity.handle);
-    defer reader.close();
-    try reader.exportVerified(&key, identity, .{ .context = &pattern, .writeFn = Pattern.write, .commitFn = Pattern.commit, .abortFn = Pattern.abort }, &workspace);
-    try std.testing.expectEqual(@as(usize, size), pattern.count);
-    try std.testing.expect(pattern.committed);
-    try zero(&workspace.plaintext);
-    try zero(&workspace.ciphertext);
-    try std.testing.expect(@sizeOf(stream.Writer) < 4096);
-    try std.testing.expect(@sizeOf(t.StreamWorkspace) == 128 * 1024);
 }
 
 test "vault storage header: durable primary and backup preserve slots and wrong password cannot fallback" {

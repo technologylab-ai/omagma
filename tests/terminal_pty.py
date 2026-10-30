@@ -607,7 +607,17 @@ def exercise(terminal, action):
         # cells before issuing a separate, deliberate review action.
         terminal.gap(.05)
         terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text() and "Attachment 1: fixture attachment.bin" in terminal.text())
+        terminal.until(lambda: "Sending account:" in terminal.text() and "MIME:" in terminal.text()
+                       and "· exact" in terminal.text() and "[Back]" in terminal.text())
+        # The grouped delivery summary can put the file row below a24-line
+        # viewport. Observe the account first, then use the review's own scroll.
+        for _ in range(40):
+            if "Attachment 1: fixture attachment.bin" in terminal.text():
+                break
+            before = terminal.text()
+            terminal.send(b"j")
+            terminal.until(lambda: terminal.text() != before)
+        require("Attachment 1: fixture attachment.bin" in terminal.text(), "review scrolling lost the attachment")
         with Client(terminal.binary, terminal.directory) as client:
             drafts = client.request("draft.list")["drafts"]
             require(len(drafts) == 1, "attachment workflow created an extra draft")

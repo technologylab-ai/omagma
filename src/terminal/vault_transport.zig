@@ -16,13 +16,14 @@ pub const header_bytes = 16;
 // have a semantic generation independent of the application version: old
 // daemons reject this magic before any data operation can be dispatched.
 pub const magic = "OMAVIPC1";
-pub const execution_magic = "OMAVIPC2";
-pub const execution_protocol: u8 = 2;
+pub const execution_magic = "OMAVIPC3";
+pub const execution_protocol: u8 = 3;
+pub const progress_limit: usize = 1024;
 pub const mismatch_message = "Vault backend uses an incompatible execution protocol. Finish pending work and use the current executable to run omagma vault stop, omagma vault start, then omagma vault unlock; keep the existing vault and cache.";
 pub fn protectedKind(kind: Kind) bool {
     return switch (kind) {
         .execute, .unlock, .password_change, .recovery_change, .recover => true,
-        .lock, .status, .stop, .response => false,
+        .lock, .status, .stop, .response, .progress => false,
     };
 }
 pub fn errorMessage(err: anyerror) []const u8 {
@@ -32,7 +33,7 @@ pub fn requireExecutionProtocol(data: std.json.Value) !void {
     const generation = @import("json.zig").get(data, "executionProtocol") orelse return error.BackendProtocolMismatch;
     if (generation != .integer or generation.integer != execution_protocol) return error.BackendProtocolMismatch;
 }
-pub const Kind = enum(u8) { execute = 1, unlock = 2, lock = 3, status = 4, stop = 5, password_change = 6, recovery_change = 7, recover = 8, response = 128 };
+pub const Kind = enum(u8) { execute = 1, unlock = 2, lock = 3, status = 4, stop = 5, password_change = 6, recovery_change = 7, recover = 8, response = 128, progress = 129 };
 pub const Frame = struct {
     kind: Kind,
     generation: u8 = execution_protocol,
@@ -123,12 +124,12 @@ pub fn encodeHeader(kind: Kind, length: usize, limit: usize) ![header_bytes]u8 {
 }
 pub const Header = struct { kind: Kind, length: usize, generation: u8 };
 pub fn decodeHeader(bytes: *const [header_bytes]u8, limit: usize) !Header {
-    const generation: u8 = if (std.mem.eql(u8, bytes[0..8], execution_magic)) execution_protocol else if (std.mem.eql(u8, bytes[0..8], magic)) 1 else return error.InvalidBackendFrame;
+    const generation: u8 = if (std.mem.eql(u8, bytes[0..8], execution_magic)) execution_protocol else if (std.mem.eql(u8, bytes[0..8], magic)) 1 else if (std.mem.eql(u8, bytes[0..8], "OMAVIPC2")) 2 else return error.InvalidBackendFrame;
     if (bytes[9] != 0 or bytes[10] != 0 or bytes[11] != 0) return error.InvalidBackendFrame;
     const kind = std.enums.fromInt(Kind, bytes[8]) orelse return error.InvalidBackendFrame;
     if (!protectedKind(kind) and generation != 1) return error.InvalidBackendFrame;
     const length = std.mem.readInt(u32, bytes[12..16], .little);
-    if (length > limit) return error.BackendFrameTooLarge;
+    if (length > limit or (kind == .progress and length > progress_limit)) return error.BackendFrameTooLarge;
     if ((kind == .unlock or kind == .password_change) and (length == 0 or length > @import("vault_types.zig").max_password_bytes)) return error.InvalidVaultPassword;
     if (kind == .recovery_change and length != 32) return error.InvalidRecoveryKey;
     if (kind == .recover and (length <= 32 or length > 32 + @import("vault_types.zig").max_password_bytes)) return error.InvalidVaultPassword;
@@ -136,9 +137,9 @@ pub fn decodeHeader(bytes: *const [header_bytes]u8, limit: usize) !Header {
     return .{ .kind = kind, .length = length, .generation = generation };
 }
 pub fn readFrame(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, limit: usize) !Frame {
-    var read_buffer: [header_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &read_buffer);
-    var reader = stream.reader(io, &read_buffer);
+    // This helper owns exactly one frame. A temporary read-ahead buffer can
+    // consume the next progress/final header and discard it on return.
+    var reader = stream.reader(io, &.{});
     const memory = @import("send_memory.zig");
     return readFrameReader(&reader.interface, a, if (memory.native) memory.allocator() else a, limit);
 }
@@ -268,7 +269,7 @@ pub fn executionSeconds(command: []const u8) i64 {
     // durable identity commit. Lock interrupts this class explicitly.
     return if (std.mem.eql(u8, command, "auth.authorize")) 190 else @import("send_memory.zig").seconds(command);
 }
-pub const Metadata = struct { id: std.json.Value = .null, account: []const u8 = "", command: []const u8 = "", vault_id: []const u8 = "", secret_field: bool = false, reconcile: bool = false };
+pub const Metadata = struct { id: std.json.Value = .null, account: []const u8 = "", command: []const u8 = "", vault_id: []const u8 = "", secret_field: bool = false, reconcile: bool = false, progress: bool = false, cancel_disconnect: bool = false };
 /// Read only the envelope with fixed scratch. Large body/recipient arrays are
 /// skipped without allocating copies, including during an OOM error response.
 pub fn requestMetadata(a: std.mem.Allocator, raw: []const u8) !Metadata {
@@ -278,6 +279,8 @@ pub fn requestMetadata(a: std.mem.Allocator, raw: []const u8) !Metadata {
     if (try scanner.next() != .object_begin) return error.InvalidRequest;
     var result: Metadata = .{};
     var reconcile_seen = false;
+    var progress_seen = false;
+    var cancel_seen = false;
     while (true) {
         const key_token = try scanner.nextAllocMax(a, .alloc_if_needed, 128);
         if (key_token == .object_end) break;
@@ -296,6 +299,21 @@ pub fn requestMetadata(a: std.mem.Allocator, raw: []const u8) !Metadata {
                 .false => false,
                 else => return error.InvalidRequest,
             };
+        } else if (std.mem.eql(u8, key, "_progress") or std.mem.eql(u8, key, "_cancelOnDisconnect")) {
+            const is_progress = std.mem.eql(u8, key, "_progress");
+            if ((is_progress and progress_seen) or (!is_progress and cancel_seen)) return error.InvalidRequest;
+            const enabled = switch (try scanner.next()) {
+                .true => true,
+                .false => false,
+                else => return error.InvalidRequest,
+            };
+            if (is_progress) {
+                result.progress = enabled;
+                progress_seen = true;
+            } else {
+                result.cancel_disconnect = enabled;
+                cancel_seen = true;
+            }
         } else if (std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "account") or std.mem.eql(u8, key, "cmd") or std.mem.eql(u8, key, "_vaultId")) {
             const token = try scanner.nextAllocMax(a, .alloc_if_needed, 256);
             if (std.mem.eql(u8, key, "id")) {
@@ -353,7 +371,7 @@ pub const Client = struct {
     socket_path: []const u8,
     expected_vault_id: ?@import("vault_types.zig").Id = null,
     pub fn client(self: *Client) t.Client {
-        return .{ .ctx = self, .callFn = call, .cachedFn = cached };
+        return .{ .ctx = self, .callFn = call, .cachedFn = cached, .callProgressFn = callProgress };
     }
     fn call(context: *anyopaque, a: std.mem.Allocator, raw: []const u8) ![]const u8 {
         const self: *Client = @ptrCast(@alignCast(context));
@@ -369,6 +387,19 @@ pub const Client = struct {
             return failure(a, meta, report);
         };
     }
+    fn callProgress(context: *anyopaque, a: std.mem.Allocator, raw: []const u8, sink: t.ProgressSink) ![]const u8 {
+        const self: *Client = @ptrCast(@alignCast(context));
+        return self.executeWithProgress(a, raw, sink) catch |err| {
+            var scratch: [4096]u8 = undefined;
+            defer std.crypto.secureZero(u8, &scratch);
+            var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+            const meta = requestMetadata(fixed.allocator(), raw) catch Metadata{};
+            return failure(a, meta, switch (err) {
+                error.FileNotFound, error.ConnectionRefused => error.BackendRequired,
+                else => err,
+            });
+        };
+    }
     fn failure(a: std.mem.Allocator, meta: Metadata, report: anyerror) ![]const u8 {
         return @import("json.zig").encodeAlloc(a, .{ .version = @as(u8, 1), .id = meta.id, .ok = false, .account = meta.account, .@"error" = .{ .code = @errorName(report), .message = if (report == error.UnknownOutcome) "Outcome is unknown; do not automatically retry" else errorMessage(report) } }, .{}) catch |err| {
             // Allocation failure while reporting an admitted mutation must
@@ -377,21 +408,30 @@ pub const Client = struct {
         };
     }
     fn execute(self: *Client, a: std.mem.Allocator, raw: []const u8) ![]const u8 {
+        return self.executeWithProgress(a, raw, null);
+    }
+    fn executeWithProgress(self: *Client, a: std.mem.Allocator, raw: []const u8, sink: ?t.ProgressSink) ![]const u8 {
         var scratch: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &scratch);
         var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
         const meta = try requestMetadata(fixed.allocator(), raw);
         if (meta.secret_field) return error.VaultSecretRequiresPrompt;
-        const expected = self.expected_vault_id orelse return self.request(a, .execute, raw);
-        const hex = std.fmt.bytesToHex(expected, .lower);
-        if (meta.vault_id.len != 0 and !std.mem.eql(u8, meta.vault_id, &hex)) return error.VaultIdentityMismatch;
+        const cancel = cancellableSend(meta.command);
+        if (self.expected_vault_id == null and sink == null and !cancel) return self.request(a, .execute, raw);
         var arena: std.heap.ArenaAllocator = .init(a);
         defer arena.deinit();
         const temp = arena.allocator();
         var value = try std.json.parseFromSliceLeaky(std.json.Value, temp, raw, .{ .allocate = .alloc_if_needed, .max_value_len = request_limit });
-        try value.object.put(temp, "_vaultId", .{ .string = &hex });
-        return self.request(a, .execute, try @import("json.zig").encodeAlloc(temp, value, .{}));
+        if (self.expected_vault_id) |expected| {
+            const hex = std.fmt.bytesToHex(expected, .lower);
+            if (meta.vault_id.len != 0 and !std.mem.eql(u8, meta.vault_id, &hex)) return error.VaultIdentityMismatch;
+            try value.object.put(temp, "_vaultId", .{ .string = try temp.dupe(u8, &hex) });
+        }
+        if (sink != null) try value.object.put(temp, "_progress", .{ .bool = true });
+        if (cancel) try value.object.put(temp, "_cancelOnDisconnect", .{ .bool = true });
+        return self.requestProgress(a, .execute, try @import("json.zig").encodeAlloc(temp, value, .{}), sink);
     }
+
     fn cached(context: *anyopaque, a: std.mem.Allocator, raw: []const u8) ![]const u8 {
         var arena: std.heap.ArenaAllocator = .init(a);
         defer arena.deinit();
@@ -402,6 +442,9 @@ pub const Client = struct {
         return call(context, a, try std.json.Stringify.valueAlloc(arena.allocator(), copy, .{}));
     }
     pub fn request(self: *Client, a: std.mem.Allocator, kind: Kind, body: []const u8) ![]const u8 {
+        return self.requestProgress(a, kind, body, null);
+    }
+    fn requestProgress(self: *Client, a: std.mem.Allocator, kind: Kind, body: []const u8, sink: ?t.ProgressSink) ![]const u8 {
         var submitted = false;
         var response: ?[]const u8 = null;
         errdefer if (response) |bytes| {
@@ -412,24 +455,42 @@ pub const Client = struct {
         defer std.crypto.secureZero(u8, &scratch);
         var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
         const meta = if (kind == .execute) try requestMetadata(fixed.allocator(), body) else Metadata{};
-        const seconds = if (kind == .execute) executionSeconds(meta.command) + 15 else 45;
-        platform.deadline(self.io, platform.seconds(seconds), exchange, .{ self, a, kind, body, &submitted, &response }) catch |err| {
+        // Only transport waiting has this ceiling. The daemon retains the
+        // ordinary deadline unless its authoritative plan admits Drive.
+        const seconds = if (kind == .execute) (if (@import("send_budget.zig").eligible(meta.command)) @import("send_budget.zig").transport_seconds else executionSeconds(meta.command) + 15) else 45;
+        platform.deadline(self.io, platform.seconds(seconds), exchange, .{ self, a, kind, body, &submitted, &response, sink, meta.progress }) catch |err| {
             if (kind != .execute or !submitted) return err;
             return disconnectRequestError(meta);
         };
         return response.?;
     }
-    fn exchange(self: *Client, a: std.mem.Allocator, kind: Kind, body: []const u8, submitted: *bool, output: *?[]const u8) !void {
+    fn exchange(self: *Client, a: std.mem.Allocator, kind: Kind, body: []const u8, submitted: *bool, output: *?[]const u8, sink: ?t.ProgressSink, progress_allowed: bool) !void {
         _ = try decodeHeader(&(try encodeHeader(kind, body.len, request_limit)), request_limit);
         if (protectedKind(kind)) try self.checkExecutionProtocol(a);
         const stream = try self.connect();
         defer stream.close(self.io);
         submitted.* = true;
         try writeFrame(self.io, stream, kind, body, request_limit);
-        var response = try readFrame(self.io, a, stream, if (kind == .execute and @import("send_memory.zig").request(body)) response_limit else ordinary_response_limit);
-        errdefer response.deinit(a);
-        if (response.kind != .response) return error.InvalidBackendFrame;
-        output.* = response.body;
+        var progress_count: usize = 0;
+        while (true) {
+            var response = try readFrame(self.io, a, stream, if (kind == .execute and @import("send_memory.zig").request(body)) response_limit else ordinary_response_limit);
+            var returned = false;
+            defer if (!returned) response.deinit(a);
+            if (response.kind == .progress) {
+                progress_count += 1;
+                if (!progress_allowed or progress_count > 32768) return error.InvalidBackendFrame;
+                var scratch: [4096]u8 = undefined;
+                var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+                const progress = try std.json.parseFromSliceLeaky(t.FetchProgress, fixed.allocator(), response.body, .{});
+                try validateProgress(progress);
+                if (sink) |target| target.report(progress);
+                continue;
+            }
+            if (response.kind != .response) return error.InvalidBackendFrame;
+            output.* = response.body;
+            returned = true;
+            return;
+        }
     }
     fn checkExecutionProtocol(self: *Client, a: std.mem.Allocator) !void {
         const stream = try self.connect();
@@ -799,7 +860,7 @@ test "vault protocol: daemon swap after preflight still cannot dispatch new sema
                 var frame = try readFrame(peer_io, test_allocator.allocator, stream, request_limit);
                 defer frame.deinit(test_allocator.allocator);
                 try std.testing.expectEqual(Kind.status, frame.kind);
-                try writeFrame(peer_io, stream, .response, "{\"ok\":true,\"data\":{\"executionProtocol\":2}}", response_limit);
+                try writeFrame(peer_io, stream, .response, "{\"ok\":true,\"data\":{\"executionProtocol\":3}}", response_limit);
             }
             // The next connection is handled using the old daemon's exact
             // magic check, as if it replaced the daemon after status returned.
@@ -808,8 +869,8 @@ test "vault protocol: daemon swap after preflight still cannot dispatch new sema
             var input = stream.reader(peer_io, &.{});
             var header: [header_bytes]u8 = undefined;
             try input.interface.readSliceAll(&header);
-            if (std.mem.eql(u8, header[0..8], "OMAVIPC1")) _ = dispatches.fetchAdd(1, .release);
-            try std.testing.expectEqualStrings("OMAVIPC2", header[0..8]);
+            if (std.mem.eql(u8, header[0..8], "OMAVIPC2")) _ = dispatches.fetchAdd(1, .release);
+            try std.testing.expectEqualStrings("OMAVIPC3", header[0..8]);
             try std.testing.expectEqual(@as(u8, 1), header[8]);
         }
     };
@@ -823,4 +884,57 @@ test "vault protocol: daemon swap after preflight still cannot dispatch new sema
     try std.testing.expectError(error.UnknownOutcome, client.request(a, .execute, "{\"cmd\":\"draft.send\"}"));
     try peer.await(io);
     try std.testing.expectEqual(@as(usize, 0), dispatches.load(.acquire));
+}
+
+fn cancellableSend(command: []const u8) bool {
+    for ([_][]const u8{ "mail.send", "draft.send", "queue.process", "queue.send-now" }) |name| if (std.mem.eql(u8, command, name)) return true;
+    return false;
+}
+pub fn validateProgress(progress: t.FetchProgress) !void {
+    if (progress.completed > progress.total or progress.total > t.Limits.disk_hard) return error.InvalidBackendFrame;
+    if (progress.fileIndex) |index| if (index >= t.Limits.attachments) return error.InvalidBackendFrame;
+    if (progress.fileCount) |count| if (count > @import("attachment_delivery.zig").max_drive_files) return error.InvalidBackendFrame;
+}
+
+test "vault protocol: V2 execution is drained without allocating its payload" {
+    const body = "{\"id\":\"v2-attach\",\"cmd\":\"mail.send\",\"draft\":{\"attachments\":[{\"delivery\":\"drive\"}]}}";
+    var wire: [header_bytes + body.len]u8 = undefined;
+    @memcpy(wire[0..header_bytes], &(try encodeHeader(.execute, body.len, request_limit)));
+    @memcpy(wire[0..8], "OMAVIPC2");
+    @memcpy(wire[header_bytes..], body);
+    var reader: std.Io.Reader = .fixed(&wire);
+    var scratch: [1024]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+    var frame = try readFrameReader(&reader, fixed.allocator(), std.testing.failing_allocator, request_limit);
+    defer frame.deinit(fixed.allocator());
+    try std.testing.expectEqual(@as(u8, 2), frame.generation);
+    try std.testing.expect(std.mem.indexOf(u8, frame.body, "attachments") == null);
+    try std.testing.expect(std.mem.indexOf(u8, frame.body, "v2-attach") != null);
+    try std.testing.expectError(error.EndOfStream, reader.takeByte());
+}
+
+test "vault protocol: progress admission is strict and oversized frames allocate nothing" {
+    for ([_][]const u8{
+        "{\"cmd\":\"mail.send\",\"_progress\":1}",
+        "{\"cmd\":\"mail.send\",\"_cancelOnDisconnect\":\"true\"}",
+        "{\"_progress\":true,\"_progress\":false}",
+        "{\"_cancelOnDisconnect\":false,\"_cancelOnDisconnect\":true}",
+    }) |raw| {
+        var scratch: [4096]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+        try std.testing.expectError(error.InvalidRequest, requestMetadata(fixed.allocator(), raw));
+    }
+    var scratch: [4096]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+    const meta = try requestMetadata(fixed.allocator(), "{\"cmd\":\"draft.send\",\"_progress\":true,\"_cancelOnDisconnect\":true}");
+    try std.testing.expect(meta.progress and meta.cancel_disconnect);
+    const header = try encodeHeader(.progress, progress_limit + 1, response_limit);
+    var reader: std.Io.Reader = .fixed(&header);
+    try std.testing.expectError(error.BackendFrameTooLarge, readFrameReader(&reader, std.testing.failing_allocator, std.testing.failing_allocator, response_limit));
+    try validateProgress(.{ .phase = .drive_uploading, .completed = 4096, .total = 8192, .fileIndex = 100, .fileCount = 16 });
+    try std.testing.expectError(error.InvalidBackendFrame, validateProgress(.{ .phase = .drive_uploading, .completed = 2, .total = 1 }));
+    try std.testing.expectError(error.InvalidBackendFrame, validateProgress(.{ .phase = .drive_uploading, .completed = 0, .total = t.Limits.disk_hard + 1 }));
+    try std.testing.expectError(error.InvalidBackendFrame, validateProgress(.{ .phase = .drive_uploading, .completed = 0, .total = 1, .fileIndex = t.Limits.attachments }));
+    try std.testing.expectError(error.InvalidBackendFrame, validateProgress(.{ .phase = .drive_uploading, .completed = 0, .total = 1, .fileCount = 17 }));
+    try std.testing.expect(cancellableSend("draft.send") and !cancellableSend("draft.gmail-push") and !cancellableSend("mail.modify"));
 }

@@ -4,6 +4,7 @@ const j = @import("json.zig");
 const core = @import("core.zig");
 const help_info = @import("cli_help.zig");
 const files = @import("files.zig");
+const cli_files = @import("cli_files.zig");
 const CappedAllocator = @import("capped_allocator.zig").CappedAllocator;
 const HtmlMetrics = struct {
     htmlDocumentBuilds: u64,
@@ -30,7 +31,27 @@ pub fn discovery(io: std.Io, a: std.mem.Allocator, mode: []const u8, args: *std.
         if (!knownVerb(mode, verb)) return error.UnknownCommand;
         operation = verb;
     }
-    return helpBeforeInput(io, a, mode, operation, &scan);
+    if (try helpBeforeInput(io, a, mode, operation, &scan)) return true;
+    const command = if (operation) |verb|
+        help_info.jsonAlias(mode, verb) orelse try std.fmt.allocPrint(a, "{s}.{s}", .{ help_info.jsonFamily(mode), verb })
+    else
+        "";
+    try attachmentScopeBeforeRouting(command, &scan);
+    return false;
+}
+
+/// Wrong-command file flags must win over an invalid vault activation too.
+/// This scan borrows argv only; value strings are never interpreted as flags.
+fn attachmentScopeBeforeRouting(command: []const u8, args: *std.process.Args.Iterator) !void {
+    var scan = args.*;
+    while (scan.next()) |arg| {
+        if (valueOption(arg)) {
+            if (!scan.skip()) return error.ValueRequired;
+            if ((eq(arg, "--attach-file") or eq(arg, "--upload-file") or eq(arg, "--file") or eq(arg, "--attachment-mode")) and !draftSourceCommand(command)) return error.AttachmentsRequireDraftSource;
+        } else if (eq(arg, "--dry-run")) {
+            if (!draftSourceCommand(command)) return error.DryRunRequiresDraftSource;
+        } else if (!booleanOption(arg)) return;
+    }
 }
 
 pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
@@ -50,6 +71,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     var has_draft = false;
     var source_format: ?[]const u8 = null;
     var attachment_paths: std.ArrayList([]const u8) = .empty;
+    var attachment_sources: std.ArrayList(cli_files.Source) = .empty;
+    var attachment_mode: ?t.AttachmentDelivery = null;
+    var dry_run = false;
     var send_delay: ?i64 = null;
     var browser_preview = false;
     const interactive = std.mem.eql(u8, mode, "tui");
@@ -117,6 +141,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             continue;
         }
         if (eq(arg, "--json")) continue;
+        if (eq(arg, "--dry-run")) {
+            if (!draftSourceCommand(j.text(req, "cmd"))) return error.DryRunRequiresDraftSource;
+            dry_run = true;
+            continue;
+        }
         if (eq(arg, "--browser")) {
             if (interactive or jsonl) return error.BrowserRequiresPreview;
             browser_preview = true;
@@ -241,11 +270,17 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else if (eq(arg, "--body")) {
             try draft.object.put(sa, "bodyText", .{ .string = v });
             has_draft = true;
-        } else if (eq(arg, "--attach-file")) {
-            if (interactive or jsonl) return error.AttachmentsRequireDraftSource;
+        } else if (eq(arg, "--attach-file") or eq(arg, "--upload-file") or eq(arg, "--file")) {
+            if (!draftSourceCommand(j.text(req, "cmd"))) return error.AttachmentsRequireDraftSource;
             if (attachment_paths.items.len == @import("types.zig").Limits.attachments) return error.TooManyAttachments;
             try attachment_paths.append(sa, v);
+            try attachment_sources.append(sa, if (eq(arg, "--attach-file")) .attach_file else if (eq(arg, "--upload-file")) .upload_file else .file);
             has_draft = true;
+        } else if (eq(arg, "--attachment-mode")) {
+            if (!draftSourceCommand(j.text(req, "cmd"))) return error.AttachmentsRequireDraftSource;
+            const chosen = try cli_files.parseMode(v);
+            if (attachment_mode) |prior| if (prior != chosen) return error.ConflictingAttachmentMode;
+            attachment_mode = chosen;
         } else if (eq(arg, "--body-file")) {
             const body = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.compose_body_bytes);
             try draft.object.put(sa, "bodyText", .{ .string = body });
@@ -278,6 +313,25 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "draft", formatted);
         } else return error.FormatRequiresComposeCommand;
     }
+    const resolved_files = try cli_files.resolve(io, sa, attachment_paths.items, attachment_sources.items, attachment_mode);
+    if (dry_run) {
+        if (!draftSourceCommand(j.text(req, "cmd"))) return error.DryRunRequiresDraftSource;
+        if (browser_preview or req.object.get("draft") == null) return error.DryRunRequiresDraftSource;
+        // Local file metadata only: no session, vault, credentials, blob
+        // import or provider request. The reply is the same JSON plan shape.
+        const planned = try @import("attachment_dry_run.zig").run(io, sa, req, resolved_files.paths, resolved_files.deliveries);
+        var dry_buffer: [4096]u8 = undefined;
+        var dry_output = std.Io.File.stdout().writer(io, &dry_buffer);
+        try dry_output.interface.writeAll(planned);
+        try dry_output.interface.writeByte('\n');
+        try dry_output.interface.flush();
+        const parsed = try std.json.parseFromSliceLeaky(j.Value, sa, planned, .{});
+        if (!try j.boolean(parsed, "ok", false)) return error.CommandFailed;
+        return;
+    }
+    // Printed authorization hints repeat an explicit --backend; an
+    // auto-activated vault is found again without one.
+    options.backend_socket = backend_path;
     const activation = if (!options.fixtures and backend_path == null) try @import("vault_activation.zig").load(io, sa, init.environ_map) else null;
     if (activation) |selected| {
         // An active encrypted store is an explicit persistent choice. Never
@@ -311,7 +365,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &output_buffer);
     if (!jsonl) {
-        const reply = try @import("cli_plan.zig").execute(io, sa, client, req, .{ .attachments = attachment_paths.items, .send_delay = send_delay, .browser = browser_preview });
+        const reply = try @import("cli_plan.zig").execute(io, sa, client, req, .{ .attachments = resolved_files.paths, .deliveries = resolved_files.deliveries, .forced = resolved_files.forced, .backend_socket = options.backend_socket, .config_file = options.config_file, .grant_file = options.grant_file, .send_delay = send_delay, .browser = browser_preview });
         try output.interface.writeAll(reply);
         try output.interface.writeByte('\n');
         try output.interface.flush();
@@ -403,8 +457,11 @@ fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation
     return false;
 }
 fn booleanOption(arg: []const u8) bool {
-    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only" }) |flag| if (eq(arg, flag)) return true;
+    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only", "--dry-run" }) |flag| if (eq(arg, flag)) return true;
     return false;
+}
+fn draftSourceCommand(command: []const u8) bool {
+    return eq(command, "mail.send") or eq(command, "draft.create") or eq(command, "draft.update") or eq(command, "draft.preview");
 }
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
@@ -429,7 +486,7 @@ fn valueOption(arg: []const u8) bool {
         "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
         "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
         "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
-        "--send-delay",        "--delay-seconds",    "--next-attempt",
+        "--send-delay",        "--delay-seconds",    "--next-attempt",         "--upload-file",   "--file",         "--attachment-mode",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }

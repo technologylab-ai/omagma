@@ -31,6 +31,7 @@ smaller reading, composition, organization and agent workflow details.
 | [Calendar permissions](CALENDAR-PERMISSIONS.md) | Optional access per account and Google setup for reading, creating and updating events |
 | [Encrypted vault and daemon](ENCRYPTION.md) | Optional encrypted persistence, app-password unlock, native daemon and agent/SSH access |
 | [Agent CLI](AGENT-CLI.md) | Structured commands, account selection, cache/server search, drafts, receipts and CLI/TUI coverage |
+| [Omagma usage skill](../skills/omagma/SKILL.md) | Agent guidance for an existing installation, progressive discovery, attachment delivery and mutation receipts |
 | [Browser WebAssembly](../web-demo/README.md) | Optional source build, local server, existing-account connection and supported browser workflows |
 | [Updates](UPDATES.md) | Daily release notices, dismissal and installation-specific Omarchy/Homebrew/manual upgrade guidance |
 | [Bar background refresh](BACKGROUND-REFRESH.md) | Configure periodic checking while the dropdown is closed |

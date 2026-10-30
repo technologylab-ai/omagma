@@ -49,6 +49,7 @@ VALUE_FLAGS = (
     "--limit", "--cursor", "--query", "--label", "--thread-id", "--draft-id", "--attachment-id",
     "--operation-id", "--status", "--to", "--cc", "--bcc", "--subject", "--body", "--attach-file",
     "--body-file", "--draft-file", "--contact-file", "--expected-etag", "--add-label", "--remove-label",
+    "--upload-file", "--file", "--attachment-mode",
 )
 
 
@@ -131,6 +132,54 @@ def options(runner):
         require(result.returncode != 0 and result.stdout == b"" and b"omagma: InvalidRequest" in result.stderr,
                 "misplaced RSVP-only override was not rejected before account/configuration access")
     require(not list((runner.directory / "cache").iterdir()), "unknown/missing option initialized an account cache")
+
+
+def file_option_guidance(runner):
+    missing = str(runner.directory / "missing-file-never-opened")
+    for prefix in (["mail", "read"], ["draft", "send"], ["queue", "resume"], ["cli"], ["tui"]):
+        for flag in ("--attach-file", "--upload-file", "--file", "--attachment-mode"):
+            value = "auto" if flag == "--attachment-mode" else missing
+            for context in ([], ["--config", str(runner.invalid_config)]):
+                runner.usage([*prefix, *context, flag, value], "AttachmentsRequireDraftSource", without_home=True)
+        runner.usage([*prefix, "--dry-run"], "DryRunRequiresDraftSource", without_home=True)
+    for flag in ("--attach-file", "--upload-file", "--file", "--attachment-mode"):
+        runner.usage(["mail", "read", flag], "ValueRequired", without_home=True)
+        result = runner.run(["mail", "read", flag, missing, "--help"], without_configuration=True)
+        require(result.returncode == 0 and b"--message-id" in result.stdout and not result.stderr,
+                "misplaced file flags preempted credential-free help")
+    runner.usage(["mail", "send", "--attachment-mode", "invalid"], "InvalidAttachmentMode", without_home=True)
+    runner.usage(["mail", "send", "--attachment-mode", "auto"], "AttachmentModeRequiresFile", without_home=True)
+    runner.usage(["mail", "send", "--attachment-mode", "auto", "--upload-file", missing],
+                 "AttachmentModeRequiresFile", without_home=True)
+    runner.usage(["mail", "send", "--attachment-mode", "auto", "--attachment-mode", "drive"],
+                 "ConflictingAttachmentMode", without_home=True)
+    existing = runner.directory / "existing-file.txt"
+    existing.write_text("Synthetic attachment\n")
+    runner.usage(["mail", "send", "--file", str(existing), "--file", str(existing)],
+                 "DuplicateAttachmentFile", without_home=True)
+    runner.usage(["mail", "send", "--attach-file", str(existing), "--upload-file", str(existing)],
+                 "ConflictingAttachmentDelivery", without_home=True)
+    saved_blob = runner.directory / "saved-blob-draft.json"
+    saved_blob.write_text(json.dumps({"to": [{"address": "friend@example.org"}], "subject": "Saved source",
+                                     "bodyText": "Hello", "attachments": [{"id": "saved-file", "filename": "saved.txt",
+                                     "mimeType": "text/plain", "size": 1, "blobId": "a" * 64}]}))
+    runner.usage(["mail", "send", "--account", "personal@example.com", "--draft-file", str(saved_blob), "--dry-run"],
+                 "DryRunRequiresLocalFiles", without_home=True)
+    marker = runner.directory / "config" / "omagma" / "native-vault.json"
+    marker.parent.mkdir(mode=0o700, exist_ok=True)
+    marker.write_text("not a vault routing marker\n")
+    marker.chmod(0o600)
+    try:
+        for flag, value in (("--attach-file", missing), ("--upload-file", missing),
+                            ("--file", missing), ("--attachment-mode", "auto")):
+            runner.usage(["mail", "read", flag, value], "AttachmentsRequireDraftSource", without_home=True)
+        runner.usage(["mail", "read", "--dry-run"], "DryRunRequiresDraftSource", without_home=True)
+        result = runner.run(["mail", "read", "--upload-file", missing, "--help"], without_home=True)
+        require(result.returncode == 0 and b"--message-id" in result.stdout and not result.stderr,
+                "invalid vault routing hid scoped help")
+    finally:
+        marker.unlink()
+    require(not list((runner.directory / "cache").iterdir()), "misplaced file flags initialized an account cache")
 
 
 def help_paths(runner):
@@ -232,6 +281,21 @@ def help_paths(runner):
     full = runner.run(["--help-all"], without_home=True)
     require(full.returncode == 0 and b"recipients" in full.stdout and b"draft preview" in full.stdout,
             "extended help is unavailable without configuration")
+    # File delivery flags appear only where a draft source is assembled.
+    for arguments in (["--help"], ["mail", "--help"], ["mail", "read", "--help"], ["draft", "send", "--help"]):
+        require(b"--upload-file" not in runner.run(arguments, without_home=True).stdout,
+                "file delivery flags leaked outside draft-source help")
+    for family, verb in (("mail", "send"), ("mail", "compose"), ("draft", "create"), ("draft", "update"), ("draft", "preview")):
+        text = runner.run([family, verb, "--help"], without_home=True).stdout
+        require(all(value in text for value in (b"Files (", b"--attach-file FILE", b"--upload-file FILE",
+                                                b"--attachment-mode attach|auto|drive", b"--dry-run",
+                                                b"Bcc with Drive is refused", b"drive-upload")),
+                f"{family}/{verb} help omitted file delivery choices or their sharing consequences")
+    require(b"Update replaces every editable field" in runner.run(["draft", "update", "--help"], without_home=True).stdout,
+            "draft update help did not warn that file flags replace the saved draft")
+    sending = runner.run(["draft", "send", "--help"], without_home=True).stdout
+    require(b"draft.delivery-plan" in sending and b"canRetryPreparation" in sending and b"drive-upload" in sending,
+            "saved-draft send help omitted its Drive plan, grant or explicit retry path")
 
 
 PUBLIC_JSONL = set("""
@@ -245,7 +309,7 @@ cache.stats cache.clear cache.activity cache.refresh-status
 browser.open auth.status auth.authorize auth.revoke
 draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
 draft.discard draft.send draft.queue
-draft.clone draft.measure history.delete-source history.drafts history.operations history.queues
+draft.clone draft.measure draft.delivery-plan draft.selection-plan history.delete-source history.drafts history.operations history.queues
 draft.gmail-info draft.gmail-save draft.gmail-status draft.gmail-take-back draft.gmail-import
 queue.list queue.read queue.cancel queue.resume queue.process queue.send-now
 attachment.import attachment.discard attachment.open
@@ -373,6 +437,18 @@ def help_examples(runner):
         result = runner.run([*argv, *common])
         require(result.returncode == 0 and json.loads(result.stdout)["ok"],
                 f"printed {family}/{verb} shell example is not executable")
+    # The send example is a --dry-run: it plans local files offline and sends nothing.
+    text = runner.run(["mail", "send", "--help"], without_home=True).stdout.decode()
+    argv = shlex.split(text.split("Shell example", 1)[1].splitlines()[1].strip())
+    require(argv[:3] == ["omagma", "mail", "send"] and argv[-1] == "--dry-run",
+            "printed send example is not a non-sending dry run")
+    for name, data in (("note.md", b"Quarterly report attached.\n"), ("report.pdf", b"%PDF-synthetic\n")):
+        (runner.directory / name).write_bytes(data)
+    result = runner.run(argv[1:], without_home=True)
+    planned = json.loads(result.stdout)
+    require(result.returncode == 0 and planned["ok"] and planned["data"]["dryRun"]
+            and planned["data"]["status"] == "planned",
+            "printed send dry-run example is not executable offline")
 
 
 def protocol(runner):
@@ -482,7 +558,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
-        for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
+        for name, exercise in (("guidance", guidance), ("options", options), ("file-option-guidance", file_option_guidance), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
                                ("protocol", protocol), ("rsvp-contract", rsvp_contract),
                                ("version", lambda runner: version(runner, info["appVersion"]))):
             try:

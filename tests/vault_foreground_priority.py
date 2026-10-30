@@ -45,7 +45,7 @@ MAGIC = b"OMAVIPC1"
 
 
 class Service:
-    def __init__(self, binary, directory, parent_env):
+    def __init__(self, binary, directory, parent_env, scenario=None):
         from vault_daemon import PASSWORD, displayed_recovery, prompt
 
         self.binary, self.root = binary, directory
@@ -70,7 +70,8 @@ class Service:
         try:
             self.daemon = subprocess.Popen(
                 [str(binary), "vault", "serve", "--fixtures", "--vault-dir", str(self.vault),
-                 "--socket", str(self.backend), "--fixture-root", str(self.source.root)],
+                 "--socket", str(self.backend), "--fixture-root", str(self.source.root),
+                 *(["--fixture-scenario", scenario] if scenario else [])],
                 env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             deadline = time.monotonic() + 10
             while not self.backend.exists():
@@ -118,7 +119,7 @@ class Service:
         peer.settimeout(10)
         peer.connect(str(self.backend))
         raw = json.dumps(dict(id="owned-refresh", cmd=command, account=ACCOUNTS[0], **fields)).encode()
-        peer.sendall(b"OMAVIPC2" + bytes([1, 0, 0, 0]) + struct.pack("<I", len(raw)) + raw)
+        peer.sendall(b"OMAVIPC3" + bytes([1, 0, 0, 0]) + struct.pack("<I", len(raw)) + raw)
         return peer
 
     def gate(self, completed=None):

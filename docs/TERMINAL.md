@@ -111,6 +111,14 @@ automatic checking off. All controls support Tab/Shift+Tab, Enter and mouse.
 The guide follows your actual Omarchy, Homebrew, source or manual installation.
 See [updating Omagma](UPDATES.md) for the procedures and shared CLI commands.
 
+`:version` shows the version compiled into the TUI you are using, for example
+**Running Omagma 0.2.15 in this TUI**, then returns to your mailbox, draft or
+contacts unchanged. An upgrade replaces the installed program, not a TUI that
+is already open, so `:version` keeps reporting the older version until you
+restart it. Restart open TUIs after upgrading. The command does no network,
+account or release check and does not read the installed file. Search `?` help
+for *version* to find it.
+
 ## Received message views
 
 The reader initially prefers a nonempty plain-text MIME alternative. Press `p` in the reader to switch between **Plain** and **Formatted** for that message, including messages with a weak plain alternative. `:received plain`, `:received formatted` and `:received auto` select the mode explicitly. The choice follows that message through an in-session refresh or thread-window change; the last 32 explicit message choices are remembered in that session. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use your chosen TUI palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
@@ -350,8 +358,57 @@ checkbox click marks files; marks remain when you visit another folder. Attach
 imports the complete selected set, or the focused file if none is marked.
 Space in Path remains filename text. Tab/Shift+Tab reaches the controls and
 Enter activates them; Ctrl+O goes to the parent folder, Ctrl+G to Home and
-Ctrl+T toggles hidden files. Oversized sets are refused before partially
-attaching them so you can correct the choice.
+Ctrl+T toggles hidden files. A selection that would exceed the attachment
+limit opens **Too large to attach** before anything is imported: **Auto (a)**
+(initial focus) attaches what fits and shares the rest from Drive, **Drive all
+(d)** shares every new file from Drive, **Keep (k)** adds them as attachments
+while sending stays blocked, and **Cancel**/Esc returns to the browser with its
+marks. The choice applies only to the new files.
+
+### Google Drive delivery
+
+Each file row has a fixed-width delivery button before **[x]**: `Attach`,
+`Auto → attach`, `Auto → Drive` or `Drive` (narrow: `Att`, `Auto›Att`,
+`Auto›Drv`, `Drv`). Enter or a click cycles Attach → Auto → Drive.
+**[Upload all]**, left of **[Add A]**, sets every file to Drive. Tab order is
+Body → [Upload all] → [Add A] → each row's delivery button then [x] →
+[Connect Drive] (when shown) → the remaining controls. There are no new
+letter or Ctrl shortcuts; Ctrl+B stays reserved.
+
+Changing delivery, saving, previewing and reviewing never upload anything.
+The header and the one-line warning show the backend's plan for the saved
+draft, for example `Attachments 3 · 8.1 MiB / 25 MiB · message 11.4 MiB /
+35 MiB · Drive 1/16`. The review groups attached and Drive files, lists every
+viewer, and becomes **Can't send yet** without a Send button when Bcc is used
+with Drive, Drive is not connected or unsupported, Drive files have no To/Cc,
+either size limit is exceeded or more than 16 Drive files are chosen. **Connect
+Drive** shows the exact `omagma terminal-auth authorize` command for this
+account with every current capability plus `drive-upload`; run it, then choose
+Connect Drive again to re-check. Drive files are uploaded privately and shared
+viewer-only with To and Cc only after the send countdown.
+
+Before importing, the file browser asks the backend to plan the selection
+locally (no import or network); its summary shows ` · message ≈x / 35 MiB`.
+**Too large to attach** opens when either limit would be exceeded and shows
+the Auto split. A selection is added to the draft only after every selected
+file has imported. Narrow composers (under 72 columns) show each file on two
+lines and wrap the warning. Rows show `· uploaded` for a reused Drive upload
+and `· new copy` when a file was shared earlier with different recipients;
+the review then says a new private copy is shared and the earlier one stays
+shared.
+
+During a Drive send the countdown reads `Sending in Ns · uploads start when
+the countdown ends`. A **Sending** panel then lists each file (`uploading N%`,
+`uploaded · private`, `sharing k of n`, `shared with N`) and the message
+(`waits for uploads`, `submitting`). **[Cancel send]** (Tab, Enter; Esc and
+Ctrl+Z also open it) asks "Stop sending?" with **Keep sending** focused; Stop
+works until Gmail submission. Ctrl+C keeps its existing protected behaviour.
+A stopped or failed preparation shows **Message not sent** with per-file
+receipts (`uploaded · private`, `shared with …`, `sharing with … unconfirmed`)
+and **[Retry preparation]** (same operation; initial focus), **[Edit draft]**
+and **[Stop]**, plus **[Connect Drive]** when access expired. Nothing retries
+automatically. If Gmail did not confirm the message, the receipts are listed
+with no retry; use the existing outcome check.
 
 `:detach NUMBER` or its **[x]** removes a file. The list shows selected count,
 individual sizes and the 25 MiB decoded budget shared with included original
@@ -519,7 +576,11 @@ last date is inclusive; the provider's exclusive end is handled automatically.
 Choose Google Meet to generate a video link, or paste an HTTPS link from another
 meeting service. Added guests receive invitations only after the explicit
 review and confirmation; changes to existing guests require a notification
-choice. `Ctrl+S` opens the review, and `y` confirms after its complete contents
+choice. Guests accept the same address-list paste as Mail (`Name <email>`,
+quoted commas) and are saved as bare emails. In the guest picker, `Ctrl+F`
+explicitly searches the destination account's Contacts beyond the loaded list.
+Moving Start also moves an End you have not edited, keeping the interval; an
+edited End stays. `Ctrl+S` opens the review, and `y` confirms after its complete contents
 have been read. Recurring edits affect the selected occurrence. Skipped DST
 times are refused; repeated times offer an explicit first/second occurrence.
 See [creating and editing events](CALENDAR-EVENTS.md) for permissions,
@@ -571,8 +632,10 @@ applying it again, including after restart. Do not resubmit the event to resolve
 an unknown result.
 
 Calendar access requires optional Google permissions. The missing-permission
-screen can copy an authorization command retaining existing capabilities; it
-does not start consent automatically. See [Calendar permissions and account
+screen can copy an authorization command retaining existing capabilities and
+any explicit `--backend`, `--config` or `--grant-file` routing; if the current
+capabilities cannot be read, it copies the status check instead of guessing a
+list. It does not start consent automatically. See [Calendar permissions and account
 setup](CALENDAR-PERMISSIONS.md) for scope choices and Google Console steps.
 Retained offline views show their stale state and cannot establish availability
 or authorize a calendar change. Event details show the display timezone and
@@ -621,8 +684,9 @@ A copied Teams/Zoom join link alone has no organizer/attendee scheduling identit
 
 File popups keep the current draft or reader underneath. Printable `q`, `j`,
 `k` and Space remain filename text while Path has focus; the Listing has its
-own selection controls. In the composer, Tab continues from Body to Add and
-each file's `[x]`; Enter activates Add/removal, `x` removes the focused file,
+own selection controls. In the composer, Tab continues from Body to Upload all,
+Add, then each file's delivery button and `[x]`; Enter activates the focused
+control, `x` removes the focused file,
 and Esc returns to Body. Sizes use decimal kB/MB in the display; the byte limits
 below use MiB. [Attachment controls](#attachments-and-links).
 

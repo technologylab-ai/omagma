@@ -65,9 +65,12 @@ pub const Options = struct {
     body_prefetch_limit_set: bool = false,
     editor_mode: []const u8 = "auto",
     no_mouse: bool = false,
+    /// Internal UI routing only: an explicit --backend socket, repeated in
+    /// printed authorization commands. Never set for an auto-activated vault.
+    backend_socket: ?[]const u8 = null,
 };
-pub const FetchPhase = enum(u8) { metadata, bodies };
-pub const FetchProgress = struct { phase: FetchPhase, completed: usize, total: usize };
+pub const FetchPhase = enum(u8) { metadata, bodies, drive_reserving, drive_uploading, drive_sharing, mail_submitting };
+pub const FetchProgress = struct { phase: FetchPhase, completed: usize, total: usize, fileIndex: ?usize = null, fileCount: ?usize = null };
 /// Borrowed only for the synchronous callback. Consumers copy a bounded
 /// preview; neither these slices nor provider response storage may escape it.
 pub const FetchRow = struct {
@@ -77,13 +80,20 @@ pub const FetchRow = struct {
     message: Message,
     failed: bool = false,
 };
-/// Called synchronously by the worker. A sink must not allocate, perform
-/// network/storage work or wait deliberately. A short existing queue wake
-/// notification is allowed; the TUI stores atomics and coalesces that wake.
+/// Report/row callbacks run synchronously and must not allocate, perform
+/// network/storage work or wait deliberately. A short queue wake is allowed.
+/// beforeMail is a separate explicit, cancellable transport boundary.
 pub const ProgressSink = struct {
     ctx: *anyopaque,
     reportFn: *const fn (*anyopaque, FetchProgress) void,
     rowFn: ?*const fn (*anyopaque, FetchRow) void = null,
+    /// Explicit cancellable boundary after mail_submitting, before the Gmail
+    /// fence. A transport may wait for that final frame; reportFn never waits.
+    beforeMailFn: ?*const fn (*anyopaque) anyerror!void = null,
+    execution_budget: ?*@import("send_budget.zig").Budget = null,
+    pub fn beforeMail(self: ProgressSink) !void {
+        if (self.beforeMailFn) |function| try function(self.ctx);
+    }
     pub fn report(self: ProgressSink, progress: FetchProgress) void {
         self.reportFn(self.ctx, progress);
     }
@@ -121,6 +131,7 @@ pub const Client = struct {
     }
 };
 pub const Address = struct { address: []const u8, name: []const u8 = "" };
+pub const AttachmentDelivery = enum { attach, auto, drive };
 pub const Attachment = struct {
     id: []const u8,
     filename: []const u8,
@@ -130,6 +141,8 @@ pub const Attachment = struct {
     /// Immutable account-scoped local content handle. The sender opens it
     /// through the account store, never as an arbitrary filesystem path.
     blobId: ?[]const u8 = null,
+    /// Null preserves legacy attachment serialization and send fingerprints.
+    delivery: ?AttachmentDelivery = null,
     contentId: ?[]const u8 = null,
     disposition: ?[]const u8 = null,
     contentLocation: ?[]const u8 = null,
@@ -241,4 +254,17 @@ pub const Contact = struct {
     /// omit this object. Updates fetch a strictly decoded current provider
     /// version; cached fields are never a write precondition.
     provider: ?std.json.Value = null,
+};
+
+/// Immutable remote preparation receipt retained with a Gmail operation.
+/// No resumable session URL or credential is serialized here.
+pub const DriveFileReceipt = struct {
+    index: usize,
+    filename: []const u8,
+    size: usize,
+    state: []const u8,
+    driveFileId: []const u8,
+    link: ?[]const u8 = null,
+    sharedWith: []const []const u8 = &.{},
+    sharingUnconfirmedWith: ?[]const u8 = null,
 };

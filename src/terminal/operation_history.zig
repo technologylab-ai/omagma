@@ -170,7 +170,7 @@ pub fn findBlob(s: *storage.Store, a: std.mem.Allocator, key: []const u8) !?Blob
     const result = value.blob;
     try @import("draft_codec.zig").validateAttachmentHandle(result.id);
     _ = try @import("vault_storage.zig").Handle.parse(result.handle);
-    if (result.size > t.Limits.incoming_attachment_bytes) return error.InvalidHistory;
+    if (result.size > t.Limits.disk_hard) return error.InvalidHistory;
     return result;
 }
 /// Publish immutable blob lookup metadata outside the active object map. A
@@ -188,11 +188,11 @@ pub fn putBlob(s: *storage.Store, value: Blob) !void {
     if (previous == null) root.blobs += 1;
     if (previous) |old| if (!old.deleted) {
         root.blobFiles -= 1;
-        root.blobBytes -= try @import("vault_types.zig").sealedSize(old.size);
+        root.blobBytes -= try @import("vault_types.zig").sealedStreamSize(old.size);
     };
     if (!value.deleted) {
         root.blobFiles += 1;
-        root.blobBytes += try @import("vault_types.zig").sealedSize(value.size);
+        root.blobBytes += try @import("vault_types.zig").sealedStreamSize(value.size);
     } else try retired.append(s.allocator, try @import("attachment_blob.zig").filename(s.allocator, value.id));
     const before = s.state.history;
     errdefer if (!s.history_publication_started) {
@@ -326,13 +326,13 @@ pub fn settled(operation_value: storage.Operation) bool {
 fn archivable(s: *storage.Store, op: storage.Operation) bool {
     if (!settled(op)) return false;
     for (s.state.draftLinks) |link| if (std.mem.eql(u8, link.draftId, op.draftId) and (link.paused or link.phase == .unknown)) return false;
-    for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.operationId, op.id) and (entry.state == .queued or entry.state == .submitting or entry.state == .unknown)) return false;
+    for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.operationId, op.id) and (entry.state == .queued or entry.state == .preparing or entry.state == .submitting or entry.state == .unknown)) return false;
     return true;
 }
 fn sourceEligible(s: *storage.Store, draft_id: []const u8) bool {
     if (std.mem.eql(u8, s.history_protected_draft, draft_id)) return false;
     for (s.state.draftLinks) |link| if (std.mem.eql(u8, link.draftId, draft_id) and (link.paused or link.phase == .unknown)) return false;
-    for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, draft_id) and (entry.state == .queued or entry.state == .submitting or entry.state == .unknown)) return false;
+    for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, draft_id) and (entry.state == .queued or entry.state == .preparing or entry.state == .submitting or entry.state == .unknown)) return false;
     for (s.state.operations) |entry| if (std.mem.eql(u8, entry.draftId, draft_id) and !settled(entry)) return false;
     return true;
 }

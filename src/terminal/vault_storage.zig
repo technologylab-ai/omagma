@@ -273,10 +273,11 @@ pub const Directory = struct {
     }
     pub fn begin(self: *Directory, handle: Handle, size: usize, replace: bool, faults: Faults) !AtomicFile {
         if (self.closed) return error.VaultStreamClosed;
-        return AtomicFile.init(self.io, self.dir, &handle.filename(), try t.sealedSize(size), replace, faults);
+        return AtomicFile.init(self.io, self.dir, &handle.filename(), try t.sealedStreamSize(size), replace, faults);
     }
     pub fn seal(self: *Directory, key: *const t.DataKey, record: Record, size: usize, source: t.Source, workspace: *t.StreamWorkspace, replace: bool) !void {
         defer workspace.wipe();
+        if (size > t.recordLimit(record.kind)) return error.VaultRecordTooLarge;
         var output = try self.begin(record.handle, size, replace, .{});
         defer output.deinit();
         const handle_text = record.handle.text();
@@ -288,7 +289,7 @@ pub const Directory = struct {
         const file = try openPrivate(self.io, self.dir, &name);
         errdefer file.close(self.io);
         const stat = try file.stat(self.io);
-        if (stat.size > try t.sealedSize(t.max_record_bytes)) return error.VaultRecordTooLarge;
+        if (stat.size > try t.sealedStreamSize(t.max_stream_record_bytes)) return error.VaultRecordTooLarge;
         if (!try file.tryLock(self.io, .shared)) return error.VaultBusy;
         return .{ .io = self.io, .file = file, .initial = stat };
     }

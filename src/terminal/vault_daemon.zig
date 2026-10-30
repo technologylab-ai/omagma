@@ -87,8 +87,12 @@ const Server = struct {
                 std.crypto.secureZero(u8, @constCast(bytes));
                 @import("send_memory.zig").operationBacking(self.a, frame.body, false).free(bytes);
             };
-            self.dispatch(&frame, &response, stream) catch |err| {
+            var progress_stream_safe = true;
+            self.dispatch(&frame, &response, stream, &progress_stream_safe) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
+                // A canceled/failed progress frame may already have written a
+                // header or prefix. Never append another frame to that stream.
+                if (!progress_stream_safe) continue;
                 // executeFrame admits the operation before its observers. A
                 // later observer's concurrency failure cannot prove that the
                 // operation stopped before dispatch or durable mutation.
@@ -105,10 +109,10 @@ const Server = struct {
             }
         }
     }
-    fn dispatch(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream) !void {
+    fn dispatch(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream, progress_stream_safe: *bool) !void {
         if (transport.protectedKind(frame.kind) and frame.generation != transport.execution_protocol) return error.BackendProtocolMismatch;
         switch (frame.kind) {
-            .execute => return self.executeFrame(frame, response, stream),
+            .execute => return self.executeFrame(frame, response, stream, progress_stream_safe),
             .unlock => {
                 // This dedicated connection worker owns the KDF. The 64 MiB
                 // lease is serialized and always reclaimed before returning.
@@ -132,7 +136,7 @@ const Server = struct {
                 try platform.deadline(self.io, platform.seconds(35), drainAndLock, .{self});
             },
             .status => {},
-            .response => return error.InvalidBackendFrame,
+            .response, .progress => return error.InvalidBackendFrame,
         }
         var id_text: [32]u8 = undefined;
         const vault_id: ?[]const u8 = if (self.owner.known_vault_id) |id| blk: {
@@ -144,11 +148,120 @@ const Server = struct {
     fn readFrameInto(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, output: *?transport.Frame) !void {
         output.* = try transport.readFrame(io, a, stream, transport.request_limit);
     }
-    fn executeInto(self: *Server, raw: []const u8, output: *?[]const u8) !void {
-        output.* = try self.owner.execute(@import("send_memory.zig").operationBacking(self.a, raw, false), raw);
+    fn executeInto(self: *Server, raw: []const u8, output: *?[]const u8, progress: ?*ProgressWriter) !void {
+        output.* = try self.owner.executeWithProgress(@import("send_memory.zig").operationBacking(self.a, raw, false), raw, if (progress) |writer| writer.sink() else null);
     }
-    fn executeTimer(io: std.Io, seconds: i64) !void {
-        try platform.seconds(seconds).sleep(io);
+    const ExecutionEvent = union(enum) { operation: anyerror!void, timeout: anyerror!void, lock: std.Io.Cancelable!void, read_peer: anyerror!void, progress_writer: anyerror!void };
+    const ProgressWriteGate = struct {
+        entered: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        fail: bool = false,
+    };
+    const ProgressWriter = struct {
+        io: std.Io,
+        stream: std.Io.net.Stream,
+        enabled: bool = true,
+        execution_budget: ?*@import("send_budget.zig").Budget = null,
+        mailbox: @import("progress.zig").Mailbox = .{},
+        wake: std.Io.Event = .unset,
+        finishing: std.atomic.Value(bool) = .init(false),
+        finished: std.Io.Event = .unset,
+        submitted: std.Io.Event = .unset,
+        failure: ?anyerror = null,
+        completion: ?*std.Io.Queue(ExecutionEvent) = null,
+        test_gate: if (builtin.is_test) ?*ProgressWriteGate else void = if (builtin.is_test) null else {},
+        snapshot_gate: if (builtin.is_test) ?*ProgressWriteGate else void = if (builtin.is_test) null else {},
+        duplicate_skipped: if (builtin.is_test) std.Io.Event else void = if (builtin.is_test) .unset else {},
+        written_frames: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
+        fn sink(self: *ProgressWriter) @import("types.zig").ProgressSink {
+            return .{ .ctx = self, .reportFn = publish, .beforeMailFn = beforeMail, .execution_budget = self.execution_budget };
+        }
+        fn publish(ctx: *anyopaque, value: @import("types.zig").FetchProgress) void {
+            const self: *ProgressWriter = @ptrCast(@alignCast(ctx));
+            if (!self.enabled) return;
+            if (self.mailbox.publish(value)) self.wake.set(self.io);
+        }
+        fn beforeMail(ctx: *anyopaque) anyerror!void {
+            const self: *ProgressWriter = @ptrCast(@alignCast(ctx));
+            if (!self.enabled) return;
+            // No Gmail deadline/HTTP task can overlap an unfinished progress
+            // frame. The frame deadline has joined its children before this
+            // notification, preserving headroom in the fixed 16-worker pool.
+            try self.submitted.wait(self.io);
+            if (self.finished.isSet()) if (self.failure) |err| return err;
+        }
+        fn runNotifying(self: *ProgressWriter) anyerror!void {
+            const result = self.run();
+            if (self.completion) |queue| queue.putOneUncancelable(self.io, .{ .progress_writer = result }) catch {};
+            return result;
+        }
+        fn writeProgressFrame(self: *ProgressWriter, body: []const u8) !void {
+            const header = try transport.encodeHeader(.progress, body.len, transport.progress_limit);
+            var writer = self.stream.writer(self.io, &.{});
+            try writer.interface.writeAll(&header);
+            if (comptime builtin.is_test) if (self.test_gate) |gate| {
+                gate.entered.set(self.io);
+                try gate.release.wait(self.io);
+                if (gate.fail) return error.SyntheticPartialProgressWrite;
+            };
+            try writer.interface.writeAll(body);
+            try writer.interface.flush();
+        }
+        fn finish(self: *ProgressWriter) void {
+            self.finishing.store(true, .release);
+            self.wake.set(self.io);
+        }
+        fn run(self: *ProgressWriter) anyerror!void {
+            const result = self.runInner();
+            result catch |err| {
+                self.failure = err;
+            };
+            self.finished.set(self.io);
+            self.submitted.set(self.io);
+            return result;
+        }
+        fn runInner(self: *ProgressWriter) anyerror!void {
+            var last_written: ?@import("types.zig").FetchProgress = null;
+            while (true) {
+                try self.wake.wait(self.io);
+                self.wake.reset();
+                if (self.finishing.load(.acquire)) return;
+                self.mailbox.acknowledged();
+                if (comptime builtin.is_test) if (self.snapshot_gate) |gate| {
+                    gate.entered.set(self.io);
+                    try gate.release.wait(self.io);
+                };
+                const value = self.mailbox.snapshot();
+                if (last_written) |previous| if (std.meta.eql(previous, value)) {
+                    // Coalescing permits a duplicate wake after acknowledgement
+                    // but before snapshot. Never start another frame deadline
+                    // for an already flushed submitting notification.
+                    if (comptime builtin.is_test) self.duplicate_skipped.set(self.io);
+                    continue;
+                };
+                try transport.validateProgress(value);
+                var bytes: [512]u8 = undefined;
+                defer std.crypto.secureZero(u8, &bytes);
+                var output: std.Io.Writer = .fixed(&bytes);
+                try std.json.Stringify.value(value, .{ .emit_null_optional_fields = false }, &output);
+                try platform.deadline(self.io, platform.seconds(2), writeProgressFrame, .{ self, output.buffered() });
+                last_written = value;
+                if (comptime builtin.is_test) self.written_frames += 1;
+                if (value.phase == .mail_submitting) self.submitted.set(self.io);
+            }
+        }
+    };
+    fn finishProgressWriter(io: std.Io, writer: *ProgressWriter, future: *?std.Io.Future(anyerror!void), stream_safe: *bool) !void {
+        if (future.*) |*owned| {
+            writer.finish();
+            const written = owned.await(io);
+            future.* = null;
+            written catch return error.BackendProgressStreamFailed;
+            stream_safe.* = true;
+        }
+    }
+    fn executeTimer(io: std.Io, budget: *@import("send_budget.zig").Budget) !void {
+        try budget.wait(io);
     }
     fn waitReadPeer(io: std.Io, stream: std.Io.net.Stream) !void {
         // One frame owns this connection. The caller keeps its sending half
@@ -163,27 +276,41 @@ const Server = struct {
         };
         return error.InvalidBackendFrame;
     }
-    fn executeFrame(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream) !void {
+    fn executeFrame(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream, progress_stream_safe: *bool) !void {
         var scratch: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &scratch);
         var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
         const meta = try transport.requestMetadata(fixed.allocator(), frame.body);
-        const Event = union(enum) { operation: anyerror!void, timeout: anyerror!void, lock: std.Io.Cancelable!void, read_peer: anyerror!void };
-        var events: [4]Event = undefined;
+        const Event = ExecutionEvent;
+        var events: [5]Event = undefined;
         var select: std.Io.Select(Event) = .init(self.io, &events);
-        // Zig0.17 Select explicitly discards return values here. Resources go
-        // into caller-owned slots, which are wiped after cancellation joins.
-        defer select.cancelDiscard();
-        try select.concurrent(.operation, executeInto, .{ self, frame.body, response });
-        try select.concurrent(.timeout, executeTimer, .{ self.io, transport.executionSeconds(meta.command) });
+        var budget = @import("send_budget.zig").Budget.init(self.io, transport.executionSeconds(meta.command));
+        var progress_writer: ProgressWriter = .{ .io = self.io, .stream = stream, .completion = &select.queue, .enabled = meta.progress, .execution_budget = &budget };
+        var writer_future: ?std.Io.Future(anyerror!void) = null;
+        // Join execution first so callbacks cannot outlive the writer. A writer
+        // canceled during a frame leaves progress_stream_safe false: close it.
+        defer {
+            select.cancelDiscard();
+            if (writer_future) |*future| future.cancel(self.io) catch {};
+        }
+        if (meta.progress) {
+            writer_future = try self.io.concurrent(ProgressWriter.runNotifying, .{&progress_writer});
+            progress_stream_safe.* = false;
+        }
+        try select.concurrent(.operation, executeInto, .{ self, frame.body, response, &progress_writer });
+        try select.concurrent(.timeout, executeTimer, .{ self.io, &budget });
         try select.concurrent(.lock, std.Io.Event.wait, .{ &self.cancel_execution, self.io });
         // Only these background reads yield to their caller's disconnect.
         // Admitted draft/provider mutations keep their independent completion
         // and unknown-outcome behavior even if the requesting client goes away.
-        if (std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
+        if (meta.cancel_disconnect or std.mem.eql(u8, meta.command, "draft.measure") or std.mem.eql(u8, meta.command, "draft.preview") or std.mem.eql(u8, meta.command, "draft.delivery-plan") or std.mem.eql(u8, meta.command, "draft.selection-plan") or std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
             try select.concurrent(.read_peer, waitReadPeer, .{ self.io, stream });
-        switch (try select.await()) {
-            .operation => |result| try result,
+        while (true) switch (try select.await()) {
+            .operation => |result| {
+                try finishProgressWriter(self.io, &progress_writer, &writer_future, progress_stream_safe);
+                try result;
+                return;
+            },
             .timeout => |result| {
                 try result;
                 return error.Timeout;
@@ -192,6 +319,14 @@ const Server = struct {
                 try result;
                 return error.VaultOperationCanceled;
             },
+            .progress_writer => |result| {
+                result catch {
+                    if (meta.cancel_disconnect) return error.VaultOperationCanceled;
+                };
+                // A non-opted mutation retains its independent completion.
+                // The failed writer is joined on operation completion, which
+                // closes this unsafe stream without another response frame.
+            },
             .read_peer => |result| {
                 // Both EOF and malformed additional bytes abandon this exact
                 // read. The Select defer joins execution before lane/key
@@ -199,7 +334,7 @@ const Server = struct {
                 result catch |err| if (err == error.Canceled) return err;
                 return error.VaultOperationCanceled;
             },
-        }
+        };
     }
     fn drainAndLock(self: *Server) !void {
         while (self.network_lane.load(.acquire)) try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(self.io);
@@ -805,4 +940,126 @@ test "vault daemon: timed out and canceled lane acquisition retain exact ownersh
         try worker.await(io);
         try std.testing.expect(!server.network_lane.load(.acquire));
     }
+}
+
+test "vault progress: operation completion joins a started frame and failed prefixes prohibit final responses" {
+    const io = std.testing.io;
+    const Read = struct {
+        fn frame(stream_io: std.Io, peer: std.Io.net.Stream, limit: usize, out: *?transport.Frame) !void {
+            out.* = try transport.readFrame(stream_io, std.testing.allocator, peer, limit);
+        }
+    };
+    for ([_]bool{ false, true }) |fail| {
+        var listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 1 });
+        defer listener.deinit(io);
+        const peer = try listener.socket.address.connect(io, .{ .mode = .stream });
+        defer peer.close(io);
+        const stream = try listener.accept(io);
+        defer stream.close(io);
+        var gate: Server.ProgressWriteGate = .{ .fail = fail };
+        var writer: Server.ProgressWriter = .{ .io = io, .stream = stream, .test_gate = &gate };
+        var future: ?std.Io.Future(anyerror!void) = try io.concurrent(Server.ProgressWriter.run, .{&writer});
+        defer if (future) |*pending| pending.cancel(io) catch {};
+        writer.sink().report(.{ .phase = .drive_uploading, .completed = 3, .total = 10, .fileIndex = 0, .fileCount = 1 });
+        try platform.deadline(io, platform.seconds(3), std.Io.Event.wait, .{ &gate.entered, io });
+        // Simulate completion while the progress header is already on the wire.
+        writer.finish();
+        gate.release.set(io);
+        var safe = false;
+        if (fail) {
+            try std.testing.expectError(error.BackendProgressStreamFailed, Server.finishProgressWriter(io, &writer, &future, &safe));
+            try std.testing.expect(!safe);
+            try std.testing.expectError(error.SyntheticPartialProgressWrite, writer.sink().beforeMail());
+            var input = peer.reader(io, &.{});
+            var header: [transport.header_bytes]u8 = undefined;
+            try input.interface.readSliceAll(&header);
+            const decoded = try transport.decodeHeader(&header, transport.progress_limit);
+            try std.testing.expectEqual(transport.Kind.progress, decoded.kind);
+            try std.testing.expect(decoded.length != 0);
+        } else {
+            try Server.finishProgressWriter(io, &writer, &future, &safe);
+            try std.testing.expect(safe);
+            try transport.writeFrame(io, stream, .response, "{\"ok\":true}", transport.response_limit);
+            var progress: ?transport.Frame = null;
+            defer if (progress) |*frame| frame.deinit(std.testing.allocator);
+            try platform.deadline(io, platform.seconds(3), Read.frame, .{ io, peer, transport.progress_limit, &progress });
+            try std.testing.expectEqual(transport.Kind.progress, progress.?.kind);
+            var response: ?transport.Frame = null;
+            defer if (response) |*frame| frame.deinit(std.testing.allocator);
+            try platform.deadline(io, platform.seconds(3), Read.frame, .{ io, peer, transport.response_limit, &response });
+            try std.testing.expectEqual(transport.Kind.response, response.?.kind);
+            try std.testing.expectEqualStrings("{\"ok\":true}", response.?.body);
+        }
+        try std.testing.expect(writer.finished.isSet());
+    }
+}
+
+test "vault progress: fixed sixteen-worker pool acknowledges submitting before Gmail admission" {
+    const memory = @import("../fixed_runtime.zig");
+    var application: [8192]u8 align(16) = undefined;
+    var io_storage: [192 * 1024]u8 align(16) = undefined;
+    var startup: [4096]u8 = undefined;
+    var runtime: memory.Runtime = .{};
+    try runtime.init(.{ .args = .{ .vector = &.{"drive-progress-admission"} }, .environ = .empty }, .{ .application = &application, .io = &io_storage, .startup = &startup }, application.len);
+    defer runtime.deinit();
+    try runtime.seal();
+    const io = runtime.io();
+    const pool = runtime.threaded.worker_threads.load(.acquire);
+    const Task = struct {
+        fn wait(task_io: std.Io, release: *std.Io.Event) std.Io.Cancelable!void {
+            try release.wait(task_io);
+        }
+    };
+    var release: std.Io.Event = .unset;
+    var blockers: std.Io.Group = .init;
+    defer blockers.cancel(io);
+    // The reviewed worst explicit overlap excluding writer + its two frame
+    // deadline children. Completion notification must require no 17th waiter.
+    for (0..12) |_| try blockers.concurrent(io, Task.wait, .{ io, &release });
+    var budget = @import("send_budget.zig").Budget.init(io, 180);
+    _ = try budget.advance(io, .preparation);
+    var phase_timer = try io.concurrent(Server.executeTimer, .{ io, &budget });
+    defer phase_timer.cancel(io) catch {};
+    var listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(io);
+    const peer = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const stream = try listener.accept(io);
+    defer stream.close(io);
+    var gate: Server.ProgressWriteGate = .{};
+    var snapshot_gate: Server.ProgressWriteGate = .{};
+    var events: [5]Server.ExecutionEvent = undefined;
+    var completion: std.Io.Queue(Server.ExecutionEvent) = .init(&events);
+    var writer: Server.ProgressWriter = .{ .io = io, .stream = stream, .test_gate = &gate, .snapshot_gate = &snapshot_gate, .completion = &completion, .execution_budget = &budget };
+    var future: ?std.Io.Future(anyerror!void) = try io.concurrent(Server.ProgressWriter.runNotifying, .{&writer});
+    defer if (future) |*pending| pending.cancel(io) catch {};
+    writer.sink().report(.{ .phase = .metadata, .completed = 0, .total = 0 });
+    try snapshot_gate.entered.waitTimeout(io, .{ .duration = platform.seconds(3) });
+    // Publish after ack cleared pending but before its snapshot. This leaves
+    // a duplicate wake for the same submitting scalar DTO.
+    writer.sink().report(.{ .phase = .mail_submitting, .completed = 0, .total = 1 });
+    snapshot_gate.release.set(io);
+    try gate.entered.waitTimeout(io, .{ .duration = platform.seconds(3) });
+    try std.testing.expect(!writer.submitted.isSet());
+    // Only a fully written frame releases the pre-Gmail boundary; its owned
+    // deadline children have been joined when this returns.
+    gate.release.set(io);
+    try writer.sink().beforeMail();
+    _ = try writer.sink().execution_budget.?.advance(io, .gmail);
+    try std.testing.expect(budget.submissionAvailable(io));
+    try std.testing.expect(writer.submitted.isSet() and !writer.finished.isSet());
+    try writer.duplicate_skipped.waitTimeout(io, .{ .duration = platform.seconds(3) });
+    try std.testing.expectEqual(@as(usize, 1), writer.written_frames);
+    var safe = false;
+    try Server.finishProgressWriter(io, &writer, &future, &safe);
+    try std.testing.expect(safe);
+    const event = try completion.getOne(io);
+    try event.progress_writer;
+    var frame = try transport.readFrame(io, std.testing.allocator, peer, transport.progress_limit);
+    defer frame.deinit(std.testing.allocator);
+    try std.testing.expectEqual(transport.Kind.progress, frame.kind);
+    try std.testing.expect(std.mem.indexOf(u8, frame.body, "mail_submitting") != null);
+    try std.testing.expectEqual(@as(usize, 16), runtime.workerCount());
+    try std.testing.expectEqual(pool, runtime.threaded.worker_threads.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), runtime.io_meter.snapshot().rejectedAllocations);
 }

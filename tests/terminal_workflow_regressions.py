@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # must not be repeated separately or reduced to a smoke subset in CI.
 SUITES = {
     "terminal_attachment_lifecycle": (),
+    "terminal_drive_delivery": ("--drive-scenario", "drive-progress"),
+    "terminal_drive_backend": (),
     "terminal_formatted_original": (),
     "terminal_formatted_tui": (),
     "terminal_message_isolation": (),

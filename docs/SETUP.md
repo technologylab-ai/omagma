@@ -225,8 +225,9 @@ capabilities for the features you intend to use:
 
 For terminal-only setup, use its one terminal Google OAuth registration. Alongside an existing bar/read-only registration, any set beyond `mail-read` alone uses a different terminal registration.
 For read-only browsing, the existing bar grant is sufficient; if authorizing
-an explicit `mail-read` terminal grant, `--client-file` may be omitted to use
-the configured `oauthClientFile`.
+an explicit `mail-read` terminal grant, `--client-file` may be omitted to reuse
+that account’s existing terminal registration or, on first consent, the
+configured `oauthClientFile`.
 
 | Local capabilities | Google scopes requested |
 | --- | --- |
@@ -234,6 +235,7 @@ the configured `oauthClientFile`.
 | `mail-read,mail-send` | `gmail.readonly`, `gmail.send` |
 | `mail-read,calendar-rsvp` | `gmail.readonly`, `gmail.send`; the local grant permits RSVP rather than ordinary sending |
 | Add `mail-modify` | `gmail.modify` replaces readonly/send; include `mail-send` too if ordinary sending is wanted |
+| Add `drive-upload` | Add `drive.file`; requires Drive API; optional for uploading and sharing outgoing files |
 | Add `contacts-read` | Add `contacts.readonly`; requires People API |
 | Add `contacts-write` | Add `contacts` instead of contacts.readonly; include `contacts-read` too for browsing contacts |
 
@@ -245,6 +247,24 @@ Full Google scope coverage does not automatically enable an omitted local
 capability. The complete six-capability set above avoids that mismatch for
 full TUI/CLI use. Gmail settings aliases are read through the mail grant;
 changing Google settings is not part of the current terminal interface.
+
+### Optional Google Drive delivery
+
+To use [Drive delivery](TERMINAL.md#google-drive-delivery), enable the Google
+Drive API in the terminal registration's project and add
+`https://www.googleapis.com/auth/drive.file` under Data access. Reauthorize the
+account with its complete existing capability set plus `drive-upload`. The
+TUI's Connect Drive action shows that account-specific command. This optional
+capability uses the terminal grant; the bar remains read-only.
+
+The [per-file scope](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+lets Omagma create files and manage access to those files. It does
+not grant general access to every file in Drive. Workspace policy can still
+block uploading or granting a recipient access. Uploads stay in the sender's
+Drive, including after cancellation or a failed send; Omagma does not delete
+files or revoke grants automatically. Local files still count toward the
+configured account cache quota. Sending and sharing require explicit user
+action; planning, editing delivery and saving a draft do not contact Drive.
 
 ### Background cache with a terminal-only installation
 

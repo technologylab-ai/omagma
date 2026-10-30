@@ -52,6 +52,10 @@ const reader_find = @import("reader_find.zig");
 const reader_selection = @import("reader_selection.zig");
 const reader_plain = @import("reader_plain.zig");
 const composer_hints = @import("composer_hints.zig");
+const delivery_view = @import("delivery_view.zig");
+const send_drive = @import("send_drive.zig");
+/// Delivery buttons share the row-select hit kind above every row index.
+const delivery_hit_base: usize = types.Limits.attachments + 1;
 const updates = @import("updates.zig");
 const label_selection = @import("label_selection.zig");
 const Io = std.Io;
@@ -76,7 +80,7 @@ const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
-const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -252,6 +256,8 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "AttachmentNotFound", .label = "An attachment could not be retrieved" },
         .{ .code = "MessageNotFound", .label = "Message or attachment could not be retrieved" },
         .{ .code = "AttachmentsTooLarge", .label = "Attached files exceed the supported size" },
+        .{ .code = "AttachmentPlanBlocked", .label = "Fix the items above first." },
+        .{ .code = "InvalidAttachmentDelivery", .label = "File delivery changed unexpectedly · nothing was uploaded" },
         .{ .code = "TooManyAttachments", .label = "Too many attached files for this draft" },
         .{ .code = "InvalidAttachment", .label = "An attachment could not be prepared" },
         .{ .code = "AmbiguousAttachment", .label = "Attachment reference changed; several files match" },
@@ -414,6 +420,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Tab / Enter in Updates · Esc/q Back", .action = "Copy commands, open guides, check again, choose daily/manual checks or copy an agent request", .requires = .updates },
     .{ .keys = "j/k · Ctrl+U/D · Ctrl+G in Updates", .action = "Scroll the upgrade guide, move half a page or return to its top", .requires = .updates },
     .{ .keys = "Ctrl+P / :actions", .action = "Search the actions available in this view" },
+    .{ .keys = ":version", .action = "Show the Omagma version this open TUI is running; restart it after an upgrade to use the new one" },
     .{ .keys = ":find TEXT · n / N", .action = "Find within the visible message and visit the next or previous match" },
     .{ .keys = ":next-unread / :previous-unread", .action = "Navigate unread cached mail in the current view" },
     .{ .keys = ":search-history / :saved-searches / :save-search NAME", .action = "Recall or save account-specific cache and Gmail searches" },
@@ -688,6 +695,12 @@ fn timestamp(allocator: Allocator, zone: *const timezone.Zone, value_in: Value) 
 }
 fn same(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+/// Canonical grant names as Drive's guide accepts them: [a-z0-9-], no edge dash.
+fn calendarGrantCapability(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or name[0] == '-' or name[name.len - 1] == '-') return false;
+    for (name) |byte| if (!((byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-')) return false;
+    return true;
 }
 
 /// All terminal text passes here, including metadata and locally edited text.
@@ -1091,6 +1104,7 @@ const Compose = struct {
             .size = item.size,
             .data = try arena.allocator().dupe(u8, item.data),
             .blobId = if (item.blobId) |value| try arena.allocator().dupe(u8, value) else null,
+            .delivery = item.delivery,
             .contentId = if (item.contentId) |value| try arena.allocator().dupe(u8, value) else null,
             .disposition = if (item.disposition) |value| try arena.allocator().dupe(u8, value) else null,
             .contentLocation = if (item.contentLocation) |value| try arena.allocator().dupe(u8, value) else null,
@@ -1208,10 +1222,20 @@ const App = struct {
     calendar_form_notify_chosen: bool = false,
     calendar_form_pick_target: bool = false,
     calendar_form_target_index: usize = 0,
+    /// End-following state for ordinary user edits; see EndFollow.
+    calendar_form_follow: calendar_composer.EndFollow = .{},
     calendar_guests_open: bool = false,
+    /// The last explicit contacts.search answer and the exact query it
+    /// answers; it applies only while the typed query is the same.
+    calendar_guests_search: calendar_ui.Document = .{},
+    calendar_guests_searched: @import("../bounded.zig").Text(256) = .{},
+    calendar_guests_search_generation: u64 = 0,
+    calendar_guests_searching: bool = false,
     calendar_guests_query: Field = .{},
     calendar_guests_account: @import("../bounded.zig").Text(254) = .{},
     calendar_guests_contacts: calendar_ui.Document = .{},
+    /// Destination account's cached mail.recipients snapshot (local only).
+    calendar_guests_recent: calendar_ui.Document = .{},
     calendar_guests_selected: usize = 0,
     calendar_guests_focus: usize = 0,
     calendar_guests_return_focus: usize = 8,
@@ -1441,6 +1465,8 @@ const App = struct {
         draft: @import("../bounded.zig").Text(128) = .{},
         measured: bool = false,
         exact: bool = false,
+        /// Backend estimate for a Drive plan (links are reserved at send).
+        estimated: bool = false,
         content_digest: @import("../bounded.zig").Text(64) = .{},
         bytes: ?usize = null,
         max_bytes: usize = 0,
@@ -1449,6 +1475,66 @@ const App = struct {
         sendable: bool = false,
         failure: @import("../bounded.zig").Text(64) = .{},
     } = .{},
+    /// Backend attachmentPlan from the current saved-draft measurement.
+    delivery_plan: delivery_view.Plan = .{},
+    /// Display-only draft.delivery-plan for one composer revision (the
+    /// autosaved recovery source is not measurable until Save/Review).
+    composer_plan: delivery_view.Plan = .{},
+    composer_plan_requested: u64 = std.math.maxInt(u64),
+    composer_plan_revision: u64 = std.math.maxInt(u64),
+    composer_plan_account: usize = 0,
+    composer_plan_draft: @import("../bounded.zig").Text(128) = .{},
+    /// Focus is on the control drawn before the current composer control:
+    /// [Upload all], a row's delivery button or [Connect Drive].
+    compose_secondary: bool = false,
+    /// The review shows the exact authorization command for Drive upload.
+    drive_connect_shown: bool = false,
+    review_connect_focused: bool = false,
+    /// A file-dialog selection too large to attach; nothing is imported yet.
+    oversized: ?struct { focus: u2 = 0, count: usize, bytes: u64 } = null,
+    /// Delivery for files imported from the current pending selection.
+    pending_delivery: ?types.AttachmentDelivery = null,
+    /// Imported descriptors published to the composer only as a full batch.
+    pending_imports: std.ArrayList(types.Attachment) = .empty,
+    pending_import_arena: ?std.heap.ArenaAllocator = null,
+    /// Backend draft.selection-plan for the file-browser selection. A
+    /// confirming plan imports or opens Too large to attach on its result.
+    selection_plan: delivery_view.Plan = .{},
+    selection_confirm: bool = false,
+    selection_plan_count: usize = 0,
+    selection_plan_revision: u64 = 0,
+    selection_plan_attach: bool = false,
+    /// Bumped whenever the picker closes/reopens or the composer changes;
+    /// a selection plan reply applies only to the generation that asked.
+    file_selection_generation: u64 = 0,
+    file_selection_request_generation: u64 = 0,
+    /// All-Attach message estimate for the same selection and revision.
+    selection_attach_mime: u64 = 0,
+    selection_attach_limit: u64 = 0,
+    /// Drive send: numbers from the worker, names pinned at Send, and the
+    /// explicit preparation outcome. Nothing here retries by itself.
+    drive_progress: send_drive.Mailbox = .{},
+    send_pinned: send_drive.Pinned = .{},
+    send_failure: send_drive.Failure = .{},
+    /// null: no confirmation; 0 Stop, 1 Keep sending (initial).
+    send_stop_focus: ?u1 = null,
+    send_cancel_focus: bool = false,
+    send_connect_shown: bool = false,
+    grace_drive: bool = false,
+    /// The Stop probe reads the queued intent rather than the operation.
+    stop_probe_queue: bool = false,
+    /// Stamps of the explicit paused-Retry plan read; any change is stale.
+    retry_plan_draft: @import("../bounded.zig").Text(128) = .{},
+    retry_plan_queue: @import("../bounded.zig").Text(256) = .{},
+    retry_plan_operation: @import("../bounded.zig").Text(128) = .{},
+    retry_plan_revision: u64 = 0,
+    retry_plan_account: usize = 0,
+    /// What the plan read continues with: Retry preparation (send-now) or
+    /// :resume-send (the ordinary countdown). Never converts one to the other.
+    retry_plan_intent: RetryIntent = .retry,
+    /// The paused queue entry's operation (queue.list), for intents that
+    /// have no preparation receipt yet.
+    grace_operation: @import("../bounded.zig").Text(128) = .{},
     compose_preview_scroll: usize = 0,
     compose_plain_scroll: usize = 0,
     compose_snapshot_scroll: usize = 0,
@@ -1723,6 +1809,7 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.clearPendingImports();
         self.meetings.deinit(self.allocator);
         if (self.follow_up_arena) |*arena| arena.deinit();
         self.gmail_draft_outcome.deinit(self.allocator);
@@ -1738,6 +1825,8 @@ const App = struct {
         for (&self.calendar_form_fields) |*field| field.deinit(self.allocator);
         self.calendar_form_review.deinit();
         self.calendar_guests_contacts.deinit();
+        self.calendar_guests_recent.deinit();
+        self.calendar_guests_search.deinit();
         self.calendar_guests_query.deinit(self.allocator);
         self.clearContactComposeIntent();
         self.reader_copy.deinit(self.allocator);
@@ -3839,6 +3928,14 @@ const App = struct {
         };
         self.saveUiPreferences();
     }
+    // The version compiled into this process, never the file now at its
+    // path: an upgrade replaces that file under an open TUI. An explicit
+    // request replaces a completed-action notice (Undo keeps working) but
+    // not a protected unknown-outcome warning.
+    fn sayRunningVersion(self: *App) void {
+        self.action_notice = false;
+        self.say(false, "Running Omagma {s} in this TUI · restart it after an upgrade to use the new version", .{@import("build_options").version});
+    }
     fn onUxCommand(self: *App, command: []const u8) !bool {
         if (same(command, "resolve-draft") or same(command, "reload-draft") or same(command, "save-copy")) {
             if (self.mode == .command) self.mode = self.previous_mode;
@@ -3866,9 +3963,19 @@ const App = struct {
             self.openUpdates();
             return true;
         }
+        if (same(command, "version")) {
+            self.sayRunningVersion();
+            return true;
+        }
         if (same(command, "resume-send")) {
             if (!self.capabilities.send_queue) return error.SendQueueUnavailable;
             if (!self.pausedGraceForCompose()) return error.NoPendingSend;
+            // A Drive send reads its saved source's complete plan first, so
+            // the countdown's end keeps progress and Stop. Others unchanged.
+            if (self.deliveryRequested() or self.send_failure.count > 0) {
+                try self.startPausedRetry(.resume_countdown);
+                return true;
+            }
             self.preemptReadOnly();
             try self.start(.grace_resume, .{ .cmd = "queue.resume", .account = self.grace_account.value(), .queueId = self.grace_queue.value(), .delaySeconds = self.ui_preferences.sendGraceSeconds });
             return true;
@@ -4703,7 +4810,8 @@ const App = struct {
         if (self.statusContext().mode == .compose or self.statusContext().mode == .review) {
             if (self.compose.unknown_outcome) return " Outcome unknown · recovery draft protected";
             if (self.pausedGraceForCompose()) return " Queued send paused · :resume-send Resume · :cancel-send Cancel";
-            if (self.job.future != null and self.job.kind == .send) return " Submitting · waiting for the provider receipt";
+            // A Drive send says Submitting only once Gmail submission starts.
+            if ((self.job.future != null and self.job.kind == .send) or (self.sendProgressActive() and self.send_pinned.drive_count > 0)) return try std.fmt.allocPrint(self.frame.allocator(), " {s}", .{self.sendStatusLabel()});
             if (self.job.future != null and (self.job.kind == .autosave or self.job.kind == .save or self.job.kind == .save_review or self.job.kind == .save_back)) return if (self.capabilities.durable_drafts) " Saving draft locally · no mail sent" else " Saving draft in this tab · no mail sent";
             if (self.compose.revision != self.compose.saved_revision) return " Draft changes pending · no mail sent";
             return if (self.capabilities.durable_drafts) " Local draft · no mail sent" else " Session draft · reload/disconnect discards it";
@@ -5476,7 +5584,7 @@ const App = struct {
             self.job.response = null;
             _ = self.job_arena.reset(.free_all);
         }
-        if (draftSaveJob(kind) or kind == .draft_measure or kind == .send or kind == .grace_stage or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
+        if (draftSaveJob(kind) or kind == .draft_measure or kind == .send or kind == .stop_probe or kind == .grace_stage or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
         if (unread_target) |target| try self.job.unread_target.set(target);
         self.job.request = request;
         if (kind == .refresh or kind == .list) {
@@ -5484,7 +5592,7 @@ const App = struct {
             status.state = if (status.cache_ready) .refreshing else .fetching;
             status.error_len = 0;
             self.say(false, "{s}", .{if (status.cache_ready) "Cached mail ready · fetching latest changes" else "Fetching mail…"});
-        } else if (kind != .draft_measure and kind != .preferences_save and !updateJob(kind) and !meetingJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
+        } else if (kind != .draft_measure and kind != .composer_plan and kind != .preferences_save and !updateJob(kind) and !meetingJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
             .cached_search => "Searching cached mail…",
             .recipient_cache => "Loading recent-mail recipients… · typing remains available",
             .recipient_refresh => "Updating recent sent-mail recipients… · typing remains available",
@@ -5496,6 +5604,22 @@ const App = struct {
     }
     fn reportFetchProgress(ctx: *anyopaque, update: types.FetchProgress) void {
         const self: *App = @ptrCast(@alignCast(ctx));
+        // Drive send phases carry numbers and composer indexes only; names
+        // come from the composer pinned at Send. Mail phases are unchanged.
+        if (send_drive.phaseOf(update.phase)) |phase| {
+            if (self.job.kind != .send and self.job.kind != .grace_process) return;
+            const file_index: ?usize = if (@hasField(types.FetchProgress, "fileIndex")) update.fileIndex else null;
+            const file_count: ?usize = if (@hasField(types.FetchProgress, "fileCount")) update.fileCount else null;
+            self.drive_progress.publish(phase, file_index, file_count, update.completed, update.total);
+            if (!self.job.progress.wake_pending.swap(true, .acq_rel)) {
+                const posted = platform.postEvent(self.loop, .fetch_progress) catch |err| blk: {
+                    if (err == error.Canceled) self.io.recancel();
+                    break :blk false;
+                };
+                if (!posted) self.job.progress.acknowledged();
+            }
+            return;
+        }
         if (self.job.progress.publish(update)) {
             const posted = platform.postEvent(self.loop, .fetch_progress) catch |err| blk: {
                 if (err == error.Canceled) self.io.recancel();
@@ -5853,6 +5977,9 @@ const App = struct {
                 };
                 self.compose_measure.pending = false;
             }
+        } else if (self.job.kind == .composer_plan) {
+            // A background display plan never reports failures as status.
+            if (self.job.failure == null) if (self.job.response) |response| self.applyComposerPlan(response);
         } else if (meetingJob(self.job.kind)) {
             self.finishMeetingJob() catch {
                 if (self.job.kind == .meeting_agenda) self.meetings.fail(self.job.meeting_target);
@@ -5865,6 +5992,10 @@ const App = struct {
             try self.finishCalendar();
         } else if (self.job.kind == .send) {
             try self.finishSend();
+        } else if (self.job.kind == .stop_probe) {
+            self.finishStopProbe();
+        } else if (self.job.kind == .retry_plan) {
+            self.finishRetryPlan();
         } else if (updateJob(self.job.kind)) {
             if (self.job.failure) |err| {
                 if (err != error.Canceled) self.update_message.set("Release check unavailable · mail remains usable") catch {};
@@ -5966,6 +6097,11 @@ const App = struct {
             }
             if (self.job.kind == .grace_cancel) {
                 self.graceCancelUnconfirmed(@errorName(err));
+                return;
+            }
+            if (self.job.kind == .stop_probe) {
+                self.compose.operation_error.set(self.allocator, @errorName(err)) catch {};
+                self.markUnknown(.send);
                 return;
             }
             if (self.job.kind == .attachments_save) {
@@ -6168,7 +6304,7 @@ const App = struct {
     }
     fn apply(self: *App, kind: JobKind, response: []const u8) !void {
         // Validate the envelope before replacing a valid cached view.
-        _ = if (kind == .draft_measure) @as(Value, .null) else self.data(self.job_arena.allocator(), response) catch |err| {
+        _ = if (kind == .draft_measure or kind == .composer_plan) @as(Value, .null) else self.data(self.job_arena.allocator(), response) catch |err| {
             if (kind == .grace_cancel) {
                 self.graceCancelUnconfirmed(if (err == error.OperationRejected) self.status_error_code[0..self.status_error_len] else @errorName(err));
                 return;
@@ -6197,7 +6333,14 @@ const App = struct {
                     return;
                 }
                 if (kind == .attachments_save) self.abortSaveAll(self.status_error_code[0..self.status_error_len]);
-                if (kind == .attachment_import) self.pending_file_count = 0;
+                if (kind == .attachment_import) {
+                    self.pending_file_count = 0;
+                    self.clearPendingImports();
+                }
+                if (kind == .selection_plan) {
+                    self.selection_confirm = false;
+                    try self.file_browser_error.set(self.allocator, humanError(self.status_error_code[0..self.status_error_len]));
+                }
                 if (kind == .attachment_save) try self.file_browser_error.set(self.allocator, humanError(self.status_error_code[0..self.status_error_len]));
                 if (kind == .open and self.job.calendar_join_open) self.calendarJoinFailed(self.status_error_code[0..self.status_error_len]);
                 if (kind == .open and self.job.calendar_browser_open) self.calendarBrowserFailed(self.status_error_code[0..self.status_error_len]);
@@ -6211,6 +6354,8 @@ const App = struct {
                 // markUnknown replaces the status diagnostic; keep the code as the receipt reason.
                 if ((kind == .send or kind == .grace_process) and self.status_error_len > 0) self.compose.operation_error.set(self.allocator, self.status_error_code[0..self.status_error_len]) catch {};
                 if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind);
+                // An unreadable Stop check proves nothing: keep the protection.
+                if (kind == .stop_probe) self.markUnknown(.send);
                 if (kind == .list) self.syncFailed(self.job.account_index, self.status_error_code[0..self.status_error_len]);
                 if (kind == .contacts) self.contacts_state = if (same(self.status_error_code[0..self.status_error_len], "PermissionDenied")) .denied else .failed;
                 if ((kind == .label_write or kind == .label_color) and same(self.status_error_code[0..self.status_error_len], "UnknownOutcome")) {
@@ -6297,6 +6442,7 @@ const App = struct {
                     self.compose.deinit(self.allocator);
                     self.compose = .{};
                     self.compose_active = false;
+                    self.invalidateComposerState();
                 }
                 self.mode = .browse;
                 self.generation +%= 1;
@@ -6305,32 +6451,45 @@ const App = struct {
             },
             .attachment_import => {
                 const result = try self.data(self.job_arena.allocator(), response);
-                const attachment = try std.json.parseFromValueLeaky(types.Attachment, self.frame.allocator(), result, .{ .allocate = .alloc_always });
-                if (self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
+                var attachment = try std.json.parseFromValueLeaky(types.Attachment, self.frame.allocator(), result, .{ .allocate = .alloc_always });
+                // The descriptor must echo the chosen delivery; Keep stays Attach.
+                if (self.pending_delivery) |chosen| {
+                    if (attachment.delivery) |echoed| if (echoed != chosen) return error.InvalidAttachmentDelivery;
+                    attachment.delivery = chosen;
+                } else if (!delivery_view.isAttach(attachment.delivery)) return error.InvalidAttachmentDelivery;
+                const staged = self.pending_imports.items.len + 1;
+                if (self.compose.attachments.len + staged > types.Limits.attachments) return error.TooManyAttachments;
                 const related_count = if (self.compose.include_original) (if (self.compose.original) |original| original.resources.len else 0) else 0;
-                try types.Limits.validateComposeParts(self.compose.attachments.len + 1, related_count);
-                const selected_attachments = try self.frame.allocator().alloc(types.Attachment, self.compose.attachments.len + 1);
-                @memcpy(selected_attachments[0..self.compose.attachments.len], self.compose.attachments);
-                selected_attachments[self.compose.attachments.len] = attachment;
-                var aggregate: usize = 0;
-                for (selected_attachments[0 .. self.compose.attachments.len + 1]) |item| aggregate = std.math.add(usize, aggregate, item.size) catch return error.AttachmentsTooLarge;
-                if (if (self.compose.include_original) self.compose.original else null) |original| for (original.resources) |item| {
-                    aggregate = std.math.add(usize, aggregate, item.size) catch return error.AttachmentsTooLarge;
-                };
-                if (aggregate > types.Limits.attachment_bytes) {
-                    self.pending_file_count = 0;
-                    return error.AttachmentsTooLarge;
-                }
-                try self.compose.replaceAttachments(self.allocator, selected_attachments[0 .. self.compose.attachments.len + 1]);
-                try self.composerChanged();
+                try types.Limits.validateComposeParts(self.compose.attachments.len + staged, related_count);
+                // Stage privately; the composer changes only when the whole
+                // selected batch has imported. A later failure leaves the
+                // draft unchanged (imported handles may stay quota-charged).
+                try self.stagePendingImport(attachment);
                 self.pending_file_position += 1;
                 if (self.pending_file_position < self.pending_file_count) try self.importNextFile() else {
+                    const combined = try self.frame.allocator().alloc(types.Attachment, self.compose.attachments.len + self.pending_imports.items.len);
+                    @memcpy(combined[0..self.compose.attachments.len], self.compose.attachments);
+                    @memcpy(combined[self.compose.attachments.len..], self.pending_imports.items);
+                    var aggregate: usize = 0;
+                    for (combined) |item| aggregate = std.math.add(usize, aggregate, item.size) catch return error.AttachmentsTooLarge;
+                    // Oversized Attach files are staged (Keep); the backend
+                    // plan reports the blocker and the review refuses Send.
+                    try self.compose.replaceAttachments(self.allocator, combined);
+                    self.clearPendingImports();
+                    try self.composerChanged();
                     self.pending_file_count = 0;
+                    self.pending_delivery = null;
                     self.mode = .compose;
                     self.compose.insert_mode = false;
                     try self.saveDraft(.save);
                 }
             },
+            .selection_plan => try self.applySelectionPlan(response),
+            // Completed by finishStopProbe, never through apply.
+            .stop_probe => {},
+            // Completed by finishRetryPlan, never through apply.
+            .retry_plan => {},
+            .composer_plan => self.applyComposerPlan(response),
             .attachments_save => {
                 const result = try self.data(self.job_arena.allocator(), response);
                 if (!truth(get(result, "saved"))) return error.AttachmentSaveFailed;
@@ -6381,6 +6540,8 @@ const App = struct {
                 const result = try self.data(self.job_arena.allocator(), response);
                 self.clearGraceRecovery();
                 self.compose.unknown_outcome = self.receipt_unknown;
+                var paused_entry: Value = .null;
+                var unknown_entry: Value = .null;
                 for (items(get(result, "queue"))) |entry| {
                     if (!same(text(get(entry, "draftId")), self.compose.id.value())) continue;
                     const state = text(get(entry, "state"));
@@ -6390,15 +6551,25 @@ const App = struct {
                         try self.grace_account.set(self.allocator, self.account());
                         if (same(state, "queued")) {
                             self.grace_recovery = true;
+                            try self.grace_operation.set(send_drive.clip(text(get(entry, "operationId")), 128));
                             self.grace_resume_required = truth(get(entry, "resumeRequired"));
                             self.grace_due = integer(get(entry, "dueAtMs"));
+                            if (self.grace_resume_required and get(entry, "preparation") != .null) paused_entry = entry;
                         } else {
                             self.compose.unknown_outcome = true;
                             try self.retainSendReceipt(entry);
+                            unknown_entry = entry;
                         }
                     }
                 }
-                if (self.compose.unknown_outcome) self.markUnknown(.send) else if (self.grace_recovery) self.say(false, "{s}", .{if (self.grace_resume_required) @as([]const u8, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send") else "Queued send paused · :resume-send / :cancel-send · no automatic send"}) else self.say(false, "Receipts checked · Ctrl+S Review send", .{});
+                // After a restart, a paused Drive preparation reopens with its
+                // receipts and explicit choices; an unknown one keeps its receipts.
+                if (self.compose.unknown_outcome) {
+                    self.markUnknown(.send);
+                    if (unknown_entry != .null) self.noteSendReceipts(unknown_entry);
+                } else if (paused_entry != .null) {
+                    try self.applyQueuedPreparation(paused_entry, get(paused_entry, "preparation"));
+                } else if (self.grace_recovery) self.say(false, "{s}", .{if (self.grace_resume_required) @as([]const u8, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send") else "Queued send paused · :resume-send / :cancel-send · no automatic send"}) else self.say(false, "Receipts checked · Ctrl+S Review send", .{});
             },
             .label_write, .label_receipt, .label_color => try self.applyManagerLabel(response),
             .batch, .undo => {
@@ -6481,6 +6652,9 @@ const App = struct {
                 // The replaced composer's preview is released even if loading fails.
                 self.clearComposePreview();
                 try self.compose.load(self.allocator, result);
+                // A replaced composer (even the same draft ID at revision 0,
+                // changed elsewhere) never reuses display or selection plans.
+                self.invalidateComposerState();
                 self.compose_measure = .{};
                 self.requestComposeMeasure();
                 self.compose_view = .rendered;
@@ -6582,17 +6756,25 @@ const App = struct {
                 const exact = truth(get(result, "exact"));
                 const over_limit = truth(get(result, "overLimit"));
                 if (get(result, "maxBytes") != .integer or integer(get(result, "maxBytes")) <= 0) return error.SizeUnavailable;
+                // Drive links are reserved only at send, so a Drive plan is
+                // sized as a backend estimate. Accept a non-exact size only
+                // with a valid plan that says so; anything else stays
+                // unavailable, and a rendered-body failure stays unsendable.
+                delivery_view.parse(&self.delivery_plan, get(result, "attachmentPlan"), self.compose.attachments.len) catch {};
+                const numeric = get(result, "bytes") == .integer and integer(get(result, "bytes")) >= 0;
+                const estimated = !exact and numeric and self.delivery_plan.valid and self.delivery_plan.mime_estimate and self.delivery_plan.drive_count > 0;
                 if (exact) {
-                    if (get(result, "bytes") != .integer or integer(get(result, "bytes")) < 0) return error.SizeUnavailable;
-                } else if (!over_limit or get(result, "bytes") != .null or !renderedSizeFailure(text(get(result, "admissionError")))) return error.SizeUnavailable;
-                self.compose_measure.bytes = if (exact) @intCast(integer(get(result, "bytes"))) else null;
+                    if (!numeric) return error.SizeUnavailable;
+                } else if (!estimated and (!over_limit or get(result, "bytes") != .null or !renderedSizeFailure(text(get(result, "admissionError"))))) return error.SizeUnavailable;
+                self.compose_measure.bytes = if (exact or estimated) @intCast(integer(get(result, "bytes"))) else null;
                 self.compose_measure.max_bytes = @intCast(integer(get(result, "maxBytes")));
                 self.compose_measure.exact = exact;
+                self.compose_measure.estimated = estimated;
                 self.compose_measure.measured = true;
                 self.compose_measure.measured_operation = self.compose_measure.operation;
                 self.compose_measure.pending = false;
                 self.compose_measure.over_limit = over_limit;
-                self.compose_measure.sendable = exact and !over_limit and truth(get(result, "sendable"));
+                self.compose_measure.sendable = (exact or estimated) and !over_limit and truth(get(result, "sendable"));
                 self.compose_measure.without_original = if (get(result, "withoutOriginalBytes") == .integer and integer(get(result, "withoutOriginalBytes")) >= 0) @intCast(integer(get(result, "withoutOriginalBytes"))) else null;
                 self.compose_measure.failure = .{};
                 const admission = text(get(result, "admissionError"));
@@ -6670,7 +6852,7 @@ const App = struct {
                     const exit_code = self.editor_exit.?;
                     self.editor_exit = null;
                     self.sayEditorResult(exit_code);
-                } else self.say(false, "{s}", .{if (kind == .save_review) "Review send · y Send · Esc Return to draft" else if (self.capabilities.durable_drafts) "Draft saved locally" else "Draft saved in this tab · reload/disconnect discards it"});
+                } else self.say(false, "{s}", .{if (kind == .save_review) (if (self.deliveryBlocksSend()) "Review send · Esc Return to draft" else "Review send · y Send · Esc Return to draft") else if (self.capabilities.durable_drafts) "Draft saved locally" else "Draft saved in this tab · reload/disconnect discards it"});
                 if (kind == .save_review) self.compose_preview_scroll = 0;
                 if (kind == .save_back and self.folder == 2) self.pending_list = true;
                 if (kind == .save_back) try self.resumeMailboxReader();
@@ -6711,11 +6893,19 @@ const App = struct {
                     return;
                 }
                 if (kind == .invitation) self.invitation_calendar_blocked = false;
+                if (kind == .send and same(outcome, "preparationStopped")) {
+                    // Before any Gmail attempt: no Gmail receipt exists yet.
+                    const stopped_operation = text(get(result, "operationId"));
+                    if (stopped_operation.len > 0) try self.compose.operation_id.set(self.allocator, stopped_operation);
+                    try self.compose.operation_error.set(self.allocator, text(get(result, "errorCode")));
+                    return self.applyPreparationStopped(result, false);
+                }
                 const operation_id = text(get(result, "id"));
                 if (operation_id.len > 0) try (if (kind == .send) &self.compose.operation_id else &self.invitation_operation_id).set(self.allocator, operation_id);
                 try (if (kind == .send) &self.compose.operation_error else &self.invitation_operation_error).set(self.allocator, text(get(result, "errorCode")));
                 if (!same(outcome, "applied") and !same(outcome, "rejected")) {
                     self.markUnknown(kind);
+                    if (kind == .send) self.noteSendReceipts(result);
                 } else if (same(outcome, "rejected")) {
                     if (kind == .send) {
                         self.compose.unknown_outcome = false;
@@ -6726,6 +6916,9 @@ const App = struct {
                         self.review_ready = false;
                         self.say(false, "Send canceled · draft retained", .{});
                     } else self.sayFailure(if (kind == .send) "Submission rejected · draft retained" else "RSVP submission rejected", if (kind == .send) self.compose.operation_error.value() else self.invitation_operation_error.value());
+                    // Receipts last: a retired Drive send replaces the
+                    // rejection wording with its own status.
+                    if (kind == .send) self.noteSendReceipts(result);
                 } else {
                     self.mode = .browse;
                     if (kind == .send) self.closeComposer();
@@ -7375,6 +7568,7 @@ const App = struct {
     fn closeComposer(self: *App) void {
         self.compose_active = false;
         self.compose_measure = .{};
+        self.invalidateComposerState();
         self.clearComposePreview();
         // The next draw repaints every cell before rendering, so the previous
         // frame's composer copies are no longer referenced.
@@ -8046,6 +8240,14 @@ const App = struct {
             };
             return true;
         }
+        if (self.composerPlanWanted()) {
+            // Unfinished addresses cannot be planned; wait for the next edit.
+            self.startComposerPlan() catch {
+                self.composer_plan = .{};
+                return false;
+            };
+            return true;
+        }
         return false;
     }
     fn startComposeMeasure(self: *App) !void {
@@ -8089,6 +8291,13 @@ const App = struct {
             return if (self.compose.revision != self.compose.saved_revision) "Message size: saving changes…" else "Message size: calculating…";
         }
         const limit = self.compose_measure.max_bytes;
+        if (self.compose_measure.estimated) {
+            // Drive links are reserved after the countdown; the exact size
+            // is checked against the limit before anything is uploaded.
+            const estimate = self.compose_measure.bytes.?;
+            if (exact) return std.fmt.allocPrint(self.frame.allocator(), "MIME: ≈{d} / {d} bytes · estimate · exact size is checked when Drive links are reserved{s}\n", .{ estimate, limit, if (self.compose_measure.over_limit) @as([]const u8, " · OVER LIMIT") else "" });
+            return std.fmt.allocPrint(self.frame.allocator(), "MIME ≈{s} / {s} · estimate{s}", .{ try delivery_view.size(self.frame.allocator(), estimate), try delivery_view.limit(self.frame.allocator(), limit), if (self.compose_measure.over_limit) @as([]const u8, " · TOO LARGE") else "" });
+        }
         if (!self.compose_measure.exact) return if (exact) std.fmt.allocPrint(self.frame.allocator(), "MIME exceeds {d} bytes · exact size unavailable\n", .{limit}) else std.fmt.allocPrint(self.frame.allocator(), "MIME > {d} MiB · too large", .{limit / (1024 * 1024)});
         const bytes = self.compose_measure.bytes.?;
         if (exact) return std.fmt.allocPrint(self.frame.allocator(), "MIME: {d} / {d} bytes · exact{s}\n", .{ bytes, limit, if (self.compose_measure.over_limit) @as([]const u8, " · OVER LIMIT") else "" });
@@ -8412,7 +8621,7 @@ const App = struct {
                 self.markUnknown(.send);
                 return;
             },
-            .grace_process => {
+            .grace_process, .stop_probe => {
                 self.markUnknown(.send);
                 return;
             },
@@ -8458,6 +8667,161 @@ const App = struct {
     fn canEditAttachments(self: *const App) bool {
         return !self.compose.gmailPaused() and !self.compose.unknown_outcome and (self.job.future == null or readOnlyJob(self.job.kind));
     }
+    /// The plan is current only for the measured saved revision and files.
+    fn currentPlan(self: *const App) ?*const delivery_view.Plan {
+        if (browser_target or !self.composeMeasureCurrent() or !self.delivery_plan.valid or self.delivery_plan.file_count != self.compose.attachments.len) return null;
+        return &self.delivery_plan;
+    }
+    /// Composer display: the measured plan when current, otherwise the
+    /// read-only draft.delivery-plan for this exact draft revision. It
+    /// never authorizes a send; review and Send use currentPlan only.
+    fn displayPlan(self: *const App) ?*const delivery_view.Plan {
+        if (self.currentPlan()) |plan| return plan;
+        if (browser_target or !self.composer_plan.valid or self.composer_plan.file_count != self.compose.attachments.len) return null;
+        if (self.composer_plan_revision != self.compose.revision or self.composer_plan_account != self.account_index or !same(self.composer_plan_draft.slice(), self.compose.id.value())) return null;
+        return &self.composer_plan;
+    }
+    /// Composer replaced or closed: drop display-only and selection plans.
+    /// The measured plan (currentPlan) stays bound to its own digest checks.
+    fn invalidateComposerState(self: *App) void {
+        self.composer_plan = .{};
+        self.composer_plan_requested = std.math.maxInt(u64);
+        self.composer_plan_revision = std.math.maxInt(u64);
+        self.composer_plan_draft = .{};
+        self.invalidateSelectionPlan();
+    }
+    /// A closed or reopened picker owns no earlier selection plan; nothing
+    /// from a cancelled selection may be imported when its reply arrives.
+    fn invalidateSelectionPlan(self: *App) void {
+        self.file_selection_generation +%= 1;
+        self.selection_confirm = false;
+        self.selection_plan = .{};
+        self.selection_attach_limit = 0;
+        self.oversized = null;
+        if (!(self.job.future != null and self.job.kind == .attachment_import)) self.pending_file_count = 0;
+    }
+    fn composerPlanWanted(self: *const App) bool {
+        if (browser_target or !self.compose_active or self.compose.attachments.len == 0 or self.compose.unknown_outcome or self.compose.gmailPaused() or self.grace_active) return false;
+        if (self.currentPlan() != null) return false;
+        return self.composer_plan_requested != self.compose.revision or self.composer_plan_account != self.account_index or !same(self.composer_plan_draft.slice(), self.compose.id.value());
+    }
+    /// Display-only plan of the normalized local composer. No write, import
+    /// or network; the backend supplies every count and blocker.
+    fn startComposerPlan(self: *App) !void {
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        self.composer_plan_requested = self.compose.revision;
+        self.composer_plan_account = self.account_index;
+        try self.composer_plan_draft.set(send_drive.clip(self.compose.id.value(), 128));
+        const draft = try self.compose.draft(scratch.allocator());
+        const id = try self.operationId(scratch.allocator());
+        try self.start(.composer_plan, .{ .account = self.account(), .cmd = "draft.delivery-plan", .draft = draft, .operationId = id });
+    }
+    /// Silent: a refused or malformed plan only removes the display plan.
+    fn applyComposerPlan(self: *App, response: []const u8) void {
+        if (self.job.account_index != self.account_index or self.composer_plan_requested != self.compose.revision or !same(self.composer_plan_draft.slice(), self.compose.id.value())) return;
+        self.composer_plan = .{};
+        const envelope = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{}) catch return;
+        if (get(envelope, "ok") == .bool and !truth(get(envelope, "ok"))) return;
+        const result = get(envelope, "data");
+        const source = if (get(result, "attachmentPlan") != .null) get(result, "attachmentPlan") else result;
+        delivery_view.parse(&self.composer_plan, source, self.compose.attachments.len) catch return;
+        self.composer_plan_revision = self.compose.revision;
+    }
+    fn deliveryRequested(self: *const App) bool {
+        for (self.compose.attachments) |item| if (!delivery_view.isAttach(item.delivery)) return true;
+        return false;
+    }
+    /// Fail closed: Auto/Drive files need a current backend plan to send.
+    fn deliveryBlocksSend(self: *const App) bool {
+        if (browser_target) return false;
+        if (self.currentPlan()) |plan| return plan.blocked();
+        return self.deliveryRequested();
+    }
+    fn uploadAllAvailable(self: *const App) bool {
+        if (!self.capabilities.attachments or self.compose.unknown_outcome or self.compose.gmailPaused()) return false;
+        for (self.compose.attachments) |item| if (!delivery_view.isDrive(item.delivery)) return true;
+        return false;
+    }
+    fn connectDriveAvailable(self: *const App) bool {
+        const plan = self.displayPlan() orelse return false;
+        return plan.has(.drive_not_connected) and !self.compose.unknown_outcome;
+    }
+    fn composeSecondaryAvailable(self: *const App, control: usize) bool {
+        if (control == 0) return self.uploadAllAvailable();
+        if (control <= self.compose.attachments.len) return self.capabilities.attachments;
+        return control == self.compose.attachments.len + 1 and self.connectDriveAvailable();
+    }
+    fn deliveryWarning(self: *App) !?[]const u8 {
+        if (self.compose.attachments.len == 0) return null;
+        const plan = self.displayPlan() orelse return if (self.deliveryRequested() and self.composeMeasureCurrent()) "⚠ Drive plan unavailable · review again before Send." else null;
+        const blocker = plan.first() orelse return null;
+        return try delivery_view.warning(self.frame.allocator(), plan, blocker, self.account());
+    }
+    fn setAttachmentDeliveries(self: *App, index: ?usize, delivery: ?types.AttachmentDelivery) !void {
+        const changed = try self.frame.allocator().dupe(types.Attachment, self.compose.attachments);
+        for (changed, 0..) |*item, position| {
+            if (index) |only| {
+                if (only == position) item.delivery = delivery_view.next(item.delivery);
+            } else item.delivery = delivery;
+        }
+        try self.compose.replaceAttachments(self.allocator, changed);
+        try self.composerChanged();
+    }
+    /// Delivery changes are local draft edits. Nothing uploads before Send.
+    fn cycleAttachmentDelivery(self: *App, index: usize) !void {
+        if (!self.canEditAttachments()) return;
+        if (index >= self.compose.attachments.len) return error.InvalidAttachment;
+        try self.setAttachmentDeliveries(index, null);
+        self.say(false, "{s} · {s} · nothing is uploaded until you send", .{ self.compose.attachments[index].filename, delivery_view.label(self.compose.attachments[index].delivery, .unknown) });
+    }
+    fn uploadAllAttachments(self: *App) !void {
+        if (!self.canEditAttachments() or !self.uploadAllAvailable()) return;
+        try self.setAttachmentDeliveries(null, .drive);
+        self.compose_secondary = false;
+        self.say(false, "All files set to Drive · nothing is uploaded until you send", .{});
+    }
+    /// No inline consent flow exists: show the exact CLI authorization for the
+    /// current account, retaining every granted capability, then re-plan.
+    fn driveAuthorizeCommand(self: *App) !?[]const u8 {
+        const a = self.frame.allocator();
+        var existing: std.ArrayList([]const u8) = .empty;
+        if (self.account_index < self.accounts.len) for (items(get(self.accounts[self.account_index], "capabilities"))) |capability| {
+            // A non-string entry makes the set unknown rather than shorter.
+            if (capability != .string) return null;
+            try existing.append(a, capability.string);
+        };
+        const list = try delivery_view.capabilityList(a, existing.items) orelse return null;
+        return try std.fmt.allocPrint(a, "omagma terminal-auth authorize --account {s}{s} --capabilities {s}", .{ try calendar_ui.shellQuoted(a, self.account()), try self.authRouting(), list });
+    }
+    /// The process routing the user chose explicitly, repeated in printed
+    /// authorization commands. An auto-activated vault needs no --backend.
+    fn authRouting(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        const backend_arg = if (self.options.backend_socket) |path| try std.fmt.allocPrint(a, " --backend {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
+        const config_arg = if (self.options.config_file) |path| try std.fmt.allocPrint(a, " --config {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
+        const grant_arg = if (self.options.grant_file) |path| try std.fmt.allocPrint(a, " --grant-file {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
+        return std.fmt.allocPrint(a, "{s}{s}{s}", .{ backend_arg, config_arg, grant_arg });
+    }
+    /// The exact command when the current capabilities are known; otherwise
+    /// how to check them, never a guessed list that could remove access.
+    fn driveConnectText(self: *App, next_step: []const u8) ![]const u8 {
+        const a = self.frame.allocator();
+        // Context-neutral: after a mid-preparation failure, receipts listed
+        // beside this text already say what was uploaded or shared.
+        if (try self.driveAuthorizeCommand()) |command| return std.fmt.allocPrint(a, "Run this in a terminal, then {s}. Authorizing doesn't upload or send anything.\n{s}\n", .{ next_step, command });
+        return std.fmt.allocPrint(a, "{s}\n", .{try delivery_view.unknownCapabilitiesHint(a, try calendar_ui.shellQuoted(a, self.account()), try self.authRouting())});
+    }
+    fn showDriveConnect(self: *App) !void {
+        if (!self.connectDriveAvailable()) return;
+        self.drive_connect_shown = true;
+        // The command is drawn with the blockers at the top of the review.
+        if (self.mode == .review) self.compose_preview_scroll = 0;
+        // The no-network plan re-reads the grant after authorization elsewhere.
+        self.compose_measure = .{};
+        self.compose_measure.pending = true;
+        self.say(false, "Omagma will add Drive upload (only files it uploads). Your existing access stays as it is.", .{});
+    }
     fn promptAttachment(self: *App) !void {
         if (browser_target) return error.FileAccessUnavailable;
         if (!self.capabilities.files) return error.FileAccessUnavailable;
@@ -8476,6 +8840,7 @@ const App = struct {
     }
     fn beginFileDialog(self: *App, mode: file_dialog.Mode, path: []const u8) void {
         self.file_browser.reset();
+        self.invalidateSelectionPlan();
         self.selected_file_count = 0;
         for (self.selected_files.items) |*field| {
             field.bytes.clearRetainingCapacity();
@@ -8540,33 +8905,116 @@ const App = struct {
             self.selected_file_count += 1;
         }
         try self.file_browser_error.set(self.allocator, "");
+        // Refresh the summary's message estimate; a failure only omits it.
+        self.selection_plan = .{};
+        self.requestSelectionPlan(false, false) catch {};
     }
     fn attachFileSelection(self: *App) !void {
         if (!self.canEditAttachments()) return error.OperationPending;
         if (self.selected_file_count == 0) return error.InvalidFilePath;
         const related = if (if (self.compose.include_original) self.compose.original else null) |original| original.resources else &.{};
         try types.Limits.validateComposeParts(self.compose.attachments.len + self.selected_file_count, related.len);
-        var combined: u64 = 0;
-        for ([_][]const types.Attachment{ self.compose.attachments, related }) |list| for (list) |attachment| {
-            combined += attachment.size;
-        };
         // Validate the complete explicit set before starting any import. Each
         // import then pins immutable bytes, so later source changes cannot
         // alter an attachment that has already been retained by the draft.
         for (self.selected_files.items[0..self.selected_file_count]) |*field| {
             const file = try files.openRegular(self.io, self.allocator, Io.Dir.cwd(), field.value());
-            defer file.close(self.io);
-            const stat = try file.stat(self.io);
-            if (stat.size > types.Limits.attachment_bytes -| combined) return error.AttachmentsTooLarge;
-            combined += stat.size;
+            file.close(self.io);
         }
         try self.ensureFileFields(&self.pending_files, self.selected_file_count);
         for (self.selected_files.items[0..self.selected_file_count], 0..) |*field, index| try self.pending_files.items[index].set(self.allocator, field.value());
         self.pending_file_count = self.selected_file_count;
         self.pending_file_position = 0;
+        self.pending_delivery = null;
+        // The backend plans the selection first; its result imports it or
+        // opens Too large to attach. Marks stay until a choice is made.
+        try self.requestSelectionPlan(true, false);
+    }
+    /// Local metadata/MIME estimate for existing files plus the selection;
+    /// no import or network. A confirmation first asks for the all-Attach
+    /// estimate; only an over-limit selection then asks for the Auto split.
+    fn requestSelectionPlan(self: *App, confirm: bool, auto: bool) !void {
+        const count = if (confirm) self.pending_file_count else self.selected_file_count;
+        if (count == 0 or browser_target) return;
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const paths = try sa.alloc([]const u8, count);
+        for (paths, 0..) |*path, index| {
+            const raw = if (confirm) self.pending_files.items[index].value() else self.selected_files.items[index].value();
+            path.* = try Io.Dir.cwd().realPathFileAlloc(self.io, raw, sa);
+        }
+        const draft = try self.compose.draft(sa);
+        // A summary refresh never displaces a confirming plan.
+        if (!confirm and self.job.future != null and self.job.kind == .selection_plan and self.selection_confirm) return;
+        self.preemptReadOnly();
+        if (self.job.future != null) {
+            if (confirm) return error.OperationPending;
+            return;
+        }
+        self.selection_confirm = confirm;
+        self.file_selection_request_generation = self.file_selection_generation;
+        self.selection_plan_count = count;
+        self.selection_plan_revision = self.compose.revision;
+        self.selection_plan_attach = !auto;
+        self.selection_plan = .{};
+        if (!auto) self.selection_attach_limit = 0;
+        try self.start(.selection_plan, .{ .account = self.account(), .cmd = "draft.selection-plan", .draftId = self.compose.id.value(), .draft = draft, .paths = paths, .delivery = if (auto) @as([]const u8, "auto") else "attach" });
+        if (confirm) self.say(false, "Checking the selected files · nothing is imported yet", .{});
+    }
+    fn applySelectionPlan(self: *App, response: []const u8) !void {
+        const result = try self.data(self.job_arena.allocator(), response);
+        // A plan asked by a closed or reopened picker is stale: no import.
+        if (self.file_selection_request_generation != self.file_selection_generation) return;
+        const confirm = self.selection_confirm;
+        self.selection_confirm = false;
+        const count = if (confirm) self.pending_file_count else self.selected_file_count;
+        // A plan for another selection, draft revision or mode is stale.
+        if (self.mode != .attachment or !self.compose_active or self.compose.revision != self.selection_plan_revision or count != self.selection_plan_count) return;
+        delivery_view.parseSelection(&self.selection_plan, result, self.compose.attachments.len, count) catch |err| {
+            if (confirm) {
+                self.pending_file_count = 0;
+                return err;
+            }
+            return;
+        };
+        if (self.selection_plan_attach) {
+            self.selection_attach_mime = self.selection_plan.mime_bytes;
+            self.selection_attach_limit = self.selection_plan.mime_limit;
+        }
+        if (!confirm) return;
+        self.pending_delivery = null;
+        if (self.selection_plan.selection_over_limit) {
+            // Ask for the Auto split before showing the choices.
+            if (self.selection_plan_attach) return self.requestSelectionPlan(true, true);
+            self.oversized = .{ .count = count, .bytes = self.selection_plan.selected_attached_bytes + self.selection_plan.selected_drive_bytes };
+            return;
+        }
         try self.importNextFile();
         self.file_browser.reset();
         self.selected_file_count = 0;
+    }
+    fn stagePendingImport(self: *App, item: types.Attachment) !void {
+        if (self.pending_import_arena == null) self.pending_import_arena = .init(composeBacking(self.allocator));
+        const pa = self.pending_import_arena.?.allocator();
+        try self.pending_imports.append(pa, .{
+            .id = try pa.dupe(u8, item.id),
+            .filename = try pa.dupe(u8, item.filename),
+            .mimeType = try pa.dupe(u8, item.mimeType),
+            .size = item.size,
+            .data = try pa.dupe(u8, item.data),
+            .blobId = if (item.blobId) |value| try pa.dupe(u8, value) else null,
+            .delivery = item.delivery,
+            .contentId = if (item.contentId) |value| try pa.dupe(u8, value) else null,
+            .disposition = if (item.disposition) |value| try pa.dupe(u8, value) else null,
+            .contentLocation = if (item.contentLocation) |value| try pa.dupe(u8, value) else null,
+        });
+    }
+    fn clearPendingImports(self: *App) void {
+        // The list lives in the arena; dropping both releases every copy.
+        self.pending_imports = .empty;
+        if (self.pending_import_arena) |*arena| arena.deinit();
+        self.pending_import_arena = null;
     }
     fn confirmFileDialog(self: *App, field: *Field, receiving: bool) !void {
         if (!receiving and self.selected_file_count > 0 and self.file_focus == .confirm) return self.attachFileSelection();
@@ -8585,8 +9033,8 @@ const App = struct {
         }
         if (!receiving) {
             if (self.selected_file_count > 0) return self.attachFileSelection();
+            // The selection plan's result imports the file or asks first.
             try self.attachFile(raw);
-            self.file_browser.reset();
             return;
         }
         if (!std.fs.path.isAbsolute(raw) or raw.len > 4096) return error.AttachmentSaveSyntax;
@@ -8608,6 +9056,7 @@ const App = struct {
     }
     fn handleFileDialogKey(self: *App, key: Key, field: *Field, receiving: bool) !void {
         if (self.job.future != null and (self.job.kind == .attachment_import or self.job.kind == .attachment_save)) return;
+        if (!receiving and self.oversized != null) return self.onOversizedKey(key);
         if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
             if (self.path_candidates.candidates.len > 1 and self.path_candidates.active(field.value())) {
                 self.path_candidates.reset();
@@ -8616,7 +9065,10 @@ const App = struct {
             self.file_browser.reset();
             self.path_candidates.reset();
             self.selected_file_count = 0;
-            if (receiving) self.reader_overlay = .attachments else self.mode = self.previous_mode;
+            if (receiving) self.reader_overlay = .attachments else {
+                self.invalidateSelectionPlan();
+                self.mode = self.previous_mode;
+            }
             return;
         }
         if (key.matches(Key.tab, .{}) or key.matches(Key.tab, .{ .shift = true })) {
@@ -8645,7 +9097,10 @@ const App = struct {
                     self.file_browser.reset();
                     self.path_candidates.reset();
                     self.selected_file_count = 0;
-                    if (receiving) self.reader_overlay = .attachments else self.mode = self.previous_mode;
+                    if (receiving) self.reader_overlay = .attachments else {
+                        self.invalidateSelectionPlan();
+                        self.mode = self.previous_mode;
+                    }
                     return;
                 },
                 .listing => {
@@ -8788,8 +9243,11 @@ const App = struct {
                 };
                 combined +|= stat.size;
             }
-            const summary = try std.fmt.allocPrint(self.frame.allocator(), "{d} selected · {s} combined / 25 MiB{s}", .{ self.selected_file_count, try attachmentSizeLabel(self.frame.allocator(), combined), if (unavailable) @as([]const u8, " · file unavailable") else "" });
-            try self.line(inner, 3, try self.fitLine(inner, summary, inner.width), if (unavailable or combined > types.Limits.attachment_bytes) .warning else .muted);
+            // The backend's all-Attach estimate for exactly this selection.
+            const estimate = self.selection_plan.valid and self.selection_plan_attach and self.selection_plan_count == self.selected_file_count and self.selection_plan_revision == self.compose.revision;
+            const message = if (estimate) try std.fmt.allocPrint(self.frame.allocator(), " · message ≈{s} / {s}", .{ try delivery_view.size(self.frame.allocator(), self.selection_plan.mime_bytes), try delivery_view.limit(self.frame.allocator(), self.selection_plan.mime_limit) }) else "";
+            const summary = try std.fmt.allocPrint(self.frame.allocator(), "{d} selected · {s} combined / 25 MiB{s}{s}", .{ self.selected_file_count, try attachmentSizeLabel(self.frame.allocator(), combined), message, if (unavailable) @as([]const u8, " · file unavailable") else "" });
+            try self.line(inner, 3, try self.fitLine(inner, summary, inner.width), if (unavailable or combined > types.Limits.attachment_bytes or (estimate and self.selection_plan.selection_over_limit)) .warning else .muted);
         }
         const rows = inner.height -| 7;
         const top = self.file_browser.selected -| (rows -| 1);
@@ -8807,8 +9265,9 @@ const App = struct {
             if (!receiving and !entry.directory) self.mouseArea(item.child(.{ .width = 3, .height = 1 }), .file_mark, index);
         }
         if (self.file_browser.entries.len == 0) try self.line(inner, 4, if (self.file_browser.directory().len == 0) "Edit the path to choose a folder or file" else "No matching files · hidden files stay hidden", .muted);
+        const planning = self.job.future != null and self.job.kind == .selection_plan and self.selection_confirm;
         const pending = self.job.future != null and (self.job.kind == .attachment_save or self.job.kind == .attachment_import);
-        const detail = if (pending) (if (receiving) @as([]const u8, "Saving attachment…") else "Importing selected files…") else if (self.file_browser_error.value().len > 0) self.file_browser_error.value() else if (self.file_browser.truncated or self.file_browser.scan_limited) "First matching files · type a name to narrow the list" else if (receiving) "Creates a new file · existing files are preserved" else "Space checks files · keep selections across folders";
+        const detail = if (pending) (if (receiving) @as([]const u8, "Saving attachment…") else "Importing selected files…") else if (planning and !receiving) "Checking the selected files · nothing is imported yet" else if (self.file_browser_error.value().len > 0) self.file_browser_error.value() else if (self.file_browser.truncated or self.file_browser.scan_limited) "First matching files · type a name to narrow the list" else if (receiving) "Creates a new file · existing files are preserved" else "Space checks files · keep selections across folders";
         try self.line(inner, inner.height - 3, try self.fitLine(inner, detail, inner.width), if (self.file_browser_error.value().len > 0) .warning else .muted);
         const confirm = if (receiving) (if (self.reader_overlay == .open_attachment) "[Save & open]" else "[Save]") else "[Attach]";
         const button_width: u16 = @intCast(confirm.len);
@@ -8819,6 +9278,49 @@ const App = struct {
         try self.line(cancel, 0, "[Cancel]", if (!pending and self.file_focus == .cancel) .selected else .muted);
         if (!pending) self.mouseArea(cancel, .file_cancel, 0);
         try self.line(inner, inner.height - 1, try self.fitLine(inner, self.fileDialogHints(inner.width), inner.width), .muted);
+        if (!receiving and self.oversized != null) try self.oversizedDraw(win);
+    }
+    fn oversizedDraw(self: *App, win: vaxis.Window) !void {
+        const state = self.oversized orelse return;
+        const a = self.frame.allocator();
+        // The modal owns every hit; the browser below is never clickable.
+        self.mouse_hits.clear();
+        const width = @min(win.width -| 2, 64);
+        const narrow = width < 60;
+        const height = @min(win.height -| 2, @as(u16, if (narrow) 22 else 17));
+        if (width < 24 or height < 10) return;
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Too large to attach ", true);
+        const button_rows: u16 = if (narrow) 4 else 1;
+        const body = inner.child(.{ .height = inner.height -| button_rows -| 1 });
+        // Figures come from the backend selection plan: the Auto split, and
+        // the all-Attach message size when the browser summary measured it.
+        const split = self.selection_plan.valid and !self.selection_plan_attach and self.selection_plan_count == state.count;
+        const message = if (self.selection_attach_limit > 0 and self.selection_plan_count == state.count) try std.fmt.allocPrint(a, " · message ≈{s} / {s}", .{ try delivery_view.size(a, self.selection_attach_mime), try delivery_view.limit(a, self.selection_attach_limit) }) else "";
+        var rows = try self.flow(body, try std.fmt.allocPrint(a, "{d} selected file{s} · {s}{s}. Email allows 25 MiB per message, including everything already attached.\n\n", .{ state.count, if (state.count == 1) @as([]const u8, "") else "s", try delivery_view.size(a, state.bytes), message }), 0, 0);
+        const auto_detail = if (split) try std.fmt.allocPrint(a, "{d} attached ({s}) · {d} from Drive ({s})", .{ self.selection_plan.selected_attached_count, try delivery_view.size(a, self.selection_plan.selected_attached_bytes), self.selection_plan.selected_drive_count, try delivery_view.size(a, self.selection_plan.selected_drive_bytes) }) else "";
+        const everything = if (state.count == 1) @as([]const u8, "it") else try std.fmt.allocPrint(a, "all {d}", .{state.count});
+        const options = if (narrow)
+            try std.fmt.allocPrint(a, "Auto: Attach what fits, share the rest from Drive{s}{s}\nDrive: Share {s} from Drive\nKeep: Add as attachments; sending stays blocked until you change some files\n\n", .{ if (split) @as([]const u8, "\n  ") else "", auto_detail, everything })
+        else
+            try std.fmt.allocPrint(a, "Auto    Attach what fits, share the rest from Drive\n{s}{s}{s}Drive   Share {s} from Drive\nKeep    Add as attachments; sending stays blocked until\n        you change some files\n\n", .{ if (split) @as([]const u8, "        ") else "", auto_detail, if (split) @as([]const u8, "\n") else "", everything });
+        rows = try self.flow(body, options, 0, rows);
+        rows = try self.flowTone(body, try std.fmt.allocPrint(a, "Drive files are uploaded from {s} only after you confirm the send, and shared viewer-only with To and Cc.\n", .{self.account()}), 0, rows, .muted);
+        // B2/B3 already apply: say so now; the choices stay enabled.
+        if (self.displayPlan()) |plan| for ([_]delivery_view.Blocker{ .bcc_with_drive, .drive_not_connected, .drive_unsupported }) |blocker| if (plan.has(blocker)) {
+            rows = try self.flowTone(body, try std.fmt.allocPrint(a, "{s}\n", .{try delivery_view.warning(a, plan, blocker, self.account())}), 0, rows, .warning);
+            break;
+        };
+        const labels = [_][]const u8{ "[ Auto (a) ]", "[ Drive all (d) ]", "[ Keep (k) ]", "[ Cancel ]" };
+        var x: u16 = 0;
+        for (labels, 0..) |caption, index| {
+            const button_row = inner.height -| 1 -| button_rows + @as(u16, if (narrow) @intCast(index) else 0);
+            if (narrow) x = 0;
+            const next = try self.actionButton(inner, button_row, x, caption, state.focus == index, true, .dialog_action, 500 + index);
+            x = next + 1;
+        }
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, "Tab Choices · Enter Choose · a/d/k · Esc Back", inner.width), .muted);
     }
     fn fileDialogHints(self: *const App, width: u16) []const u8 {
         if (width < 40) return switch (self.file_focus) {
@@ -8928,6 +9430,7 @@ const App = struct {
     fn focusComposeAttachments(self: *App, cursor: usize) void {
         if (!self.compose.attachment_focus) self.compose.attachment_return_insert = self.compose.insert_mode;
         const wanted = @min(cursor, self.compose.attachments.len + 7);
+        self.compose_secondary = false;
         self.compose.attachment_focus = true;
         self.compose.attachment_cursor = if (self.composeControlFocusable(wanted)) wanted else self.adjacentComposeControl(wanted, false) orelse self.adjacentComposeControl(wanted, true) orelse wanted;
         self.compose.insert_mode = false;
@@ -8940,15 +9443,45 @@ const App = struct {
     fn onComposeAttachmentKey(self: *App, key: Key) !void {
         const count = self.compose.attachments.len + 7;
         self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
-        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.leaveComposeAttachments(4, false);
+        if (self.compose_secondary and !self.composeSecondaryAvailable(self.compose.attachment_cursor)) self.compose_secondary = false;
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+            self.compose_secondary = false;
+            return self.leaveComposeAttachments(4, false);
+        }
+        // A secondary control precedes its primary control in Tab order:
+        // [Upload all] [Add A], each row's delivery button then [x], and
+        // [Connect Drive] before the format control.
         if (key.matches(Key.tab, .{})) {
-            if (self.adjacentComposeControl(self.compose.attachment_cursor, false)) |index| self.compose.attachment_cursor = index else self.leaveComposeAttachments(0, true);
+            if (self.compose_secondary and self.composeControlFocusable(self.compose.attachment_cursor)) {
+                self.compose_secondary = false;
+            } else if (self.adjacentComposeControl(self.compose.attachment_cursor, false)) |index| {
+                self.compose.attachment_cursor = index;
+                self.compose_secondary = self.composeSecondaryAvailable(index);
+            } else {
+                self.compose_secondary = false;
+                self.leaveComposeAttachments(0, true);
+            }
             return;
         }
         if (key.matches(Key.tab, .{ .shift = true })) {
-            if (self.adjacentComposeControl(self.compose.attachment_cursor, true)) |index| self.compose.attachment_cursor = index else self.leaveComposeAttachments(4, true);
+            if (!self.compose_secondary and self.composeSecondaryAvailable(self.compose.attachment_cursor)) {
+                self.compose_secondary = true;
+            } else if (self.adjacentComposeControl(self.compose.attachment_cursor, true)) |index| {
+                self.compose.attachment_cursor = index;
+                self.compose_secondary = false;
+            } else {
+                self.compose_secondary = false;
+                self.leaveComposeAttachments(4, true);
+            }
             return;
         }
+        if (self.compose_secondary and key.matches(Key.enter, .{})) {
+            const cursor = self.compose.attachment_cursor;
+            if (cursor == 0) return self.uploadAllAttachments();
+            if (cursor <= self.compose.attachments.len) return self.cycleAttachmentDelivery(cursor - 1);
+            return self.showDriveConnect();
+        }
+        if (self.compose_secondary and !(self.compose.attachment_cursor >= 1 and self.compose.attachment_cursor <= self.compose.attachments.len)) self.compose_secondary = false;
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 6 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.setOriginalIncluded(!self.compose.include_original, true);
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 7 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.toggleOriginalFold();
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 4 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.previewComposeInBrowser();
@@ -8981,26 +9514,57 @@ const App = struct {
         if (!self.canEditAttachments()) return error.OperationPending;
         if (self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
         const file = try files.openRegular(self.io, self.allocator, Io.Dir.cwd(), path);
-        defer file.close(self.io);
-        const stat = try file.stat(self.io);
-        var combined: usize = 0;
-        for (self.compose.attachments) |attachment| combined += attachment.size;
+        file.close(self.io);
         if (if (self.compose.include_original) self.compose.original else null) |original| {
             try types.Limits.validateComposeParts(self.compose.attachments.len + 1, original.resources.len);
-            for (original.resources) |attachment| combined += attachment.size;
         }
-        if (stat.size > types.Limits.attachment_bytes -| combined) return error.AttachmentsTooLarge;
         try self.ensureFileFields(&self.pending_files, 1);
         try self.pending_files.items[0].set(self.allocator, path);
         self.pending_file_count = 1;
         self.pending_file_position = 0;
+        self.pending_delivery = null;
+        try self.requestSelectionPlan(true, false);
+    }
+    /// Auto, Drive all and Keep apply only to the new files; Cancel returns
+    /// to the browser with its marks. Choosing never uploads anything.
+    fn chooseOversized(self: *App, choice: usize) !void {
+        if (self.oversized == null) return;
+        self.oversized = null;
+        if (choice >= 3) {
+            self.pending_file_count = 0;
+            return;
+        }
+        self.pending_delivery = switch (choice) {
+            0 => .auto,
+            1 => .drive,
+            else => null,
+        };
         try self.importNextFile();
+        self.file_browser.reset();
+        self.selected_file_count = 0;
+    }
+    fn onOversizedKey(self: *App, key: Key) !void {
+        if (self.oversized == null) return;
+        if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) return self.chooseOversized(3);
+        if (tabDirection(key)) |backwards| {
+            self.oversized.?.focus = if (backwards) self.oversized.?.focus -% 1 else self.oversized.?.focus +% 1;
+            return;
+        }
+        // Dialogs have no text input, so plain letters are safe here.
+        if (key.matches('a', .{})) return self.chooseOversized(0);
+        if (key.matches('d', .{})) return self.chooseOversized(1);
+        if (key.matches('k', .{})) return self.chooseOversized(2);
+        if (key.matches(Key.enter, .{})) return self.chooseOversized(self.oversized.?.focus);
     }
     fn importNextFile(self: *App) !void {
         if (self.pending_file_position >= self.pending_file_count) return;
         if (!self.canEditAttachments()) return error.OperationPending;
+        if (self.pending_file_position == 0) self.clearPendingImports();
         self.preemptReadOnly();
-        try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value() });
+        // Import pins local bytes only; Drive work waits for a reviewed send.
+        if (self.pending_delivery) |delivery| {
+            try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value(), .delivery = @tagName(delivery) });
+        } else try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value() });
         self.say(false, "Importing attachment {d}/{d}…", .{ self.pending_file_position + 1, self.pending_file_count });
     }
     fn saveIncomingAttachment(self: *App, arguments_in: []const u8) !void {
@@ -9038,16 +9602,23 @@ const App = struct {
         return platform.operationId(self.io, allocator, self.operation_nonce, &self.operation_sequence);
     }
     fn sendDraft(self: *App) !void {
+        return self.sendDraftAs(null);
+    }
+    /// retry is an explicit Retry preparation: the same operation, the same
+    /// unchanged reviewed draft (its content digest is checked again).
+    fn sendDraftAs(self: *App, retry: ?[]const u8) !void {
         if (self.compose.saved_changed) return self.openDraftConflict();
         if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (self.gmailCopyWarning() and !self.gmail_send_ack) return error.GmailCopyUnchecked;
+        // Every send path rechecks the displayed plan before staging.
+        if (self.deliveryBlocksSend()) return error.AttachmentPlanBlocked;
         if (self.compose.unknown_outcome) {
             self.markUnknown(.send);
             return;
         }
         try self.validateComposeSend();
         try self.requireComposePreview();
-        if (!self.review_ready) return error.DraftReviewRequired;
+        if (retry == null and !self.review_ready) return error.DraftReviewRequired;
         if (!browser_target and !self.composeMeasureCurrent()) {
             self.requestComposeMeasure();
             _ = try self.dispatchComposer();
@@ -9063,14 +9634,409 @@ const App = struct {
         if (!browser_target and !same(&gmail_digest, self.compose_measure.content_digest.slice())) return error.DraftChanged;
         const expected_digest: ?[]const u8 = if (browser_target) null else self.compose_measure.content_digest.slice();
         self.review_ready = false;
-        const id = if (!browser_target) try self.allocator.dupe(u8, self.compose_measure.operation.slice()) else try self.operationId(self.allocator);
+        const id = if (retry) |operation| try self.allocator.dupe(u8, operation) else if (!browser_target) try self.allocator.dupe(u8, self.compose_measure.operation.slice()) else try self.operationId(self.allocator);
         defer self.allocator.free(id);
         try self.compose.operation_id.set(self.allocator, id);
         try self.compose.operation_error.set(self.allocator, "");
+        try self.pinSend();
         if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..], .expectedContentDigest = expected_digest }) else {
             self.cancelAutosaveTimer();
             self.autosave_due = false;
             try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..], .expectedContentDigest = expected_digest });
+        }
+    }
+    /// Pins the reviewed composer for progress rows and clears per-send state.
+    fn pinSend(self: *App) !void {
+        self.resetSendState();
+        const plan = self.currentPlan() orelse return;
+        try self.send_pinned.begin(self.compose.fields[3].value(), self.account());
+        for (self.compose.attachments, 0..) |attachment, index| try self.send_pinned.add(index, attachment.filename, attachment.size, plan.resolution(index) == .drive);
+        self.grace_drive = self.send_pinned.drive_count > 0;
+        if (!self.grace_drive) self.send_pinned.active = false;
+    }
+    fn resetSendState(self: *App) void {
+        self.drive_progress.reset();
+        self.send_failure = .{};
+        self.send_stop_focus = null;
+        self.send_cancel_focus = false;
+        self.send_connect_shown = false;
+        self.send_pinned = .{};
+        self.grace_drive = false;
+    }
+    /// Rows for a complete backend plan of exactly the composer's files.
+    /// Receipts are not a plan: they omit files not yet reserved.
+    fn pinnedFromPlan(self: *App, plan: *const delivery_view.Plan) !send_drive.Pinned {
+        var pinned: send_drive.Pinned = .{};
+        try pinned.begin(self.compose.fields[3].value(), self.account());
+        for (self.compose.attachments, 0..) |attachment, index| {
+            const resolved = plan.resolution(index);
+            if (resolved == .unknown) return error.InvalidAttachmentPlan;
+            try pinned.add(index, attachment.filename, attachment.size, resolved == .drive);
+        }
+        if (pinned.drive_count == 0) pinned.active = false;
+        return pinned;
+    }
+    const RetryIntent = enum { retry, resume_countdown };
+    /// The paused queue's operation: from its preparation receipt, else from
+    /// the queue entry itself (an intent paused before any preparation).
+    fn pausedOperation(self: *const App) []const u8 {
+        if (self.send_failure.kind == .paused and self.send_failure.operation.len > 0) return self.send_failure.operation.slice();
+        return self.grace_operation.slice();
+    }
+    /// Continuing a paused Drive queue (Retry preparation or :resume-send,
+    /// for example after a restart with no measured plan): first read the
+    /// saved source's complete plan with the local read-only
+    /// draft.delivery-plan, then continue with the chosen intent. The plan
+    /// only labels progress rows; the immutable queued intent, its operation
+    /// and backend hash stay the send authority.
+    fn startPausedRetry(self: *App, intent: RetryIntent) !void {
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        if (!self.pausedGraceForCompose()) return error.NoPendingSend;
+        const operation = self.pausedOperation();
+        if (operation.len == 0 or self.compose.id.value().len == 0 or self.grace_queue.value().len == 0) return error.MissingOperation;
+        try self.retry_plan_draft.set(send_drive.clip(self.compose.id.value(), 128));
+        try self.retry_plan_queue.set(send_drive.clip(self.grace_queue.value(), 256));
+        try self.retry_plan_operation.set(send_drive.clip(operation, 128));
+        self.retry_plan_revision = self.compose.revision;
+        self.retry_plan_account = self.account_index;
+        self.retry_plan_intent = intent;
+        try self.start(.retry_plan, .{ .account = self.account(), .cmd = "draft.delivery-plan", .draftId = self.compose.id.value(), .operationId = operation });
+        self.say(false, "Checking this draft's Drive plan · nothing is sent or uploaded by this check", .{});
+    }
+    /// Null when the composer, queue, operation or pause changed meanwhile.
+    fn applyRetryPlan(self: *App, response: []const u8) !?send_drive.Pinned {
+        if (self.retry_plan_account != self.account_index or !self.compose_active or self.compose.revision != self.retry_plan_revision) return null;
+        if (!same(self.retry_plan_draft.slice(), self.compose.id.value()) or !same(self.retry_plan_queue.slice(), self.grace_queue.value())) return null;
+        if (!self.pausedGraceForCompose() or !same(self.retry_plan_operation.slice(), self.pausedOperation())) return null;
+        if (self.retry_plan_intent == .retry and self.send_failure.kind != .paused) return null;
+        const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{});
+        if (get(envelope, "ok") != .bool or !truth(get(envelope, "ok"))) return error.InvalidAttachmentPlan;
+        const result = get(envelope, "data");
+        const source = if (get(result, "attachmentPlan") != .null) get(result, "attachmentPlan") else result;
+        var plan: delivery_view.Plan = .{};
+        try delivery_view.parse(&plan, source, self.compose.attachments.len);
+        return try self.pinnedFromPlan(&plan);
+    }
+    /// A failed or stale plan read refuses before any queue write.
+    fn finishRetryPlan(self: *App) void {
+        const unavailable = if (self.retry_plan_intent == .resume_countdown) "Drive plan unavailable · send stays paused" else "Drive plan unavailable · nothing was retried";
+        if (self.job.failure) |err| return self.sayFailure(unavailable, @errorName(err));
+        const response = self.job.response orelse return self.sayFailure(unavailable, "InvalidProviderResponse");
+        const pinned = (self.applyRetryPlan(response) catch |err| return self.sayFailure(unavailable, @errorName(err))) orelse {
+            self.say(true, "Draft or queue changed while checking · send stays paused", .{});
+            return;
+        };
+        // Pinned now, so the panel and Stop survive the countdown's end.
+        self.resetSendState();
+        self.send_pinned = pinned;
+        self.grace_drive = pinned.drive_count > 0;
+        switch (self.retry_plan_intent) {
+            .retry => {
+                // Explicit retry of the same queued intent and operation.
+                self.start(.grace_process, .{ .cmd = "queue.send-now", .account = self.grace_account.value(), .queueId = self.grace_queue.value() }) catch |err| return self.sayFailure("Retry not started · queue stays paused", @errorName(err));
+                self.grace_resume_required = false;
+                self.say(false, "Retrying preparation · same operation · nothing sent yet", .{});
+            },
+            // :resume-send restarts the ordinary countdown; it is never Send now.
+            .resume_countdown => self.start(.grace_resume, .{ .cmd = "queue.resume", .account = self.grace_account.value(), .queueId = self.grace_queue.value(), .delaySeconds = self.ui_preferences.sendGraceSeconds }) catch |err| return self.sayFailure("Countdown not restarted · send stays paused", @errorName(err)),
+        }
+    }
+    fn sendProgressActive(self: *const App) bool {
+        return self.send_pinned.active and self.job.future != null and (self.job.kind == .send or self.job.kind == .grace_process) and self.job.account_index == self.account_index;
+    }
+    /// Stop is offered from reservation through sharing, never during Gmail
+    /// submission (Ctrl+C keeps its existing protected behaviour).
+    fn sendCancellable(self: *const App) bool {
+        if (!self.sendProgressActive()) return false;
+        const phase = self.drive_progress.snapshot().phase orelse return true;
+        return phase != .submitting;
+    }
+    fn sendFailureVisible(self: *const App) bool {
+        return self.send_failure.kind != .none and self.compose_active and (self.mode == .compose or self.mode == .review) and same(self.send_failure.draft.slice(), self.compose.id.value()) and same(self.send_failure.account.slice(), self.account());
+    }
+    fn recordSendReceipts(self: *App, kind: send_drive.Kind, receipt: Value) !void {
+        self.send_failure = .{ .kind = kind, .can_retry = truth(get(receipt, "canRetryPreparation")) };
+        try self.send_failure.code.set(send_drive.clip(text(get(receipt, "errorCode")), 64));
+        try self.send_failure.operation.set(send_drive.clip(text(get(receipt, "operationId")), 128));
+        try self.send_failure.draft.set(send_drive.clip(self.compose.id.value(), 128));
+        try self.send_failure.account.set(send_drive.clip(self.account(), 320));
+        try send_drive.parseFiles(&self.send_failure, get(receipt, "driveFiles"));
+        // Retry preparation gets initial focus when offered.
+        self.send_failure.focus = 0;
+        self.send_connect_shown = false;
+    }
+    /// Preparation stopped before any Gmail attempt. The same operation may
+    /// be retried explicitly; nothing is retried or revoked automatically.
+    fn applyPreparationStopped(self: *App, receipt: Value, queued: bool) !void {
+        try self.recordSendReceipts(if (queued) .paused else .stopped, receipt);
+        self.compose.unknown_outcome = false;
+        self.mode = .compose;
+        self.compose.insert_mode = false;
+        self.say(true, "Message not sent · Drive receipts kept · nothing retries automatically", .{});
+    }
+    /// A paused queue entry carries the reason outside its nested receipt
+    /// (for example InterruptedPreparation after a restart); keep it.
+    fn applyQueuedPreparation(self: *App, entry: Value, preparation: Value) !void {
+        try self.applyPreparationStopped(preparation, true);
+        if (self.send_failure.code.len == 0) try self.send_failure.code.set(send_drive.clip(text(get(entry, "errorCode")), 64));
+        if (self.send_failure.operation.len == 0) try self.send_failure.operation.set(send_drive.clip(text(get(entry, "operationId")), 128));
+        if (!self.send_failure.can_retry and get(preparation, "canRetryPreparation") == .null) self.send_failure.can_retry = truth(get(entry, "resumeRequired"));
+    }
+    /// Gmail outcome is unknown or rejected after sharing: attach receipts
+    /// to the existing protected flows without offering a retry.
+    fn noteSendReceipts(self: *App, result: Value) void {
+        const drive_files = get(result, "driveFiles");
+        const source = if (drive_files == .array) result else get(result, "preparation");
+        // A retired Drive send was fenced before Gmail: never a Gmail
+        // rejection or "all shared". Its frozen receipts say what exists,
+        // and it can't resume, so only Edit draft and Stop remain.
+        const code = sendReceiptCode(result);
+        if (!self.compose.unknown_outcome and (send_drive.retiredStatus(code) != null or same(text(get(result, "kind")), "drivePreparationRetired"))) {
+            self.say(true, "{s}", .{send_drive.retiredStatus(code) orelse "Message not sent · this Drive send was retired · draft retained"});
+            self.recordSendReceipts(.stopped, source) catch return;
+            if (send_drive.retiredStatus(self.send_failure.code.slice()) == null) self.send_failure.code.set("DrivePreparationRetired") catch {};
+            self.send_failure.can_retry = false;
+            return;
+        }
+        if (get(source, "driveFiles") != .array or items(get(source, "driveFiles")).len == 0) return;
+        const kind: send_drive.Kind = if (self.compose.unknown_outcome) .unknown else .shared_rejected;
+        self.recordSendReceipts(kind, source) catch return;
+        self.send_failure.can_retry = false;
+        if (kind == .shared_rejected and !self.send_failure.anyShared()) self.send_failure = .{};
+    }
+    /// A Drive send is prepared before Gmail: only the worker's
+    /// mail_submitting phase reads as Submitting. Ordinary sends keep theirs.
+    fn sendStatusLabel(self: *const App) []const u8 {
+        const submitting = "Submitting · waiting for the provider receipt";
+        if (!self.sendProgressActive() or self.send_pinned.drive_count == 0) return submitting;
+        return switch (self.drive_progress.snapshot().phase orelse .reserving) {
+            .reserving => "Preparing Drive files · message not sent yet",
+            .uploading => "Uploading to Drive · message not sent yet",
+            .sharing => "Sharing Drive files · message not sent yet",
+            .submitting => submitting,
+        };
+    }
+    /// Puts each Drive phase change on the status line once.
+    fn noteSendPhase(self: *App) void {
+        if (!self.sendProgressActive() or self.send_pinned.drive_count == 0) return;
+        const phase = self.drive_progress.snapshot().phase;
+        if (std.meta.eql(phase, self.send_pinned.announced)) return;
+        self.send_pinned.announced = phase;
+        self.say(false, "{s}", .{self.sendStatusLabel()});
+    }
+    const SendAction = enum { retry, edit, stop, connect, close };
+    fn sendFailureActions(self: *const App, out: *[4]SendAction) []const SendAction {
+        var count: usize = 0;
+        switch (self.send_failure.kind) {
+            .stopped, .paused => {
+                if (self.send_failure.can_retry) {
+                    out[count] = .retry;
+                    count += 1;
+                }
+                out[count] = .edit;
+                out[count + 1] = .stop;
+                count += 2;
+                // Connect Drive only for a missing or expired grant that the
+                // backend lets the user retry; never for a generic denial.
+                const reason = send_drive.reasonOf(self.send_failure.code.slice());
+                if (self.send_failure.can_retry and (reason == .access_expired or reason == .not_connected)) {
+                    out[count] = .connect;
+                    count += 1;
+                }
+            },
+            .shared_rejected => {
+                out[0] = .edit;
+                count = 1;
+            },
+            .unknown, .none => {
+                out[0] = .close;
+                count = 1;
+            },
+        }
+        return out[0..count];
+    }
+    fn sendActionLabel(action: SendAction) []const u8 {
+        return switch (action) {
+            .retry => "[Retry preparation]",
+            .edit => "[Edit draft]",
+            .stop => "[Stop]",
+            .connect => "[Connect Drive]",
+            .close => "[Close]",
+        };
+    }
+    fn runSendAction(self: *App, action: SendAction) !void {
+        if ((action == .edit or action == .stop or action == .close) and self.job.kind == .retry_plan) {
+            // The user revoked this intent before its read-only plan completed.
+            // Join that read before Stop can start queue.cancel, and make any
+            // already queued completion stale even if the read had finished.
+            self.retry_plan_queue = .{};
+            self.cancelJob();
+        }
+        switch (action) {
+            .retry => {
+                var buffer: [128]u8 = undefined;
+                const operation = buffer[0..self.send_failure.operation.len];
+                @memcpy(operation, self.send_failure.operation.slice());
+                if (self.send_failure.kind == .paused) {
+                    // Plan first (local read), then the same queued intent.
+                    try self.startPausedRetry(.retry);
+                } else {
+                    if (operation.len == 0) return error.MissingOperation;
+                    try self.sendDraftAs(operation);
+                }
+            },
+            .edit => {
+                self.send_failure = .{};
+                self.mode = .compose;
+                self.say(false, "Draft restored with its Drive receipts · edit, then review to send", .{});
+            },
+            .stop => {
+                if (self.send_failure.kind == .paused) {
+                    self.preemptReadOnly();
+                    if (self.job.future != null) return error.OperationPending;
+                    try self.start(.grace_cancel, .{ .cmd = "queue.cancel", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
+                }
+                self.send_failure = .{};
+                self.say(false, "Message not sent. Nothing was sent or revoked automatically.", .{});
+            },
+            .connect => self.send_connect_shown = true,
+            .close => self.send_failure = .{},
+        }
+    }
+    fn onSendFailureKey(self: *App, key: Key) !void {
+        var buffer: [4]SendAction = undefined;
+        const actions = self.sendFailureActions(&buffer);
+        self.send_failure.focus = @min(self.send_failure.focus, actions.len - 1);
+        if (tabDirection(key)) |backwards| {
+            self.send_failure.focus = (self.send_failure.focus + if (backwards) actions.len - 1 else 1) % actions.len;
+        } else if (key.matches(Key.enter, .{})) {
+            try self.runSendAction(actions[self.send_failure.focus]);
+        } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+            try self.runSendAction(if (self.send_failure.kind == .unknown) .close else .edit);
+        }
+    }
+    /// Returns true when the progress panel consumed the key.
+    fn onSendProgressKey(self: *App, key: Key) !bool {
+        if (self.send_stop_focus) |focus| {
+            if (tabDirection(key) != null) {
+                self.send_stop_focus = focus ^ 1;
+            } else if (key.matches(Key.enter, .{})) {
+                if (focus == 0) try self.stopSend() else self.send_stop_focus = null;
+            } else if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+                self.send_stop_focus = null;
+            } else return !key.matches('c', .{ .ctrl = true });
+            return true;
+        }
+        if (!self.sendCancellable()) return false;
+        if (tabDirection(key) != null) {
+            self.send_cancel_focus = !self.send_cancel_focus;
+            return true;
+        }
+        if ((self.send_cancel_focus and key.matches(Key.enter, .{})) or key.matches('z', .{ .ctrl = true }) or key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+            // Keep sending has initial focus.
+            self.send_stop_focus = 1;
+            return true;
+        }
+        return false;
+    }
+    /// Cooperative stop before Gmail: the backend finishes the current step
+    /// and returns its stopped receipt. Anything else stays protected.
+    fn stopSend(self: *App) !void {
+        self.send_stop_focus = null;
+        self.send_cancel_focus = false;
+        if (!self.sendProgressActive()) return;
+        const kind = self.job.kind;
+        if (self.job.future) |*future| future.cancel(self.io);
+        self.job.future = null;
+        // A native client may return its definitive receipt directly.
+        if (self.job.failure == null) if (self.job.response) |response| if (self.stopResponseDefinitive(kind, response)) {
+            if (kind == .send) return self.finishSend();
+            self.apply(.grace_process, response) catch self.markUnknown(.send);
+            return;
+        };
+        // A closed vault socket is not an acknowledgement. Verify the Stop
+        // with one durable read; it never sends or retries anything.
+        if (kind == .send) self.client.sendReceipt(self.job.request, false);
+        self.startStopProbe(kind == .grace_process) catch |err| {
+            self.compose.operation_error.set(self.allocator, @errorName(err)) catch {};
+            self.markUnknown(.send);
+        };
+    }
+    fn stopResponseDefinitive(self: *App, kind: JobKind, response: []const u8) bool {
+        const envelope = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{}) catch return false;
+        if (get(envelope, "ok") != .bool or !truth(get(envelope, "ok"))) return false;
+        const result = get(envelope, "data");
+        if (kind == .send) {
+            const outcome = text(get(result, "outcome"));
+            return same(outcome, "preparationStopped") or same(outcome, "applied") or same(outcome, "rejected");
+        }
+        const state = text(get(result, "state"));
+        return same(state, "applied") or same(state, "canceled") or same(state, "rejected") or (same(state, "queued") and truth(get(result, "resumeRequired")) and get(result, "preparation") != .null);
+    }
+    /// operation.read / queue.read wait in the owner lane for the cancelled
+    /// send to finish, then return its durable receipt.
+    fn startStopProbe(self: *App, queued: bool) !void {
+        self.stop_probe_queue = queued;
+        if (queued) {
+            try self.start(.stop_probe, .{ .cmd = "queue.read", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
+        } else {
+            const operation = self.compose.operation_id.value();
+            if (operation.len == 0) return error.MissingOperation;
+            try self.start(.stop_probe, .{ .cmd = "operation.read", .account = self.account(), .operationId = operation });
+        }
+        self.say(false, "Checking whether sending stopped · this only reads the saved receipt", .{});
+    }
+    /// Any failure to read a definitive receipt keeps the unknown protection;
+    /// there is no Retry from an unverified Stop.
+    fn finishStopProbe(self: *App) void {
+        if (self.job.failure) |err| {
+            self.compose.operation_error.set(self.allocator, @errorName(err)) catch {};
+            self.markUnknown(.send);
+            return;
+        }
+        const response = self.job.response orelse {
+            self.markUnknown(.send);
+            return;
+        };
+        self.applyStopProbe(response) catch |err| {
+            self.compose.operation_error.set(self.allocator, @errorName(err)) catch {};
+            self.markUnknown(.send);
+        };
+    }
+    fn applyStopProbe(self: *App, response: []const u8) !void {
+        if (!self.compose_active or !same(self.job.draft_target.slice(), self.compose.id.value())) {
+            self.say(true, "Stop check finished for another draft · open it to see its receipt", .{});
+            return;
+        }
+        // Stopped receipts open the outcome panel; a Gmail receipt is shown
+        // as sent/rejected; anything else keeps the unknown protection.
+        if (self.stop_probe_queue) return self.applyGraceResult(response);
+        return self.apply(.send, response);
+    }
+    /// Intermediate state after Stop: truthful until the durable read returns.
+    fn drawSendChecking(self: *App, win: vaxis.Window) !void {
+        if (self.job.future == null or self.job.kind != .stop_probe or self.job.account_index != self.account_index) return;
+        const width = @min(win.width -| 2, 78);
+        if (width < 30 or win.height < 8) return;
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = 1, .width = width, .height = 6 });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Stopping ", true);
+        var rows = try self.flowTone(inner, "Checking whether sending stopped…\n", 0, 0, .warning);
+        rows = try self.flow(inner, "Not confirmed stopped yet. This only reads the saved receipt; nothing is sent or retried.\n", 0, rows);
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, "Ctrl+C stops waiting · the draft stays protected as possibly sent", inner.width), .muted);
+    }
+    fn onSendPanelAction(self: *App, index: usize) !void {
+        if (index == 600) {
+            if (self.sendCancellable()) self.send_stop_focus = 1;
+        } else if (index == 601) {
+            try self.stopSend();
+        } else if (index == 602) {
+            self.send_stop_focus = null;
+        } else if (index >= 610 and index < 614) {
+            var buffer: [4]SendAction = undefined;
+            const actions = self.sendFailureActions(&buffer);
+            if (index - 610 < actions.len) try self.runSendAction(actions[index - 610]);
         }
     }
     fn pausedGraceForCompose(self: *const App) bool {
@@ -9088,6 +10054,7 @@ const App = struct {
         self.grace_queue.deinit(self.allocator);
         self.grace_account.deinit(self.allocator);
         self.grace_draft.deinit(self.allocator);
+        self.grace_operation = .{};
         self.grace_due = 0;
         self.grace_close = false;
         self.grace_rect = null;
@@ -9120,11 +10087,21 @@ const App = struct {
         if (!send_now and Io.Timestamp.now(self.io, .real).toMilliseconds() < self.grace_due) return;
         self.preemptReadOnly();
         if (self.job.future != null) return;
+        // A resumed paused queue was never pinned by this session's Send. Pin
+        // only from the measured saved-source plan; never guess from receipts.
+        if (!self.send_pinned.active) if (self.currentPlan()) |plan| {
+            if (self.pinnedFromPlan(plan)) |pinned| {
+                self.resetSendState();
+                self.send_pinned = pinned;
+                self.grace_drive = pinned.drive_count > 0;
+            } else |_| {}
+        };
         try self.start(.grace_process, .{ .cmd = if (send_now) @as([]const u8, "queue.send-now") else "queue.process", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
         self.grace_active = false;
         self.grace_pending.store(false, .release);
         self.grace_rect = null;
-        self.say(false, "Submitting · waiting for the provider receipt", .{});
+        self.say(false, "{s}", .{self.sendStatusLabel()});
+        self.send_pinned.announced = self.drive_progress.snapshot().phase;
     }
     fn applyGraceResult(self: *App, response: []const u8) !void {
         const result = try self.data(self.job_arena.allocator(), response);
@@ -9136,6 +10113,10 @@ const App = struct {
             self.grace_recovery = true;
             self.compose.unknown_outcome = false;
             self.mode = .compose;
+            // A stopped Drive preparation keeps the same queue and operation;
+            // only an explicit Retry preparation (queue.send-now) continues.
+            const preparation = get(result, "preparation");
+            if (preparation != .null and self.compose_active and same(self.compose.id.value(), self.grace_draft.value())) return self.applyQueuedPreparation(result, preparation);
             self.say(false, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send", .{});
             return;
         }
@@ -9155,10 +10136,12 @@ const App = struct {
             self.retireComposeMeasure();
             self.mode = .compose;
             self.sayFailure("Submission rejected · draft retained", sendReceiptCode(result));
+            self.noteSendReceipts(result);
         } else {
             // A retained-reason failure must not delay the protection itself.
             self.retainSendReceipt(result) catch {};
             self.markUnknown(.send);
+            self.noteSendReceipts(result);
         }
     }
     /// Keeps the operation identity and reason of a send receipt. Blank or
@@ -9197,13 +10180,135 @@ const App = struct {
         }
         // Reserve the prefix slot rather than deriving hit positions from the
         // current digits: 10 -> 9 must never move a button under the pointer.
-        const prefix_width: u16 = if (win.width >= 70) 36 else if (win.width >= 55) 34 else if (win.width >= 36) 18 else 12;
+        // Drive sends say when uploads start; the slot width stays fixed.
+        const drive_wide = self.grace_drive and win.width >= 100;
+        const prefix_width: u16 = if (drive_wide) 58 else if (win.width >= 70) 36 else if (win.width >= 55) 34 else if (win.width >= 36) 18 else 12;
         const seconds = @divFloor(remaining + 999, 1000);
-        const prefix = if (win.width >= 55) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s · nothing sent yet", .{seconds}) else if (win.width >= 36) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s", .{seconds}) else try std.fmt.allocPrint(self.frame.allocator(), " Sending {d}s", .{seconds});
+        const prefix = if (drive_wide) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s · uploads start when the countdown ends", .{seconds}) else if (win.width >= 55) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s · nothing sent yet", .{seconds}) else if (win.width >= 36) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s", .{seconds}) else try std.fmt.allocPrint(self.frame.allocator(), " Sending {d}s", .{seconds});
         try self.line(bar.child(.{ .width = @min(prefix_width, bar.width) }), 0, prefix, .selected);
         const x = try self.actionButton(bar, 0, prefix_width, if (win.width >= 70) "[Undo Ctrl+Z]" else "[Undo]", self.grace_focus == 0, true, .dialog_action, 0);
         _ = try self.actionButton(bar, 0, x, if (win.width >= 70) "[Send now Ctrl+S]" else "[Send now]", self.grace_focus == 1, true, .dialog_action, 1);
         self.grace_rect = .{ .x = 0, .y = 1, .width = win.width, .height = 1 };
+    }
+    /// Fixed-cell name column for progress and receipt rows.
+    fn sendNameCell(self: *App, name: []const u8, cells: usize) ![]const u8 {
+        const a = self.frame.allocator();
+        const spaces = "                                        ";
+        const shown = try delivery_view.middle(a, name, cells);
+        const used = std.unicode.utf8CountCodepoints(shown) catch shown.len;
+        return std.fmt.allocPrint(a, "{s}{s}", .{ shown, spaces[0..@min(spaces.len, cells -| used)] });
+    }
+    /// Progress of a confirmed Drive send: glyph plus words per file. Only
+    /// numbers come from the worker; names are pinned from the review.
+    fn drawSendProgress(self: *App, win: vaxis.Window) !void {
+        if (!self.sendProgressActive()) return;
+        self.noteSendPhase();
+        const a = self.frame.allocator();
+        const snap = self.drive_progress.snapshot();
+        const pinned = &self.send_pinned;
+        const confirm = self.send_stop_focus != null;
+        const width = @min(win.width -| 2, 78);
+        if (width < 30 or win.height < 9) return;
+        const rows_needed: usize = 1 + pinned.count + @as(usize, if (pinned.attached_hidden > 0) 1 else 0) + 1 + @as(usize, if (confirm) 3 else 1);
+        const height: u16 = @intCast(@min(@as(usize, win.height -| 2), rows_needed + 2));
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = 1, .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Sending ", true);
+        try self.line(inner, 0, try self.fitLine(inner, try std.fmt.allocPrint(a, "Sending \"{s}\" from {s}", .{ pinned.subject.slice(), pinned.account.slice() }), inner.width), .text);
+        const name_cells: usize = @min(@as(usize, 24), @as(usize, inner.width) / 3);
+        const footer: usize = if (confirm) 3 else 1;
+        var row: usize = 1;
+        for (pinned.files[0..pinned.count]) |*file| {
+            if (row + footer + 1 >= inner.height) break;
+            var glyph: []const u8 = "·";
+            var status: []const u8 = "attached";
+            if (file.drive) {
+                status = if (snap.phase == .reserving) "reserving" else "waits for upload";
+                if (snap.find(file.index)) |progress| switch (progress.state) {
+                    .waiting, .reserved => status = if (snap.phase == .reserving) "reserving" else "waits for upload",
+                    .uploading => {
+                        glyph = "⠋";
+                        status = try send_drive.uploadLine(a, progress.completed, progress.total);
+                    },
+                    .uploaded => {
+                        glyph = "✓";
+                        status = "uploaded · private";
+                    },
+                    .sharing => {
+                        glyph = "⠋";
+                        status = try std.fmt.allocPrint(a, "sharing {d} of {d}", .{ progress.completed, progress.total });
+                    },
+                    .shared => {
+                        glyph = "✓";
+                        status = try std.fmt.allocPrint(a, "shared with {d}", .{progress.total});
+                    },
+                };
+            }
+            try self.line(inner, row, try self.fitLine(inner, try std.fmt.allocPrint(a, "  {s} {s}  {s}", .{ glyph, try self.sendNameCell(file.name.slice(), name_cells), status }), inner.width), .text);
+            row += 1;
+        }
+        if (pinned.attached_hidden > 0 and row + footer + 1 < inner.height) {
+            try self.line(inner, row, try std.fmt.allocPrint(a, "  · {d} more attached", .{pinned.attached_hidden}), .muted);
+            row += 1;
+        }
+        // The message waits for every upload and share; then it is submitted once.
+        try self.line(inner, row, if (snap.phase == .submitting) "  Message: submitting" else if (snap.phase == .sharing) "  Message: waits for sharing" else "  Message: waits for uploads", .muted);
+        const button_row: u16 = inner.height -| 1;
+        if (confirm) {
+            _ = try self.flowTone(inner.child(.{ .y_off = button_row -| 2, .height = 2 }), "Stop sending? The message isn't sent yet. Files already shared stay shared; nothing is revoked.", 0, 0, .warning);
+            const x = try self.actionButton(inner, button_row, 0, "[Stop]", self.send_stop_focus.? == 0, true, .dialog_action, 601);
+            _ = try self.actionButton(inner, button_row, x, "[Keep sending]", self.send_stop_focus.? == 1, true, .dialog_action, 602);
+        } else if (self.sendCancellable()) {
+            const label = "[Cancel send]";
+            _ = try self.actionButton(inner, button_row, inner.width -| @as(u16, @intCast(label.len)), label, self.send_cancel_focus, true, .dialog_action, 600);
+        }
+    }
+    /// Preparation outcome: what happened to each Drive file, and only
+    /// explicit choices. Unknown Gmail outcomes offer no retry.
+    fn drawSendFailure(self: *App, win: vaxis.Window) !void {
+        if (!self.sendFailureVisible() or self.sendProgressActive()) return;
+        const a = self.frame.allocator();
+        const failure = &self.send_failure;
+        const width = @min(win.width -| 2, 78);
+        if (width < 30 or win.height < 10) return;
+        const height: u16 = @intCast(@min(@as(usize, win.height -| 2), failure.count + 10));
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = 1, .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        self.mouse_hits.clear();
+        const unknown = failure.kind == .unknown;
+        const inner = self.panel(area, 0, width, if (unknown) " Gmail didn't confirm " else " Message not sent ", true);
+        const body = inner.child(.{ .height = inner.height -| 1 });
+        var rows: usize = 0;
+        switch (failure.kind) {
+            .stopped, .paused => {
+                const reason = send_drive.reasonOf(failure.code.slice());
+                if (reason == .stopped) {
+                    rows = try self.flowTone(body, "Message not sent. Nothing was sent or revoked automatically.\n", 0, rows, .warning);
+                } else {
+                    rows = try self.flowTone(body, try std.fmt.allocPrint(a, "{s}\nMessage not sent.\n", .{try send_drive.reason(a, failure, self.account())}), 0, rows, .warning);
+                }
+            },
+            .shared_rejected => rows = try self.flowTone(body, "Message not sent. The files below are already shared.\n", 0, rows, .warning),
+            .unknown => rows = try self.flowTone(body, "Gmail didn't confirm this message. It may have been sent. Check before sending again.\n", 0, rows, .warning),
+            .none => return,
+        }
+        const name_cells: usize = @min(@as(usize, 24), @as(usize, inner.width) / 3);
+        for (failure.files[0..failure.count]) |*file| {
+            const done = file.state == .uploaded or (file.state == .shared and file.unconfirmed.len == 0);
+            const glyph: []const u8 = if (done) "✓" else if (file.state == .reserved or file.state == .uploading) "✗" else "!";
+            rows = try self.flow(body, try std.fmt.allocPrint(a, "  {s} {s}  {s}\n", .{ glyph, try self.sendNameCell(file.name.slice(), name_cells), try send_drive.receipt(a, file) }), 0, rows);
+        }
+        if (failure.kind == .stopped or failure.kind == .paused) {
+            rows = try self.flowTone(body, if (failure.can_retry) "Retry preparation uses the same operation; nothing retries automatically.\n" else "Nothing retries automatically.\n", 0, rows, .muted);
+        }
+        if (unknown) rows = try self.flowTone(body, ":receipt checks the outcome · there is no retry\n", 0, rows, .muted);
+        if (self.send_connect_shown) rows = try self.flow(body, try std.fmt.allocPrint(a, "Omagma will add Drive upload (only files it uploads). Your existing access stays as it is.\n{s}", .{try self.driveConnectText("choose Retry preparation")}), 0, rows);
+        var buffer: [4]SendAction = undefined;
+        const actions = self.sendFailureActions(&buffer);
+        var x: u16 = 0;
+        for (actions, 0..) |action, index| {
+            x = try self.actionButton(inner, inner.height -| 1, x, sendActionLabel(action), failure.focus == index, self.job.future == null or readOnlyJob(self.job.kind), .dialog_action, 610 + index);
+        }
     }
     fn inspectDraftOperations(self: *App) !void {
         self.compose.unknown_outcome = true;
@@ -9389,7 +10494,7 @@ const App = struct {
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
             .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
-            .draft_measure, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
+            .draft_measure, .composer_plan, .selection_plan, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
     }
@@ -9398,6 +10503,7 @@ const App = struct {
         if (self.job.future == null or !readOnlyJob(self.job.kind)) return;
         const index = self.job.account_index;
         if (self.job.kind == .draft_measure) self.requestComposeMeasure();
+        if (self.job.kind == .composer_plan) self.composer_plan_requested = std.math.maxInt(u64);
         const refresh = self.job.kind == .refresh;
         if (self.calendar.open and self.job.kind == .calendar_agenda and self.calendar.source_loading) {
             self.calendar.resume_sources = true;
@@ -9694,6 +10800,14 @@ const App = struct {
             };
             return;
         }
+        if ((self.sendProgressActive() or self.sendFailureVisible()) and !self.options.no_mouse and mouse.type == .press and mouse.button == .left) {
+            if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| if (hit.kind == .dialog_action and hit.index >= 600 and hit.index < 614) {
+                try self.onSendPanelAction(hit.index);
+                return;
+            };
+            // The outcome panel is modal; the composer below is not clickable.
+            if (self.sendFailureVisible() and !self.sendProgressActive()) return;
+        }
         if (!self.options.no_mouse and mouse.type == .press and !mouse.mods.shift and !mouse.mods.alt and !mouse.mods.ctrl) {
             if (self.update_open) {
                 self.acknowledgeNewMail();
@@ -9847,6 +10961,13 @@ const App = struct {
         }
         if (self.job.future != null and !readOnlyJob(self.job.kind)) return;
         if (self.fileDialogActive()) {
+            if (self.mode == .attachment and self.oversized != null) {
+                // Only the dialog's own buttons respond; the browser is covered.
+                if (wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| if (hit.kind == .dialog_action and hit.index >= 500 and hit.index < 504) {
+                    self.chooseOversized(hit.index - 500) catch |err| self.fileDialogFailure(err);
+                };
+                return;
+            }
             self.onFileDialogMouse(mouse, wheel) catch |err| self.fileDialogFailure(err);
             return;
         }
@@ -10045,10 +11166,27 @@ const App = struct {
                 if (wheel) |down| {
                     self.compose.attachment_scroll = if (down) @min(self.compose.attachment_scroll +| 1, self.compose.attachments.len -| self.compose.attachment_height) else self.compose.attachment_scroll -| 1;
                     if (self.compose.attachment_focus) self.compose.attachment_cursor = if (down) @min(self.compose.attachment_cursor +| 1, self.compose.attachments.len) else self.compose.attachment_cursor -| 1;
+                } else if (hit.index >= delivery_hit_base) {
+                    const index = hit.index - delivery_hit_base;
+                    if (index >= self.compose.attachments.len) return;
+                    self.focusComposeAttachments(index + 1);
+                    self.compose_secondary = true;
+                    try self.cycleAttachmentDelivery(index);
                 } else self.focusComposeAttachments(hit.index + 1);
             },
             .compose_attachment_add => {
                 if (self.mode != .compose or wheel != null) return;
+                // Index 1 is [Upload all], 2 is [Connect Drive]; 0 stays [Add A].
+                if (hit.index == 1) {
+                    self.focusComposeAttachments(0);
+                    self.compose_secondary = self.uploadAllAvailable();
+                    return self.uploadAllAttachments();
+                }
+                if (hit.index == 2) {
+                    self.focusComposeAttachments(self.compose.attachments.len + 1);
+                    self.compose_secondary = self.connectDriveAvailable();
+                    return self.showDriveConnect();
+                }
                 self.focusComposeAttachments(0);
                 try self.promptAttachment();
             },
@@ -10307,7 +11445,11 @@ const App = struct {
         if (key.matches(Key.escape, .{})) {
             if (self.compose.insert_mode) self.compose.insert_mode = false else try self.saveDraft(.save_back);
         } else if (key.matches(Key.tab, .{})) {
-            if (self.compose.selected == 4) self.focusComposeAttachments(0) else self.compose.selected += 1;
+            if (self.compose.selected == 4) {
+                self.focusComposeAttachments(0);
+                // Body → [Upload all] when shown, then [Add A].
+                self.compose_secondary = self.compose.attachment_cursor == 0 and self.uploadAllAvailable();
+            } else self.compose.selected += 1;
         } else if (key.matches(Key.tab, .{ .shift = true })) {
             if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 5) else self.compose.selected -= 1;
         } else if (self.compose.insert_mode) {
@@ -10354,8 +11496,17 @@ const App = struct {
         if (self.mode == .invitation and self.job.future != null) return;
         if (tabDirection(key)) |backwards| {
             const copy_warning = self.mode == .review and self.gmailCopyWarning();
-            const enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) (if (copy_warning) @as(u8, 0b111) else 0b11) else 0b01;
-            self.dialog_focus.move(backwards, if (self.mode == .invitation) 8 else if (self.mode == .review and self.compose_fold_drawn) 4 else if (copy_warning) 3 else 2, enabled | @as(u8, if (self.mode == .review and self.compose_fold_drawn) 8 else 0));
+            var enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) (if (copy_warning) @as(u8, 0b111) else 0b11) else 0b01;
+            var count: usize = if (self.mode == .invitation) 8 else if (self.mode == .review and self.compose_fold_drawn) 4 else if (copy_warning) 3 else 2;
+            if (self.mode == .review) {
+                // A blocked review has no Send button; Connect Drive is index 4.
+                if (self.deliveryBlocksSend()) enabled &= ~@as(u8, 0b10);
+                if (self.connectDriveAvailable()) {
+                    enabled |= 0b10000;
+                    count = 5;
+                }
+            }
+            self.dialog_focus.move(backwards, count, enabled | @as(u8, if (self.mode == .review and self.compose_fold_drawn) 8 else 0));
             return;
         }
         if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (self.mode != .invitation and key.matches('n', .{})) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 0)) {
@@ -10367,6 +11518,11 @@ const App = struct {
             if (key.matches('z', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) return self.toggleOriginalFold();
             if (self.gmailCopyWarning() and (key.matches('g', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2))) {
                 self.gmail_send_ack = !self.gmail_send_ack;
+                return;
+            }
+            if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 4) return self.showDriveConnect();
+            if ((key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) and self.deliveryBlocksSend()) {
+                self.say(true, "Fix the items above first.", .{});
                 return;
             }
             if ((key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) and self.job.future == null) try self.sendDraft() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.compose_preview_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.compose_preview_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.compose_preview_scroll +|= self.vx.window().height / 2 else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.compose_preview_scroll -|= self.vx.window().height / 2;
@@ -10499,6 +11655,9 @@ const App = struct {
             } else if (key.matches('z', .{ .ctrl = true }) or key.matches(Key.escape, .{}) or key.matches('q', .{})) try self.cancelGrace(false);
             return;
         }
+        // Drive send panels own their controls, like the grace bar above.
+        if (!self.paste and self.sendProgressActive() and try self.onSendProgressKey(key)) return;
+        if (!self.paste and self.sendFailureVisible() and !self.sendProgressActive()) return self.onSendFailureKey(key);
         if (!self.paste and self.job.future != null and self.job.kind == .grace_process and (key.matches('z', .{ .ctrl = true }) or key.matches(Key.escape, .{}) or key.matches('q', .{}))) {
             self.say(false, "Already submitting · cannot undo · waiting for receipt", .{});
             return;
@@ -10591,7 +11750,7 @@ const App = struct {
                     self.label_manager_page = .list;
                     self.dialog_focus.reset(.label_manager, 1);
                     self.labelUnknownNotice();
-                } else if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind) else if (kind == .invitation_reconcile) self.invitationCheckUncertain("Canceled") else {
+                } else if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind) else if (kind == .stop_probe) self.markUnknown(.send) else if (kind == .invitation_reconcile) self.invitationCheckUncertain("Canceled") else {
                     if (kind == .refresh) {
                         self.sync[index].state = if (self.sync[index].cache_ready) .cached else .failed;
                         self.sync[index].error_len = 0;
@@ -10648,7 +11807,11 @@ const App = struct {
                 if (self.mode == .attachment) {
                     try self.attachFile(self.input.value());
                 } else if (self.mode == .command) {
-                    if (same(self.input.value(), "theme") and previous_mode == .browse) {
+                    if (previous_mode == .contacts) {
+                        // Contacts runs only :version. Mailbox commands would
+                        // act on the hidden mail selection, so none dispatch.
+                        if (same(self.input.value(), "version")) self.sayRunningVersion() else if (self.input.value().len > 0) self.say(true, "Only :version runs from Contacts · use mail commands from the mailbox", .{});
+                    } else if (same(self.input.value(), "theme") and previous_mode == .browse) {
                         self.openThemePicker();
                     } else if (same(self.input.value(), "undo") and previous_mode == .browse) {
                         try self.undoMail();
@@ -10704,6 +11867,10 @@ const App = struct {
             if (key.matches(Key.escape, .{}) or key.matches('q', .{})) self.leaveContacts() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.contacts_selected = @min(self.contacts_selected +| 1, self.contacts.len -| 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.contacts_selected -|= 1 else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.contacts_selected = 0 else if (key.matches(Key.end, .{})) self.contacts_selected = self.contacts.len -| 1 else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) self.contacts_selected = @min(self.contacts_selected +| 8, self.contacts.len -| 1) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) self.contacts_selected -|= 8 else if (key.matches('/', .{})) {
                 self.previous_mode = .contacts;
                 self.mode = .search;
+                try self.input.set(self.allocator, "");
+            } else if (key.matches(':', .{})) {
+                self.previous_mode = .contacts;
+                self.mode = .command;
                 try self.input.set(self.allocator, "");
             } else if (key.matches('n', .{}) and self.contacts_state != .denied) try self.editContact(null) else if (key.matches('e', .{}) and self.contacts_selected < self.contacts.len and self.contacts_state != .denied) try self.editContact(self.contacts[self.contacts_selected]) else if (key.matches(Key.enter, .{}) and self.contacts_selected < self.contacts.len) try self.activateContact();
             return;
@@ -12440,11 +13607,22 @@ const App = struct {
         }
         return row;
     }
-    fn composeAttachmentsDraw(self: *App, win: vaxis.Window, row: usize, visible: usize) !void {
+    fn composeAttachmentsDraw(self: *App, win: vaxis.Window, row: usize, rows_available: usize) !void {
         if (!self.capabilities.attachments) {
             try self.line(win, row, "Attachments unavailable · Ctrl+S Review · a Contacts", .muted);
             return;
         }
+        if (self.compose_secondary and !(self.compose.attachment_focus and self.composeSecondaryAvailable(self.compose.attachment_cursor))) self.compose_secondary = false;
+        const plan = self.displayPlan();
+        const narrow = win.width < 72;
+        // Narrow rows use two lines: name and size, then the controls.
+        const per_file: usize = if (narrow and !browser_target) 2 else 1;
+        // The warning sits below the rows, highest-priority blocker first;
+        // narrow layouts wrap it over two lines.
+        const warning = if (browser_target) null else try self.deliveryWarning();
+        const warning_rows: usize = if (warning == null) 0 else if (narrow and rows_available > 3) 2 else if (rows_available > 1) 1 else 0;
+        const file_rows = rows_available - warning_rows;
+        const visible = if (file_rows == 0) 0 else @max(1, file_rows / per_file);
         self.compose.attachment_height = visible;
         if (self.compose.attachment_focus and self.compose.attachment_cursor > 0 and self.compose.attachment_cursor <= self.compose.attachments.len and visible > 0) {
             const chosen = self.compose.attachment_cursor - 1;
@@ -12453,37 +13631,167 @@ const App = struct {
         }
         self.compose.attachment_scroll = @min(self.compose.attachment_scroll, self.compose.attachments.len -| visible);
         if (row >= win.height or win.width == 0) return;
-        const viewport = win.child(.{ .y_off = @intCast(row), .height = @intCast(visible + 1) });
+        const viewport = win.child(.{ .y_off = @intCast(row), .height = @intCast(rows_available + 1) });
         self.mouseArea(viewport, .compose_attachment_scroll, 0);
         const can_edit = self.canEditAttachments();
         const add = if (self.capabilities.files) "[Add A]" else "";
         const add_width: u16 = @intCast(@min(add.len, win.width));
         const add_x = win.width - add_width;
+        // [Upload all] sits left of [Add A] and only changes settings.
+        const upload = "[Upload all]";
+        const upload_width: u16 = if (!browser_target and self.uploadAllAvailable() and add_x > upload.len + 12) @intCast(upload.len) else 0;
+        const upload_x = add_x -| upload_width -| @as(u16, if (upload_width > 0 and add_width > 0) 1 else 0);
         var attachment_bytes: usize = 0;
         for (self.compose.attachments) |attachment| attachment_bytes +|= attachment.size;
-        const title = if (self.capabilities.files) try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s} / {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes), try attachmentSizeLabel(self.frame.allocator(), types.Limits.attachment_bytes) }) else try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes) });
-        try self.line(viewport.child(.{ .width = add_x -| 1 }), 0, title, .muted);
+        const title_width = (if (upload_width > 0) upload_x else add_x) -| 1;
+        // The header shortens its units before [Upload all] can clip the counts.
+        const title = if (plan != null and self.compose.attachments.len > 0) try delivery_view.headerFit(self.frame.allocator(), plan.?, self.compose.attachments.len, if (narrow) 0 else title_width) else if (self.capabilities.files) try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s} / {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes), try attachmentSizeLabel(self.frame.allocator(), types.Limits.attachment_bytes) }) else try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes) });
+        try self.line(viewport.child(.{ .width = title_width }), 0, title, if (plan != null and plan.?.sizeBlocked()) .warning else .muted);
+        if (upload_width > 0) {
+            const upload_button = viewport.child(.{ .x_off = upload_x, .width = upload_width, .height = 1 });
+            try self.line(upload_button, 0, upload, if (!can_edit) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == 0 and self.compose_secondary) .selected else .accent);
+            if (can_edit) self.mouseArea(upload_button, .compose_attachment_add, 1);
+        }
         const add_button = viewport.child(.{ .x_off = add_x, .width = add_width, .height = 1 });
-        try self.line(add_button, 0, add, if (!can_edit or !self.capabilities.files) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == 0) .selected else .accent);
+        try self.line(add_button, 0, add, if (!can_edit or !self.capabilities.files) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == 0 and !self.compose_secondary) .selected else .accent);
         if (can_edit and self.capabilities.files) self.mouseArea(add_button, .compose_attachment_add, 0);
         const end = @min(self.compose.attachment_scroll + visible, self.compose.attachments.len);
         for (self.compose.attachments[self.compose.attachment_scroll..end], self.compose.attachment_scroll..) |attachment, index| {
+            const resolved_row: delivery_view.Resolved = if (plan) |current| current.resolution(index) else .unknown;
+            const badge = if (plan) |current| current.badge(index) else "";
+            const marked_large = plan != null and plan.?.sizeBlocked() and delivery_view.isAttach(attachment.delivery) and resolved_row == .attach;
+            if (per_file == 2) {
+                try self.composeAttachmentPairDraw(viewport, 1 + (index - self.compose.attachment_scroll) * 2, attachment, index, resolved_row, if (marked_large) " · too large" else badge, can_edit);
+                continue;
+            }
             const file_row = viewport.child(.{ .y_off = @intCast(index - self.compose.attachment_scroll + 1), .height = 1 });
             const focused = self.compose.attachment_focus and self.compose.attachment_cursor == index + 1;
             file_row.fill(.{ .style = self.style(if (focused) .selected else .text) });
             self.mouseArea(file_row, .compose_attachment_select, index);
             const remove_width: u16 = @min(3, file_row.width);
             const remove_x = file_row.width - remove_width;
+            // The fixed-width delivery button keeps every [x] aligned.
+            const cells = if (narrow) delivery_view.narrow_button_cells else delivery_view.button_cells;
+            const delivery_width: u16 = if (!browser_target and remove_x > cells + 12) cells else 0;
+            const delivery_x = remove_x -| delivery_width -| @as(u16, if (delivery_width > 0) 1 else 0);
+            const resolved: delivery_view.Resolved = if (plan) |current| current.resolution(index) else .unknown;
             const size = try attachmentSizeLabel(self.frame.allocator(), attachment.size);
-            const size_right = remove_x -| 1;
+            const size_right = (if (delivery_width > 0) delivery_x else remove_x) -| 1;
             const size_width: u16 = @intCast(@min(size.len, size_right));
             const size_x = size_right - size_width;
-            try self.line(file_row.child(.{ .width = size_x -| 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s}", .{ index + 1, attachment.filename }), .text);
+            try self.line(file_row.child(.{ .width = size_x -| 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s}{s}", .{ index + 1, attachment.filename, if (marked_large) @as([]const u8, " · too large") else badge }), if (marked_large) .warning else .text);
             try self.line(file_row.child(.{ .x_off = size_x, .width = size_width }), 0, size, .muted);
+            if (delivery_width > 0) {
+                const delivery_button = file_row.child(.{ .x_off = delivery_x, .width = delivery_width });
+                try self.line(delivery_button, 0, delivery_view.button(attachment.delivery, resolved, narrow), if (!can_edit) .muted else if (focused and self.compose_secondary) .selected else .accent);
+                if (can_edit) self.mouseArea(delivery_button, .compose_attachment_select, delivery_hit_base + index);
+            }
             const remove_button = file_row.child(.{ .x_off = remove_x, .width = remove_width });
-            try self.line(remove_button, 0, "[x]", if (!can_edit) .muted else if (focused) .selected else .accent);
+            try self.line(remove_button, 0, "[x]", if (!can_edit) .muted else if (focused and !self.compose_secondary) .selected else .accent);
             if (can_edit) self.mouseArea(remove_button, .compose_attachment_remove, index);
         }
+        if (warning) |message| if (warning_rows > 0) {
+            const warning_area = viewport.child(.{ .y_off = @intCast(file_rows + 1), .height = @intCast(warning_rows) });
+            const connect = "[Connect Drive]";
+            const connect_width: u16 = if (self.connectDriveAvailable() and warning_area.width > connect.len + 12) @intCast(connect.len) else 0;
+            const connect_x = warning_area.width - connect_width;
+            if (warning_rows == 1) {
+                try self.line(warning_area.child(.{ .width = connect_x -| 1 }), 0, try self.fitLine(warning_area, message, connect_x -| 1), .warning);
+            } else _ = try self.flowTone(warning_area.child(.{ .width = connect_x -| 1 }), message, 0, 0, .warning);
+            if (connect_width > 0) {
+                const connect_button = warning_area.child(.{ .x_off = connect_x, .y_off = @intCast(warning_rows - 1), .width = connect_width, .height = 1 });
+                try self.line(connect_button, 0, connect, if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1 and self.compose_secondary) .selected else .accent);
+                self.mouseArea(connect_button, .compose_attachment_add, 2);
+            }
+        };
+    }
+    /// Narrow file row: `n. name…  size`, then the delivery button and [x].
+    fn composeAttachmentPairDraw(self: *App, viewport: vaxis.Window, y: usize, attachment: types.Attachment, index: usize, resolved: delivery_view.Resolved, suffix: []const u8, can_edit: bool) !void {
+        if (y >= viewport.height) return;
+        const a = self.frame.allocator();
+        const pair = viewport.child(.{ .y_off = @intCast(y), .height = 2 });
+        const focused = self.compose.attachment_focus and self.compose.attachment_cursor == index + 1;
+        pair.fill(.{ .style = self.style(if (focused) .selected else .text) });
+        self.mouseArea(pair, .compose_attachment_select, index);
+        const size = try attachmentSizeLabel(a, attachment.size);
+        const size_width: u16 = @intCast(@min(size.len, pair.width));
+        const name_width = pair.width -| size_width -| 2;
+        const label = try std.fmt.allocPrint(a, "{d}. ", .{index + 1});
+        const name = try delivery_view.middle(a, attachment.filename, @as(usize, name_width) -| label.len -| suffix.len);
+        try self.line(pair.child(.{ .width = name_width, .height = 1 }), 0, try std.fmt.allocPrint(a, "{s}{s}{s}", .{ label, name, suffix }), if (std.mem.eql(u8, suffix, " · too large")) .warning else .text);
+        try self.line(pair.child(.{ .x_off = pair.width -| size_width, .width = size_width, .height = 1 }), 0, size, .muted);
+        const indent: u16 = @min(4, pair.width);
+        const button_width = delivery_view.narrow_button_cells;
+        if (pair.width < indent + button_width + 5) return;
+        const delivery_button = pair.child(.{ .x_off = indent, .y_off = 1, .width = button_width, .height = 1 });
+        try self.line(delivery_button, 0, delivery_view.button(attachment.delivery, resolved, true), if (!can_edit) .muted else if (focused and self.compose_secondary) .selected else .accent);
+        if (can_edit) self.mouseArea(delivery_button, .compose_attachment_select, delivery_hit_base + index);
+        const remove_button = pair.child(.{ .x_off = indent + button_width + 2, .y_off = 1, .width = 3, .height = 1 });
+        try self.line(remove_button, 0, "[x]", if (!can_edit) .muted else if (focused and !self.compose_secondary) .selected else .accent);
+        if (can_edit) self.mouseArea(remove_button, .compose_attachment_remove, index);
+    }
+    /// Review groups files by the backend's resolved delivery. The Drive
+    /// block appears only when some file resolves to Drive.
+    fn reviewDeliveryDraw(self: *App, content: vaxis.Window, plan: *const delivery_view.Plan, start_row: usize) !usize {
+        if (self.compose.attachments.len == 0) return start_row;
+        const a = self.frame.allocator();
+        var rows = start_row;
+        var drive_files: usize = 0;
+        for (self.compose.attachments, 0..) |_, index| {
+            if (plan.resolution(index) == .drive) drive_files += 1;
+        }
+        const attached_files = self.compose.attachments.len - drive_files;
+        rows = try self.flowTone(content, try std.fmt.allocPrint(a, "Attached {d} · {s} of {s}\n", .{ attached_files, try delivery_view.size(a, plan.attached_bytes), try delivery_view.limit(a, plan.decoded_limit) }), self.compose_preview_scroll, rows, if (plan.sizeBlocked()) .warning else .muted);
+        for (self.compose.attachments, 0..) |attachment, index| if (plan.resolution(index) != .drive) {
+            rows = try self.flow(content, try std.fmt.allocPrint(a, "  Attachment {d}: {s} ({s}) · {s}\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(a, attachment.size), delivery_view.label(attachment.delivery, plan.resolution(index)) }), self.compose_preview_scroll, rows);
+        };
+        if (drive_files == 0) return self.flow(content, "\n", self.compose_preview_scroll, rows);
+        rows = try self.flowTone(content, try std.fmt.allocPrint(a, "From Drive {d} · uploaded to {s}'s Drive after the countdown\n", .{ drive_files, self.account() }), self.compose_preview_scroll, rows, .muted);
+        for (self.compose.attachments, 0..) |attachment, index| if (plan.resolution(index) == .drive) {
+            rows = try self.flow(content, try std.fmt.allocPrint(a, "  Attachment {d}: {s} ({s}) · {s}{s}\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(a, attachment.size), delivery_view.label(attachment.delivery, .drive), plan.badge(index) }), self.compose_preview_scroll, rows);
+        };
+        // Every viewer is listed in full; the review scrolls rather than shortening.
+        var viewers: std.ArrayList(u8) = .empty;
+        if (self.compose.draft(a)) |draft| {
+            var seen: std.ArrayList([]const u8) = .empty;
+            for ([_][]const types.Address{ draft.to, draft.cc }) |list| for (list) |recipient| {
+                var duplicate = false;
+                for (seen.items) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous, recipient.address);
+                if (duplicate) continue;
+                try seen.append(a, recipient.address);
+                if (viewers.items.len > 0) try viewers.appendSlice(a, ", ");
+                try viewers.appendSlice(a, recipient.address);
+            };
+        } else |_| try viewers.appendSlice(a, "To and Cc as entered");
+        rows = try self.flow(content, try std.fmt.allocPrint(a, "Viewer-only access for exactly: {s}\nRestricted link · no Drive notification · others can't open it.\n", .{if (viewers.items.len > 0) viewers.items else "—"}), self.compose_preview_scroll, rows);
+        // §1.5: earlier shared copies are never touched; say so per file.
+        if (plan.copyNotes().len > 0) rows = try self.flowTone(content, plan.copyNotes(), self.compose_preview_scroll, rows, .warning);
+        rows = try self.flow(content, "Drive files stay in your Drive after sending.\n\n", self.compose_preview_scroll, rows);
+        return rows;
+    }
+    /// Every blocker on consecutive lines, highest priority first, then the
+    /// Connect Drive step when it applies and one reassurance line.
+    fn reviewBlockersDraw(self: *App, content: vaxis.Window, start_row: usize) !usize {
+        const a = self.frame.allocator();
+        var rows = start_row;
+        const plan = self.currentPlan() orelse {
+            const pending = !self.composeMeasureCurrent();
+            return self.flowTone(content, if (pending) "Drive plan: calculating… · Send waits for it.\n" else "⚠ Drive plan unavailable · review again before Send.\n", self.compose_preview_scroll, rows, if (pending) .muted else .warning);
+        };
+        var warnings: std.ArrayList(u8) = .empty;
+        var bit: u4 = 0;
+        while (bit < 8) : (bit += 1) {
+            const blocker: delivery_view.Blocker = @fromBackingInt(@intCast(@as(u3, @intCast(bit))));
+            if (!plan.has(blocker)) continue;
+            if (warnings.items.len > 0) try warnings.append(a, '\n');
+            try warnings.appendSlice(a, try delivery_view.warning(a, plan, blocker, self.account()));
+        }
+        rows = try self.flowTone(content, warnings.items, self.compose_preview_scroll, rows, .warning);
+        if (plan.has(.drive_not_connected)) {
+            rows = try self.flowTone(content, "Omagma will add Drive upload (only files it uploads). Your existing access stays as it is.", self.compose_preview_scroll, rows, .muted);
+            if (self.drive_connect_shown) rows = try self.flow(content, try self.driveConnectText("choose Connect Drive again"), self.compose_preview_scroll, rows);
+        }
+        return self.flowTone(content, "Your complete draft is retained · Back to change it.\n", self.compose_preview_scroll, rows, .muted);
     }
     fn composeCompletionDraw(self: *App, win: vaxis.Window) !void {
         if (self.compose.attachment_focus) return;
@@ -12568,13 +13876,24 @@ const App = struct {
         if (self.compose.attachment_focus and self.compose.attachment_cursor > self.compose.attachments.len + 3 and self.compose.attachment_cursor < self.compose.attachments.len + 6 and !self.composeControlFocusable(self.compose.attachment_cursor)) self.leaveComposeAttachments(4, false);
         if (self.dialog_focus.context == .preview and self.dialog_focus.index >= 3 and self.dialog_focus.index <= 4 and self.compose_action_drawn & (@as(u8, 1) << @intCast(@min(self.dialog_focus.index - 3, 1))) == 0) self.dialog_focus.index = 2;
         const win = full.child(.{ .height = full.height -| action_rows -| meter_rows });
+        if (self.mode != .review) self.review_connect_focused = false;
         if (self.mode == .review) {
             self.dialog_focus.ensure(.send, 0);
             self.mouse_hits.clear();
-            const inner = self.panel(win, 0, win.width, " Review send · explicit confirmation ", true);
+            const delivery_blocked = self.deliveryBlocksSend();
+            const connect_drive = self.connectDriveAvailable();
+            // Connect Drive gets initial focus once per blocked review.
+            if (connect_drive and !self.review_connect_focused) {
+                self.dialog_focus.index = 4;
+                self.review_connect_focused = true;
+            }
+            const inner = self.panel(win, 0, win.width, if (delivery_blocked) " Can't send yet " else " Review send · explicit confirmation ", true);
             const content = inner.child(.{ .height = inner.height -| @as(u16, if (self.canFoldOriginal()) 3 else 2) });
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null and self.compose.include_original) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
-            var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            // A blocked review leads with its reasons and Connect Drive's
+            // command, so neither waits below the fold behind the message.
+            var rows: usize = if (delivery_blocked) try self.reviewBlockersDraw(content, 0) else 0;
+            rows = try self.flow(content, review, self.compose_preview_scroll, rows);
             if (!browser_target) {
                 rows = try self.flowTone(content, try self.composeSizeLabel(true), self.compose_preview_scroll, rows, if (self.composeMeasureCurrent() and !self.compose_measure.sendable) .warning else .muted);
                 if (self.composeMeasureCurrent()) {
@@ -12584,7 +13903,8 @@ const App = struct {
                             rows = try self.flowTone(content, reduction, self.compose_preview_scroll, rows, .muted);
                         }
                     }
-                    if (!self.compose_measure.sendable) rows = try self.flowTone(content, "Send unavailable · Back to reduce files or quoted content. Your complete draft is retained.\n\n", self.compose_preview_scroll, rows, .warning);
+                    // Plan blockers already name their own fix above.
+                    if (!self.compose_measure.sendable and !delivery_blocked) rows = try self.flowTone(content, "Send unavailable · Back to reduce files or quoted content. Your complete draft is retained.\n\n", self.compose_preview_scroll, rows, .warning);
                 }
             }
             if (self.gmailCopyWarning()) rows = try self.flowTone(content, if (self.gmail_send_ack) "[x] I checked Gmail Drafts and Sent; I understand sending here may duplicate a message sent there.\n\n" else "[ ] Gmail copy kept: it may have been edited or sent there. Check Gmail Drafts and Sent. Press g to acknowledge before sending this exact local content.\n\n", self.compose_preview_scroll, rows, .warning);
@@ -12600,8 +13920,10 @@ const App = struct {
                 rows = try self.flowTone(content, "Original attached as .eml · opens in the recipient's mail app.\n\n", self.compose_preview_scroll, rows, .muted);
             }
             rows = try self.composeOutgoingDraw(content, self.compose_preview_scroll, rows, false);
-            for (self.compose.attachments, 0..) |attachment, index| {
-                const label = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} ({s})\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(self.frame.allocator(), attachment.size) });
+            if (self.currentPlan()) |plan| {
+                rows = try self.reviewDeliveryDraw(content, plan, rows);
+            } else for (self.compose.attachments, 0..) |attachment, index| {
+                const label = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} ({s}){s}{s}\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(self.frame.allocator(), attachment.size), if (delivery_view.isAttach(attachment.delivery)) @as([]const u8, "") else " · ", if (delivery_view.isAttach(attachment.delivery)) @as([]const u8, "") else delivery_view.label(attachment.delivery, .unknown) });
                 rows = try self.flow(content, label, self.compose_preview_scroll, rows);
             }
             self.compose_preview_lines = rows;
@@ -12613,8 +13935,10 @@ const App = struct {
                     _ = try self.actionButton(inner, inner.height - 3, 0, fold_label, self.dialog_focus.index == 3, true, .compose_original_fold, 0);
                     self.compose_fold_drawn = true;
                 }
-                const x = try self.actionButton(inner, inner.height - 2, 0, "[Back]", self.dialog_focus.index == 0, true, .dialog_action, 0);
-                const next = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome and (browser_target or (self.composeMeasureCurrent() and self.compose_measure.sendable and !self.compose_measure.over_limit)) and (!self.gmailCopyWarning() or self.gmail_send_ack), .dialog_action, 1);
+                // A blocked review draws no Send button; Connect Drive precedes Back.
+                const connect_x = if (connect_drive) try self.actionButton(inner, inner.height - 2, 0, "[Connect Drive]", self.dialog_focus.index == 4, self.job.future == null or readOnlyJob(self.job.kind), .dialog_action, 4) else 0;
+                const x = try self.actionButton(inner, inner.height - 2, connect_x, "[Back]", self.dialog_focus.index == 0, true, .dialog_action, 0);
+                const next = if (delivery_blocked) x else try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome and (browser_target or (self.composeMeasureCurrent() and self.compose_measure.sendable and !self.compose_measure.over_limit)) and (!self.gmailCopyWarning() or self.gmail_send_ack), .dialog_action, 1);
                 if (self.gmailCopyWarning()) _ = try self.actionButton(inner, inner.height - 2, next, if (self.gmail_send_ack) "[g Acknowledged]" else "[g I checked Gmail]", self.dialog_focus.index == 2, self.job.future == null, .dialog_action, 2);
                 try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · j/k Scroll · Esc/q Back", .muted);
                 self.review_ready = true;
@@ -12667,7 +13991,12 @@ const App = struct {
         const end_row = left.height;
         // Keep recent files visible without turning the composer into a file
         // manager. Ordinary terminal sizes retain at least five body rows.
-        const attachment_rows: usize = @min(self.compose.attachments.len, @min(3, end_row -| (body_row + 7)));
+        // Reserve physical rows for the approved two-line narrow files and
+        // the warning below them; the inner renderer consumes both here.
+        const file_rows: usize = if (!browser_target and left.width < 72) 2 else 1;
+        const warning_rows: usize = if (!browser_target and (try self.deliveryWarning()) != null) (if (left.width < 72) 2 else 1) else 0;
+        const wanted_attachment_rows = @min(self.compose.attachments.len, 3) * file_rows + warning_rows;
+        const attachment_rows: usize = @min(wanted_attachment_rows, end_row -| (body_row + 7));
         const attachment_row = end_row -| (attachment_rows + 1);
         const body = left.child(.{ .y_off = @intCast(body_row + 1), .height = @intCast(attachment_row -| (body_row + 1)) });
         self.mouseArea(body, .compose_field, 4);
@@ -12797,7 +14126,7 @@ const App = struct {
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
             .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
-            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
+            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
             .invitation => if (self.invitation_calendar_blocked) " Tab Controls · Enter Activate · a/t Retry · s RSVP only · A Calendar · Esc/q Cancel" else if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
@@ -12878,7 +14207,7 @@ const App = struct {
             if (width >= 100 or self.ux_overlay != .none or self.label_picker or self.mode == .label_manager or self.mode == .trash_confirm) return self.contextHints();
             return switch (self.mode) {
                 .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
-                .review => " Tab · Enter Activate · y Send · Esc Back",
+                .review => if (self.deliveryBlocksSend()) " Tab · Enter Activate · j/k Scroll · Esc Back" else " Tab · Enter Activate · y Send · Esc Back",
                 .contacts => " Enter Choose · / Search · Ctrl+R Refresh · q Back",
                 .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Cache · \\ Gmail · ? Help",
                 else => self.contextHints(),
@@ -13782,8 +15111,11 @@ const App = struct {
         self.calendar_form_offsets = false;
         self.calendar_form_notify_chosen = !self.calendar_form.editing or self.calendar_form.existingGuestCount() == 0;
         self.calendar_form_pick_target = false;
+        self.calendar_form_follow = .{};
         self.calendar_guests_open = false;
+        self.calendar_guests_search.deinit();
         self.calendar_guests_contacts.deinit();
+        self.calendar_guests_recent.deinit();
         self.calendar.page = .compose;
         self.calendar.focus = null;
     }
@@ -13876,7 +15208,7 @@ const App = struct {
             self.sayFailure(calendar_composer.errorMessage(err), @errorName(err));
             return;
         };
-        const added_guests = self.calendar_form.addedGuestCount() catch |err| {
+        const added_guests = self.calendar_form.addedGuestCount(self.frame.allocator()) catch |err| {
             try self.calendar_form_error.set(calendar_composer.errorMessage(err));
             self.sayFailure(calendar_composer.errorMessage(err), @errorName(err));
             return;
@@ -13982,6 +15314,8 @@ const App = struct {
             const restore_options: calendar_composer.Init = if (chosen != .null) try self.calendarComposeInit(chosen) else .{ .target = .{ .account = self.calendar_form.account.slice(), .calendar_id = self.calendar_form.calendar_id.slice() }, .day = self.calendar.day, .now_ms = 0, .zone_name = text(get(get(review, "event"), "timeZone")), .zone = &self.calendar.zone, .writable = false, .supports_meet = false };
             self.calendar_form = try calendar_composer.Model.initReview(self.frame.allocator(), restore_options, review);
             try self.calendarComposeLoadFields();
+            // A restored end was part of an exact reviewed request.
+            self.calendar_form_follow.pinned = true;
             try self.calendar_form_review.replace(self.allocator, review);
             try self.calendar_form_operation.set(text(get(review, "operationId")));
             try self.calendar_form_hash.set(text(get(review, "reviewHash")));
@@ -14083,32 +15417,103 @@ const App = struct {
     }
     fn calendarGuestsError(self: *App, code: []const u8) !void {
         self.calendar_guests_choice_error = false;
-        try self.calendar_guests_error.set(if (same(code, "PermissionDenied")) "Contacts-read permission is required for this account. You can still type guest emails." else "Ctrl+R Retry · Contacts could not be loaded. Your event is unchanged.");
+        const recent = self.calendar_guests_recent.value != .null;
+        try self.calendar_guests_error.set(if (same(code, "PermissionDenied")) (if (recent) @as([]const u8, "Contacts-read permission is required · recent-mail recipients and typed emails still work.") else "Contacts-read permission is required for this account. You can still type guest emails.") else if (recent) "Ctrl+R Retry · Contacts could not be loaded; recent-mail recipients are still shown." else "Ctrl+R Retry · Contacts could not be loaded. Your event is unchanged.");
+    }
+    fn calendarGuestsSearchError(self: *App, code: []const u8) !void {
+        self.calendar_guests_choice_error = false;
+        try self.calendar_guests_error.set(if (same(code, "PermissionDenied")) @as([]const u8, "Contacts-read permission is required · loaded contacts, recent mail and typed emails still work.") else "Ctrl+F Retry · Contacts search failed; loaded contacts and recent mail are still shown.");
+    }
+    fn calendarGuestsQuery(self: *App) []const u8 {
+        return std.mem.trim(u8, self.calendar_guests_query.value(), " \t");
+    }
+    /// The explicit search answer, only while it answers the typed query;
+    /// clearing or changing the query returns to the loaded sources.
+    fn calendarGuestsSearchResult(self: *App) Value {
+        const query = self.calendarGuestsQuery();
+        if (!self.calendar_guests_open or self.calendar.page != .compose or
+            !same(self.calendar_guests_account.slice(), self.calendar_form.account.slice()) or
+            self.calendar_guests_search_generation != self.calendar_form_generation) return .null;
+        if (self.calendar_guests_search.value == .null or query.len == 0 or !same(self.calendar_guests_searched.slice(), query)) return .null;
+        return self.calendar_guests_search.value;
     }
     fn calendarGuestsMatches(self: *App) ![]const calendar_guest_picker.Candidate {
-        if (self.calendar_guests_contacts.value == .null) return &.{};
-        return calendar_guest_picker.collect(self.frame.allocator(), self.calendar_guests_contacts.value, self.calendar_guests_query.value());
+        // One normalized query for dispatch, the answer's tag and filtering.
+        return calendar_guest_picker.combine(self.frame.allocator(), self.calendar_guests_contacts.value, self.calendar_guests_recent.value, self.calendarGuestsSearchResult(), self.calendarGuestsQuery());
+    }
+    /// The person drawn as selected stays selected when a source changes.
+    fn calendarGuestsKeep(self: *App, address: []const u8) !void {
+        self.calendar_guests_selected = 0;
+        if (address.len == 0) return;
+        for (try self.calendarGuestsMatches(), 0..) |candidate, index| if (std.ascii.eqlIgnoreCase(candidate.address, address)) {
+            self.calendar_guests_selected = index;
+            return;
+        };
+    }
+    /// Reads only the destination account's local recent-mail recipient cache:
+    /// no provider read, Sent refresh or authorization. Missing Mail access or
+    /// an empty cache leaves saved contacts and typed emails fully usable.
+    fn calendarGuestsLoadRecent(self: *App) void {
+        self.calendar_guests_recent.deinit();
+        const raw = (self.cached(self.frame.allocator(), .{ .cmd = "mail.recipients", .account = self.calendar_guests_account.slice(), .cacheOnly = true }) catch return) orelse return;
+        const result = calendarGuestsData(self.frame.allocator(), raw) catch return;
+        calendar_guest_picker.validateRecent(result) catch return;
+        self.calendar_guests_recent.replace(self.allocator, result) catch {};
     }
     fn calendarGuestsClose(self: *App) void {
         if (self.job.future != null and self.job.kind == .calendar_guest_contacts) self.preemptReadOnly();
         self.calendar_form_generation +%= 1;
         self.calendar_guests_open = false;
+        self.calendar_guests_searching = false;
         self.calendar_form_focus = self.calendar_guests_return_focus;
         self.calendar_form_top = self.calendar_guests_return_top;
     }
     fn calendarGuestsReplace(self: *App, result: Value, cached_view: bool) !void {
         _ = try calendar_guest_picker.collect(self.frame.allocator(), result, "");
+        _ = try calendar_guest_picker.readState(self.frame.allocator(), result);
+        const keep = try self.frame.allocator().dupe(u8, self.calendar_guests_drawn_address.slice());
         try self.calendar_guests_contacts.replace(self.allocator, result);
         self.calendar_guests_cached = cached_view;
-        self.calendar_guests_selected = 0;
         self.calendar_guests_error = .{};
+        try self.calendarGuestsKeep(keep);
+    }
+    fn calendarGuestsApplySearch(self: *App, result: Value, query: []const u8) !void {
+        _ = try calendar_guest_picker.collect(self.frame.allocator(), result, "");
+        _ = try calendar_guest_picker.readState(self.frame.allocator(), result);
+        const keep = try self.frame.allocator().dupe(u8, self.calendar_guests_drawn_address.slice());
+        // Publish the tag only after the answer is stored: a failed replace
+        // keeps the previous answer and its own query together.
+        var answered: @import("../bounded.zig").Text(256) = .{};
+        try answered.set(query);
+        try self.calendar_guests_search.replace(self.allocator, result);
+        self.calendar_guests_searched = answered;
+        self.calendar_guests_search_generation = self.calendar_form_generation;
+        self.calendar_guests_error = .{};
+        try self.calendarGuestsKeep(keep);
     }
     fn calendarGuestsRefresh(self: *App) !void {
         self.calendar_guests_choice_error = false;
         self.preemptReadOnly();
         if (self.job.future != null) return;
         self.calendar_guests_error = .{};
+        self.calendar_guests_searching = false;
         try self.start(.calendar_guest_contacts, .{ .cmd = "contacts.list", .account = self.calendar_guests_account.slice() });
+    }
+    /// Explicit, bounded provider search (at most 30 matches) of the
+    /// destination account's Contacts for the typed query. Typing never
+    /// searches; the loaded list, recent mail and Guests text stay as they are.
+    fn calendarGuestsSearch(self: *App) !void {
+        self.calendar_guests_choice_error = false;
+        if (self.calendarGuestsQuery().len == 0) {
+            self.calendar_guests_choice_error = true;
+            try self.calendar_guests_error.set("Type a name or email first; Ctrl+F then searches Contacts.");
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        self.calendar_guests_error = .{};
+        self.calendar_guests_searching = true;
+        try self.start(.calendar_guest_contacts, .{ .cmd = "contacts.search", .account = self.calendar_guests_account.slice(), .query = self.calendarGuestsQuery() });
     }
     fn calendarGuestsOpen(self: *App) !void {
         if (browser_target) return error.NativeOnly;
@@ -14125,6 +15530,9 @@ const App = struct {
         self.calendar_guests_return_focus = self.calendar_form_focus;
         self.calendar_guests_return_top = self.calendar_form_top;
         self.calendar_guests_contacts.deinit();
+        self.calendar_guests_search.deinit();
+        self.calendar_guests_searched = .{};
+        self.calendar_guests_searching = false;
         self.calendar_guests_error = .{};
         self.calendar_guests_focus = 0;
         self.calendar_guests_selected = 0;
@@ -14132,6 +15540,8 @@ const App = struct {
         self.calendar_guests_drawn_address = .{};
         try self.calendar_guests_query.set(self.allocator, "");
         try self.calendar_guests_account.set(self.calendar_form.account.slice());
+        // Recent mail loads first so it stays usable if contacts fail below.
+        self.calendarGuestsLoadRecent();
         // Keep a usable cached snapshot stable while choosing. Refresh is an
         // explicit action, so no background list replacement changes a target.
         const cached_response = self.cached(self.frame.allocator(), .{ .cmd = "contacts.list", .account = self.calendar_guests_account.slice() }) catch |err| {
@@ -14151,15 +15561,26 @@ const App = struct {
         try self.calendarGuestsRefresh();
     }
     fn finishCalendarGuests(self: *App) !void {
+        self.calendar_guests_searching = false;
         if (!self.calendar_guests_open or self.calendar.page != .compose or !same(self.calendar_guests_account.slice(), self.calendar_form.account.slice())) return;
         const request = try std.json.parseFromSliceLeaky(Value, self.frame.allocator(), self.job.request, .{});
         if (!same(text(get(request, "account")), self.calendar_guests_account.slice())) return;
-        if (self.job.failure) |err| return self.calendarGuestsError(@errorName(err));
-        const result = calendarGuestsData(self.frame.allocator(), self.job.response orelse return self.calendarGuestsError("MissingResponse")) catch |err| {
-            try self.calendarGuestsError(@errorName(err));
+        // A search answers only the exact query it was sent for.
+        const search = same(text(get(request, "cmd")), "contacts.search");
+        const query = text(get(request, "query"));
+        if (search and !same(query, self.calendarGuestsQuery())) return;
+        const failure: ?[]const u8 = if (self.job.failure) |err| @errorName(err) else if (self.job.response == null) "MissingResponse" else null;
+        if (failure) |code| {
+            if (search) try self.calendarGuestsSearchError(code) else try self.calendarGuestsError(code);
+            return;
+        }
+        const result = calendarGuestsData(self.frame.allocator(), self.job.response.?) catch |err| {
+            if (search) try self.calendarGuestsSearchError(@errorName(err)) else try self.calendarGuestsError(@errorName(err));
             return;
         };
-        self.calendarGuestsReplace(result, false) catch |err| try self.calendarGuestsError(@errorName(err));
+        if (search) {
+            self.calendarGuestsApplySearch(result, query) catch |err| try self.calendarGuestsSearchError(@errorName(err));
+        } else self.calendarGuestsReplace(result, false) catch |err| try self.calendarGuestsError(@errorName(err));
     }
     fn calendarGuestsAdd(self: *App) !void {
         if ((self.job.future != null and self.job.kind == .calendar_guest_contacts) or !same(self.calendar_guests_account.slice(), self.calendar_form.account.slice()) or !self.calendar_form.editable(.attendees)) return;
@@ -14186,6 +15607,7 @@ const App = struct {
     }
     fn calendarGuestsActivate(self: *App, index: usize) !void {
         if (index == 272) return self.calendarGuestsClose();
+        if (index == 273) return self.calendarGuestsSearch();
         if (index == 270) {
             self.calendar_guests_focus = 0;
             return;
@@ -14204,10 +15626,14 @@ const App = struct {
     fn onCalendarGuestsKey(self: *App, key: Key) !void {
         if (!self.paste and key.matches(Key.escape, .{})) return self.calendarGuestsClose();
         if (!self.paste and tabDirection(key) != null) {
-            self.calendar_guests_focus = (self.calendar_guests_focus + if (tabDirection(key).?) @as(usize, 3) else 1) % 4;
+            // Visual order: Search, results, [Search Contacts], Add, Back.
+            const order = [_]usize{ 0, 1, 4, 2, 3 };
+            const position = std.mem.indexOfScalar(usize, &order, self.calendar_guests_focus) orelse 0;
+            self.calendar_guests_focus = order[(position + if (tabDirection(key).?) order.len - 1 else 1) % order.len];
             return;
         }
         if (!self.paste and key.matches('r', .{ .ctrl = true })) return self.calendarGuestsRefresh();
+        if (!self.paste and (key.matches('f', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.calendar_guests_focus == 4))) return self.calendarGuestsSearch();
         if (!self.paste and key.matches(Key.enter, .{}) and self.calendar_guests_focus == 3) return self.calendarGuestsClose();
         if (self.job.future != null and self.job.kind == .calendar_guest_contacts) return;
         const matches = try self.calendarGuestsMatches();
@@ -14227,7 +15653,10 @@ const App = struct {
         } else if (self.calendar_guests_focus < 2) {
             self.calendarGuestsClearChoiceError();
             self.calendar_guests_focus = 0;
+            const before = std.hash.Wyhash.hash(0, self.calendar_guests_query.value());
             if (self.paste) try self.pasteInto(&self.calendar_guests_query, key, false, 256) else try self.calendar_guests_query.handleKey(self.allocator, key, false, 256);
+            // Editing away and back must not resurrect a previous answer.
+            if (before != std.hash.Wyhash.hash(0, self.calendar_guests_query.value())) self.calendar_form_generation +%= 1;
             self.calendar_guests_selected = 0;
         }
     }
@@ -14253,15 +15682,37 @@ const App = struct {
         const outer = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
         const bordered = outer.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
         const inner = bordered.child(.{ .x_off = 1, .y_off = 1, .width = bordered.width -| 2, .height = bordered.height -| 2 });
-        try self.line(inner, 0, "Add a guest from Contacts", .subject);
+        try self.line(inner, 0, "Add a guest from Contacts or recent mail", .subject);
         try self.line(inner, 1, try self.fitLine(inner, self.calendar_guests_account.slice(), inner.width), .sender);
         try self.editLine(inner, 3, "Search", &self.calendar_guests_query, self.calendar_guests_focus == 0, if (self.calendar_guests_focus == 0) .selected else .text);
         self.mouseRows(inner, 3, 1, .dialog_action, 270);
         const matches = try self.calendarGuestsMatches();
         self.calendar_guests_selected = @min(self.calendar_guests_selected, matches.len -| 1);
         const loading_contacts = self.job.future != null and self.job.kind == .calendar_guest_contacts;
-        const status = if (self.calendar_guests_error.len > 0) self.calendar_guests_error.slice() else if (loading_contacts) @as([]const u8, "Loading this account's contacts…") else if (matches.len == 0) "No matching contacts. Type guest emails in the event." else if (self.calendar_guests_cached) "Saved contacts · Ctrl+R Refresh" else "Choose an email address · existing guests are kept";
+        const recent_ready = self.calendar_guests_recent.value != .null;
+        const query = self.calendarGuestsQuery();
+        const searched = self.calendarGuestsSearchResult() != .null;
+        const more = text(get(self.calendar_guests_contacts.value, "nextCursor")).len > 0;
+        const search_full = searched and items(get(self.calendar_guests_search.value, "contacts")).len >= 30;
+        // Both sources were validated when stored; unknown completeness here
+        // still counts as partial rather than complete.
+        var contact_read: calendar_guest_picker.ReadState = .{};
+        if (self.calendar_guests_contacts.value != .null) contact_read.merge(calendar_guest_picker.readState(self.frame.allocator(), self.calendar_guests_contacts.value) catch .{ .partial = true });
+        if (searched) contact_read.merge(calendar_guest_picker.readState(self.frame.allocator(), self.calendar_guests_search.value) catch .{ .partial = true });
+        const partial_data = contact_read.incomplete();
+        // The loaded list is a bounded head: only an explicit search (or a
+        // complete head) may say nothing matches. Hints lead to fit 48 columns.
+        const status = if (self.calendar_guests_error.len > 0) self.calendar_guests_error.slice() else if (loading_contacts and self.calendar_guests_searching) @as([]const u8, "Searching this account's Contacts…") else if (loading_contacts) (if (recent_ready) @as([]const u8, "Loading this account's contacts… · recent mail shown") else "Loading this account's contacts…") else if (searched and matches.len == 0) (if (partial_data) @as([]const u8, "No readable match; some contacts omitted") else "No matching contacts or recent-mail recipients. Type guest emails in the event.") else if (searched) (if (search_full) @as([]const u8, "First 30 Contacts matches · type more to narrow") else "Contacts search + recent mail · existing guests are kept") else if (query.len > 0) (if (matches.len == 0) @as([]const u8, "No loaded match · Ctrl+F Search Contacts") else "Loaded matches · Ctrl+F Search Contacts") else if (more) "Type a name · Ctrl+F searches all Contacts" else if (matches.len == 0) (if (partial_data) @as([]const u8, "No readable match; some contacts omitted") else "No matching contacts or recent-mail recipients. Type guest emails in the event.") else if (!recent_ready) (if (self.calendar_guests_cached) @as([]const u8, "Saved contacts · recent mail unavailable · Ctrl+R Refresh") else "Contacts · recent mail unavailable · existing guests are kept") else if (self.calendar_guests_cached) "Saved contacts + recent mail · Ctrl+R Refresh contacts" else "Contacts + recent mail · existing guests are kept";
         try self.line(inner, 4, try self.fitLine(inner, status, inner.width), if (self.calendar_guests_error.len > 0) .warning else .muted);
+        // Omitted provider data keeps its own row, so a cached or no-match
+        // status can never hide it. A next page (nextCursor) is not partial.
+        // Mail's counted wording when counts exist; otherwise generic text.
+        if (partial_data) {
+            const wide_row = inner.width >= 46;
+            const counts = contact_read.warnings;
+            const partial: []const u8 = if (contact_read.counted()) (if (wide_row) try std.fmt.allocPrint(self.frame.allocator(), "Partial contacts · {d} omitted · {d} with warnings", .{ counts.omittedContacts, counts.partialContacts }) else try std.fmt.allocPrint(self.frame.allocator(), "Partial: {d} omitted, {d} with warnings", .{ counts.omittedContacts, counts.partialContacts })) else if (wide_row) "Partial contacts · some were omitted or incomplete" else "Partial: some contacts omitted/incomplete";
+            try self.line(inner, 5, try self.fitLine(inner, partial, inner.width), .warning);
+        }
         const list_height = inner.height -| 10;
         const visible = @max(list_height / 2, 1);
         const first = self.calendar_guests_selected -| (visible - 1);
@@ -14279,6 +15730,7 @@ const App = struct {
             if (selected) try self.calendar_guests_drawn_address.set(candidate.address);
         }
         const can_add = !loading_contacts and self.calendar_guests_selected < matches.len and !calendar_guest_picker.contains(self.calendar_form_fields[8].value(), matches[self.calendar_guests_selected].address);
+        _ = try self.actionButton(inner, inner.height -| 4, 0, "[Ctrl+F Search Contacts]", self.calendar_guests_focus == 4, query.len > 0, .dialog_action, 273);
         try self.line(inner, inner.height -| 3, "Or type email addresses in Guests.", .muted);
         const x = try self.actionButton(inner, inner.height -| 2, 0, "[Enter Add guest]", self.calendar_guests_focus == 2, can_add, .dialog_action, 271);
         _ = try self.actionButton(inner, inner.height -| 2, x, "[Esc Back]", self.calendar_guests_focus == 3, true, .dialog_action, 272);
@@ -14412,8 +15864,32 @@ const App = struct {
         const chosen = try calendarComposeOffsetText(a, candidates.values[next].offset_seconds);
         try self.calendar_form_fields[endpoint].set(self.allocator, chosen);
         try self.calendar_form.set(@fromBackingInt(@intCast(endpoint)), chosen);
+        // Choosing the end's DST occurrence is an explicit end decision.
+        if (endpoint == 11) self.calendar_form_follow.pinned = true;
         self.calendar_form_dirty = true;
         self.calendar_form_error = .{};
+    }
+    fn calendarComposeEndpoints(self: *App) calendar_composer.EndFollow.Fields {
+        return .{ .start_date = self.calendar_form_fields[1].value(), .start_time = self.calendar_form_fields[2].value(), .end_date = self.calendar_form_fields[3].value(), .end_time = self.calendar_form_fields[4].value() };
+    }
+    /// Ordinary user edits only (typing, deletion, paste). Hydration, review
+    /// sync and DST choices use Model.set and never move an endpoint.
+    fn calendarComposeBeforeEdit(self: *App, index: usize) void {
+        if (index == 1 or index == 2) self.calendar_form_follow.observe(self.calendar_form.all_day, self.calendarComposeEndpoints());
+    }
+    fn calendarComposeEdited(self: *App, index: usize, before: u64) !void {
+        if (before == std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value())) return;
+        self.calendar_form_dirty = true;
+        if (index == 3 or index == 4) self.calendar_form_follow.pinned = true;
+        if (index != 1 and index != 2) return;
+        const end = try self.calendar_form_follow.follow(self.frame.allocator(), self.calendar_form.all_day, self.calendarComposeEndpoints()) orelse return;
+        const end_time = if (self.calendar_form.all_day) self.calendar_form_fields[4].value() else end.time;
+        if (same(end.date, self.calendar_form_fields[3].value()) and same(end_time, self.calendar_form_fields[4].value())) return;
+        try self.calendar_form_fields[3].set(self.allocator, end.date);
+        if (!self.calendar_form.all_day) try self.calendar_form_fields[4].set(self.allocator, end.time);
+        // As Model.set does at review: a moved end drops its old DST
+        // occurrence now, so the form never shows a stale first/second choice.
+        try self.calendar_form_fields[11].set(self.allocator, "");
     }
     fn calendarComposeSyncOffsets(self: *App) !void {
         for ([_]usize{ 10, 11 }) |index| try self.calendar_form_fields[index].set(self.allocator, self.calendar_form.get(@fromBackingInt(@intCast(index))));
@@ -14529,8 +16005,9 @@ const App = struct {
         if (self.paste) {
             if (index < 10 and self.calendar_form.editable(@fromBackingInt(@intCast(index)))) {
                 const before = std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+                self.calendarComposeBeforeEdit(index);
                 try self.pasteInto(&self.calendar_form_fields[index], key, index == 7, (@as(calendar_composer.Field, @fromBackingInt(@intCast(index)))).limit());
-                self.calendar_form_dirty = self.calendar_form_dirty or before != std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+                try self.calendarComposeEdited(index, before);
             }
             return;
         }
@@ -14559,8 +16036,9 @@ const App = struct {
             }
             if (!self.calendar_form.editable(field)) return;
             const before = std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+            self.calendarComposeBeforeEdit(index);
             try self.calendar_form_fields[index].handleKey(self.allocator, key, field == .description, field.limit());
-            self.calendar_form_dirty = self.calendar_form_dirty or before != std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+            try self.calendarComposeEdited(index, before);
         }
     }
     fn calendarComposeEditLine(self: *App, win: vaxis.Window, row: usize, field_kind: calendar_composer.Field, label_width: u16, focused: bool) !void {
@@ -14642,7 +16120,7 @@ const App = struct {
                             .google_meet => "Video: Generate Google Meet link",
                             .link => "Video: Paste meeting link",
                         },
-                        23 => "[Ctrl+Space Contacts]",
+                        23 => "[Ctrl+Space Contacts · recent mail]",
                         15 => if (!self.calendar_form_notify_chosen) @as([]const u8, "Notify guests: choose Email / No email · Enter") else if (self.calendar_form.send_updates == .all) "[x] Email guests about these changes" else "[ ] No guest update emails requested",
                         else => "",
                     };
@@ -15787,8 +17265,13 @@ const App = struct {
                     return self.selectCalendar(self.calendar.picker);
                 }
                 if (self.calendar.page == .permissions) {
-                    try self.emitReaderCopy(try self.calendarGrantCommand());
-                    try self.calendar.notice.set("Authorization command copied · run it explicitly in your terminal");
+                    if (try self.calendarGrantCommand()) |grant| {
+                        try self.emitReaderCopy(grant);
+                        try self.calendar.notice.set("Authorization command copied · run it explicitly in your terminal");
+                    } else {
+                        try self.emitReaderCopy(try self.calendarStatusCommand());
+                        try self.calendar.notice.set("Status command copied · check current permissions before authorizing");
+                    }
                     return;
                 }
                 if (self.calendar.page == .review) {
@@ -16436,38 +17919,58 @@ const App = struct {
         const point = (try calendar_slot.Identity.init(event)).start;
         return if (point.kind == .date) "All-day" else calendar_ui.clock(self.frame.allocator(), point, &self.calendar.zone);
     }
-    fn calendarGrantCommand(self: *App) ![]const u8 {
-        var caps: std.ArrayList(u8) = .empty;
+    fn calendarWriteGuide(self: *App) bool {
+        return same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired");
+    }
+    /// Owned-scope writes only for a calendar verified as owned; otherwise
+    /// the shared-writer capability, exactly as the backend requires.
+    fn calendarWriteOwned(self: *App) bool {
+        const entry = if (self.calendar.picker < self.calendarEntries().len) self.calendarEntries()[self.calendar.picker] else @as(Value, .null);
+        return truth(get(get(entry, "calendar"), "owned_scope_verified"));
+    }
+    fn calendarNeededCapabilities(self: *App) []const u8 {
+        if (!self.calendarWriteGuide()) return "calendar-read";
+        return if (self.calendarWriteOwned()) "calendar-read,calendar-write-owned" else "calendar-read,calendar-write-shared";
+    }
+    /// The exact command when this account's capabilities are known: every
+    /// current one is kept, only the needed Calendar access is added, and the
+    /// explicit --backend/--config/--grant-file routing is repeated (as for
+    /// Drive). Otherwise null, never a guessed list that could remove access.
+    fn calendarGrantCommand(self: *App) !?[]const u8 {
         const a = self.frame.allocator();
-        const account_slot = self.calendarAccountSlot(self.calendar.account.slice());
-        const existing = if (account_slot) |index| items(get(self.accounts[index], "capabilities")) else &.{};
+        const slot = self.calendarAccountSlot(self.calendar.account.slice()) orelse return null;
+        const existing = get(self.accounts[slot], "capabilities");
+        if (existing != .array or existing.array.items.len == 0) return null;
+        var caps: std.ArrayList(u8) = .empty;
         var has_read = false;
         var has_owned = false;
         var has_shared = false;
-        for (existing) |cap| {
+        for (existing.array.items, 0..) |cap, index| {
+            // A non-string, non-canonical or repeated entry makes the set
+            // unknown rather than shorter.
+            if (cap != .string or !calendarGrantCapability(cap.string)) return null;
+            for (existing.array.items[0..index]) |previous| if (same(text(previous), cap.string)) return null;
             if (caps.items.len > 0) try caps.append(a, ',');
-            try caps.appendSlice(a, text(cap));
-            has_read = has_read or same(text(cap), "calendar-read");
-            has_owned = has_owned or same(text(cap), "calendar-write-owned");
-            has_shared = has_shared or same(text(cap), "calendar-write-shared");
+            try caps.appendSlice(a, cap.string);
+            has_read = has_read or same(cap.string, "calendar-read");
+            has_owned = has_owned or same(cap.string, "calendar-write-owned");
+            has_shared = has_shared or same(cap.string, "calendar-write-shared");
         }
-        if (caps.items.len == 0) try caps.appendSlice(a, "mail-read");
         if (!has_read) try caps.appendSlice(a, ",calendar-read");
-        if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) {
-            const entry = if (self.calendar.picker < self.calendarEntries().len) self.calendarEntries()[self.calendar.picker] else @as(Value, .null);
-            const owned = truth(get(get(entry, "calendar"), "owned_scope_verified"));
-            const capability = if (owned) "calendar-write-owned" else "calendar-write-shared";
-            if (!has_shared and !(owned and has_owned)) {
-                try caps.append(a, ',');
-                try caps.appendSlice(a, capability);
-            }
+        if (self.calendarWriteGuide()) {
+            const owned = self.calendarWriteOwned();
+            if (!has_shared and !(owned and has_owned)) try caps.appendSlice(a, if (owned) ",calendar-write-owned" else ",calendar-write-shared");
         }
-        const config_arg = if (self.options.config_file) |path| try std.fmt.allocPrint(a, " --config {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
-        const grant_arg = if (self.options.grant_file) |path| try std.fmt.allocPrint(a, " --grant-file {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
-        return std.fmt.allocPrint(a, "omagma terminal-auth authorize --account {s}{s}{s} --capabilities {s}", .{ try calendar_ui.shellQuoted(a, self.calendar.account.slice()), config_arg, grant_arg, caps.items });
+        return try std.fmt.allocPrint(a, "omagma terminal-auth authorize --account {s}{s} --capabilities {s}", .{ try calendar_ui.shellQuoted(a, self.calendar.account.slice()), try self.authRouting(), caps.items });
+    }
+    fn calendarStatusCommand(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        return std.fmt.allocPrint(a, "omagma terminal-auth status --account {s}{s}", .{ try calendar_ui.shellQuoted(a, self.calendar.account.slice()), try self.authRouting() });
     }
     fn calendarGuide(self: *App) ![]const u8 {
-        return std.fmt.allocPrint(self.frame.allocator(), "{s}{s}\nAccount: {s}\n\nThe command below keeps your existing permissions and adds the Calendar access needed here. Copy it and run it in your terminal to review Google's consent screen.\n\n{s}\n\ncalendar-write-owned covers your calendars. calendar-write-shared also permits changes to calendars shared with you as a writer. Calendar sharing permissions still apply.\n\nSetup: https://github.com/technologylab-ai/omagma/blob/main/docs/CALENDAR-PERMISSIONS.md\n\nNo calendar is changed by opening this guide.", .{ if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) @as([]const u8, "Write access needed for ") else "Calendar not authorized", if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) self.calendar.calendar_name.slice() else "", self.calendar.account.slice(), try self.calendarGrantCommand() });
+        const a = self.frame.allocator();
+        const steps = if (try self.calendarGrantCommand()) |grant| try std.fmt.allocPrint(a, "The command below keeps your existing permissions and adds the Calendar access needed here. Copy it and run it in your terminal to review Google's consent screen.\n\n{s}", .{grant}) else try std.fmt.allocPrint(a, "Omagma couldn't read this account's current permissions, so it won't suggest a command that could remove access. Copy this check and run it in your terminal:\n\n{s}\n\nThen run omagma terminal-auth authorize --account {s}{s} --capabilities with every current capability plus {s}.", .{ try self.calendarStatusCommand(), try calendar_ui.shellQuoted(a, self.calendar.account.slice()), try self.authRouting(), self.calendarNeededCapabilities() });
+        return std.fmt.allocPrint(a, "{s}{s}\nAccount: {s}\n\n{s}\n\ncalendar-write-owned covers your calendars. calendar-write-shared also permits changes to calendars shared with you as a writer. Calendar sharing permissions still apply.\n\nSetup: https://github.com/technologylab-ai/omagma/blob/main/docs/CALENDAR-PERMISSIONS.md\n\nNo calendar is changed by opening this guide.", .{ if (self.calendarWriteGuide()) @as([]const u8, "Write access needed for ") else "Calendar not authorized", if (self.calendarWriteGuide()) self.calendar.calendar_name.slice() else "", self.calendar.account.slice(), steps });
     }
 
     fn drawCalendar(self: *App, win: vaxis.Window) !void {
@@ -16648,7 +18151,7 @@ const App = struct {
         try self.line(win, 1, try self.fitLine(win, try self.syncLine(), win.width), self.syncTone());
         const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
         // A composer command keeps the draft visible behind its prompt.
-        if (self.mode == .compose or self.mode == .review or self.mode == .attachment or (self.mode == .command and self.previous_mode == .compose)) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
+        if (self.mode == .compose or self.mode == .review or self.mode == .attachment or (self.mode == .command and self.previous_mode == .compose)) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or ((self.mode == .search or self.mode == .command) and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
             const panes = layout.computeWithRatios(body.width, body.height, self.focus, self.reader_layout, self.expanded, try self.navigationWidth(body), self.ui_preferences.listWidthPercent, self.ui_preferences.listHeightPercent);
             if (panes.navigation) |rect| try self.navigationDraw(self.pane(body, rect, " Accounts / mailboxes ", self.focus == .navigation));
             if (panes.list) |rect| try self.listDraw(self.pane(body, rect, try self.listTitle(), self.focus == .list));
@@ -16685,6 +18188,9 @@ const App = struct {
         try self.drawComposeChoice(win);
         try self.drawUx(win);
         try self.drawGrace(win);
+        try self.drawSendProgress(win);
+        try self.drawSendChecking(win);
+        try self.drawSendFailure(win);
         if (self.capabilities.updates) try self.drawUpdates(win);
         try self.drawMeetings(win);
     }
@@ -17565,6 +19071,475 @@ const AccountSwitchTestClient = struct {
         return std.json.Stringify.valueAlloc(a, .{ .ok = true, .account = account_address, .data = .{ .messages = rows, .cacheReady = true, .cached = true } }, .{});
     }
 };
+
+test "local UI: Drive delivery controls keep Tab order, persist settings and block sends from the backend plan" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-send\"]}]", .{}));
+    app.capabilities.attachments = true;
+    app.capabilities.files = true;
+    app.options.config_file = null;
+    app.options.grant_file = null;
+    try app.compose.replaceAttachments(a, &.{ .{ .id = "", .filename = "report-final.pdf", .size = 4, .blobId = "blob-report", .delivery = .drive }, .{ .id = "", .filename = "notes.txt", .size = 4, .data = "bm90ZQ" } });
+    // Saved drafts and reopened composers keep each file's delivery.
+    try std.testing.expectEqual(@as(?types.AttachmentDelivery, .drive), app.compose.attachments[0].delivery);
+    try std.testing.expectEqual(@as(?types.AttachmentDelivery, null), app.compose.attachments[1].delivery);
+    // Body → [Upload all] → [Add A] → delivery → [x] for each row.
+    app.focusComposeAttachments(0);
+    app.compose_secondary = app.uploadAllAvailable();
+    try std.testing.expect(app.compose_secondary);
+    const tab: Key = .{ .codepoint = Key.tab };
+    const back: Key = .{ .codepoint = Key.tab, .mods = .{ .shift = true } };
+    try app.onComposeAttachmentKey(tab);
+    try std.testing.expect(app.compose.attachment_cursor == 0 and !app.compose_secondary);
+    try app.onComposeAttachmentKey(tab);
+    try std.testing.expect(app.compose.attachment_cursor == 1 and app.compose_secondary);
+    try app.onComposeAttachmentKey(tab);
+    try std.testing.expect(app.compose.attachment_cursor == 1 and !app.compose_secondary);
+    try app.onComposeAttachmentKey(tab);
+    try std.testing.expect(app.compose.attachment_cursor == 2 and app.compose_secondary);
+    try app.onComposeAttachmentKey(back);
+    try std.testing.expect(app.compose.attachment_cursor == 1 and !app.compose_secondary);
+    try app.onComposeAttachmentKey(back);
+    try std.testing.expect(app.compose.attachment_cursor == 1 and app.compose_secondary);
+    // Without a current backend plan a Drive file can never be sent.
+    try std.testing.expect(app.deliveryBlocksSend());
+    try std.testing.expectError(error.AttachmentPlanBlocked, app.sendDraft());
+    try app.compose_measure.operation.set("measure-1");
+    app.compose_measure.measured_operation = app.compose_measure.operation;
+    app.compose_measure.measured = true;
+    const plan_source =
+        \\{"files":[{"index":0,"filename":"report-final.pdf","size":4,"requestedDelivery":"drive","delivery":"drive"},
+        \\{"index":1,"filename":"notes.txt","size":4,"requestedDelivery":"attach","delivery":"attach"}],
+        \\"attachedBytes":4,"mimeBytes":900,"mimeEstimate":true,"driveFileCount":1,"driveFileLimit":16,
+        \\"decodedLimitBytes":26214400,"mimeLimitBytes":36700160,"blockers":[%s]}
+    ;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    for ([_][]const u8{ "{\"code\":\"DriveWithBcc\",\"message\":\"Bcc\"}", "{\"code\":\"DriveNotConnected\",\"message\":\"auth\"}", "" }, 0..) |blocker, case| {
+        const raw = try std.mem.replaceOwned(u8, arena.allocator(), plan_source, "%s", blocker);
+        try delivery_view.parse(&app.delivery_plan, try std.json.parseFromSliceLeaky(Value, arena.allocator(), raw, .{}), app.compose.attachments.len);
+        try std.testing.expect(app.currentPlan() != null);
+        try std.testing.expectEqual(case != 2, app.deliveryBlocksSend());
+        // Connect Drive appears only for a missing grant, before the format control.
+        try std.testing.expectEqual(case == 1, app.composeSecondaryAvailable(app.compose.attachments.len + 1));
+    }
+    try std.testing.expectEqualStrings("omagma terminal-auth authorize --account 'self@example.test' --capabilities mail-read,mail-send,drive-upload", (try app.driveAuthorizeCommand()).?);
+    // Explicit routing (with spaces) is repeated, shell-quoted.
+    app.options.backend_socket = "/run/user/1000/omagma vault.sock";
+    app.options.config_file = "/private/omagma config.json";
+    try std.testing.expectEqualStrings("omagma terminal-auth authorize --account 'self@example.test' --backend '/run/user/1000/omagma vault.sock' --config '/private/omagma config.json' --capabilities mail-read,mail-send,drive-upload", (try app.driveAuthorizeCommand()).?);
+    try std.testing.expect(std.mem.indexOf(u8, try app.driveConnectText("choose Connect Drive again"), "Nothing was uploaded") == null);
+    // An account without a readable capability set gets no narrowing command;
+    // the check names the account and the same routing.
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    try std.testing.expect((try app.driveAuthorizeCommand()) == null);
+    try std.testing.expect(std.mem.indexOf(u8, try app.driveConnectText("choose Connect Drive again"), "terminal-auth status --account 'self@example.test' --backend '/run/user/1000/omagma vault.sock' --config '/private/omagma config.json'") != null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: stopped Drive preparation shows exact receipts and only explicit choices" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-send\"]}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const stopped = try std.json.parseFromSliceLeaky(Value, arena.allocator(),
+        \\{"outcome":"preparationStopped","status":"stopped","operationId":"op-drive-1","draftId":"","errorCode":"DriveSharingBlocked","canRetryPreparation":true,
+        \\"driveFiles":[{"index":0,"filename":"report-final.pdf","size":4,"state":"shared","driveFileId":"f1","sharedWith":["peer@example.test"],"sharingUnconfirmedWith":"blocked@example.test"},
+        \\{"index":1,"filename":"raw.zip","size":4,"state":"uploaded","driveFileId":"f2","sharedWith":[]}]}
+    , .{});
+    try app.applyPreparationStopped(stopped, false);
+    try std.testing.expect(app.sendFailureVisible() and !app.compose.unknown_outcome);
+    try std.testing.expectEqual(@as(usize, 2), app.send_failure.count);
+    try std.testing.expectEqualStrings("op-drive-1", app.send_failure.operation.slice());
+    var buffer: [4]App.SendAction = undefined;
+    const actions = app.sendFailureActions(&buffer);
+    // Retry preparation first (initial focus), then Edit draft and Stop.
+    try std.testing.expectEqual(@as(usize, 3), actions.len);
+    try std.testing.expectEqual(App.SendAction.retry, actions[0]);
+    try std.testing.expectEqual(@as(usize, 0), app.send_failure.focus);
+    // Esc keeps the draft and its receipts; nothing is sent or retried.
+    try app.onSendFailureKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.sendFailureVisible());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    // A Gmail outcome that is unknown keeps receipts but never offers retry.
+    app.compose.unknown_outcome = true;
+    app.noteSendReceipts(stopped);
+    try std.testing.expectEqual(send_drive.Kind.unknown, app.send_failure.kind);
+    try std.testing.expectEqual(@as(usize, 1), app.sendFailureActions(&buffer).len);
+    try std.testing.expectEqual(App.SendAction.close, app.sendFailureActions(&buffer)[0]);
+    // Connect Drive only for a missing or expired grant the backend lets the
+    // user retry; a generic 403, a full Drive or a sharing refusal never
+    // suggests re-authorizing. Retry follows canRetryPreparation exactly.
+    app.compose.unknown_outcome = false;
+    for ([_]struct { code: []const u8, retry: bool, connect: bool }{
+        .{ .code = "DriveAccessExpired", .retry = true, .connect = true },
+        .{ .code = "DriveNotConnected", .retry = true, .connect = true },
+        .{ .code = "DriveAccessExpired", .retry = false, .connect = false },
+        .{ .code = "DrivePermissionDenied", .retry = false, .connect = false },
+        .{ .code = "PermissionDenied", .retry = true, .connect = false },
+        .{ .code = "RateLimited", .retry = true, .connect = false },
+        .{ .code = "DriveStorageFull", .retry = false, .connect = false },
+        .{ .code = "DriveSharingBlocked", .retry = false, .connect = false },
+        .{ .code = "DriveApiDisabled", .retry = false, .connect = false },
+        // The refused new send can't retry; the earlier send's own stopped
+        // receipt keeps its normal retry.
+        .{ .code = "DrivePreparationActive", .retry = false, .connect = false },
+        .{ .code = "DriveNetwork", .retry = true, .connect = false },
+    }) |case| {
+        const case_receipt = try std.json.parseFromSliceLeaky(Value, arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{{\"outcome\":\"preparationStopped\",\"status\":\"stopped\",\"operationId\":\"op-drive-2\",\"errorCode\":\"{s}\",\"canRetryPreparation\":{s},\"driveFiles\":[]}}", .{ case.code, if (case.retry) "true" else "false" }), .{});
+        try app.applyPreparationStopped(case_receipt, false);
+        const offered = app.sendFailureActions(&buffer);
+        try std.testing.expectEqual(case.retry, std.mem.indexOfScalar(App.SendAction, offered, .retry) != null);
+        try std.testing.expectEqual(case.connect, std.mem.indexOfScalar(App.SendAction, offered, .connect) != null);
+        // Edit draft and Stop stay available after every stopped preparation.
+        try std.testing.expect(std.mem.indexOfScalar(App.SendAction, offered, .edit) != null and std.mem.indexOfScalar(App.SendAction, offered, .stop) != null);
+    }
+    // A refused new send has no Drive files yet; its reason still shows,
+    // with only Edit draft and Stop.
+    const active_receipt = try std.json.parseFromSliceLeaky(Value, arena.allocator(), "{\"outcome\":\"preparationStopped\",\"status\":\"stopped\",\"operationId\":\"op-drive-b\",\"errorCode\":\"DrivePreparationActive\",\"canRetryPreparation\":false,\"driveFiles\":[]}", .{});
+    try app.applyPreparationStopped(active_receipt, false);
+    try std.testing.expect(app.sendFailureVisible() and app.send_failure.count == 0);
+    try std.testing.expectEqualStrings("An earlier send of this draft still has unfinished Drive preparation, so this send didn't start and nothing was uploaded for it. Retry that earlier send, or edit or discard the draft to retire it, then send again.", try send_drive.reason(arena.allocator(), &app.send_failure, app.account()));
+    const refused = app.sendFailureActions(&buffer);
+    try std.testing.expect(refused.len == 2 and refused[0] == .edit and refused[1] == .stop);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: a retired Drive send shows frozen receipts without a Gmail rejection, Send, Retry or Connect" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-send\"]}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const ta = arena.allocator();
+    var buffer: [4]App.SendAction = undefined;
+    // The backend's Operation DTO: rejected, retired kind, no Gmail IDs,
+    // frozen reserved/uploaded/shared/unconfirmed files, no retry.
+    const receipt_format =
+        \\{{"id":"op-drive-3","draftId":"","outcome":"rejected","kind":"drivePreparationRetired","errorCode":"{s}","messageId":"","rfcMessageId":"","canRetryPreparation":false,
+        \\"driveFiles":[{{"index":0,"filename":"draft.pdf","size":4,"state":"reserved","sharedWith":[]}},
+        \\{{"index":1,"filename":"raw.zip","size":4,"state":"uploaded","driveFileId":"f2","sharedWith":[]}},
+        \\{{"index":2,"filename":"report-final.pdf","size":4,"state":"shared","driveFileId":"f3","sharedWith":["peer@example.test"],"sharingUnconfirmedWith":"second@example.test"}},
+        \\{{"index":3,"filename":"notes.txt","size":4,"state":"sharing","driveFileId":"f4","sharedWith":[],"sharingUnconfirmedWith":"peer@example.test"}}]}}
+    ;
+    for ([_]struct { code: []const u8, status: []const u8, reason: []const u8 }{
+        .{ .code = "DrivePreparationRetired", .status = "Message not sent · this Drive send was retired · draft retained", .reason = "This send was retired because its draft was edited or discarded, or its queued send was cancelled; it can't resume. Files already in Drive stay there with the access shown below, and a new send uploads new copies." },
+        .{ .code = "DriveSubmissionBudgetExpired", .status = "Message not sent · Drive preparation ran out of time before Gmail · draft retained", .reason = "Drive preparation ran out of time, so Omagma stopped before contacting Gmail; this send can't resume. Files already in Drive stay there with the access shown below." },
+    }) |case| {
+        const retired_receipt = try std.json.parseFromSliceLeaky(Value, ta, try std.fmt.allocPrint(ta, receipt_format, .{case.code}), .{});
+        app.compose.unknown_outcome = false;
+        app.sayFailure("Submission rejected · draft retained", case.code);
+        app.noteSendReceipts(retired_receipt);
+        try std.testing.expectEqualStrings(case.status, app.status[0..app.status_len]);
+        try std.testing.expect(app.sendFailureVisible() and app.send_failure.kind == .stopped and !app.send_failure.can_retry);
+        try std.testing.expectEqualStrings(case.reason, try send_drive.reason(ta, &app.send_failure, app.account()));
+        // Each file keeps its frozen state; nothing is called shared or
+        // private beyond what the receipt recorded.
+        try std.testing.expectEqual(@as(usize, 4), app.send_failure.count);
+        try std.testing.expectEqualStrings("not uploaded", try send_drive.receipt(ta, &app.send_failure.files[0]));
+        try std.testing.expectEqualStrings("uploaded · private", try send_drive.receipt(ta, &app.send_failure.files[1]));
+        try std.testing.expectEqualStrings("shared with peer@example.test · sharing with second@example.test unconfirmed", try send_drive.receipt(ta, &app.send_failure.files[2]));
+        try std.testing.expectEqualStrings("uploaded · sharing with peer@example.test unconfirmed", try send_drive.receipt(ta, &app.send_failure.files[3]));
+        // Edit draft and Stop only: no Send, Retry or Connect Drive.
+        const offered = app.sendFailureActions(&buffer);
+        try std.testing.expectEqual(@as(usize, 2), offered.len);
+        try std.testing.expect(offered[0] == .edit and offered[1] == .stop);
+    }
+    // An unknown Gmail outcome stays protected: Close only, no replay.
+    app.compose.unknown_outcome = true;
+    app.noteSendReceipts(try std.json.parseFromSliceLeaky(Value, ta, try std.fmt.allocPrint(ta, receipt_format, .{"DriveSubmissionBudgetExpired"}), .{}));
+    try std.testing.expectEqual(send_drive.Kind.unknown, app.send_failure.kind);
+    try std.testing.expectEqual(App.SendAction.close, app.sendFailureActions(&buffer)[0]);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: Drive MIME estimates are sendable only with the backend estimate plan; composer plan is display-only" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    try app.compose.replaceAttachments(a, &.{.{ .id = "", .filename = "report-final.pdf", .size = 27262976, .blobId = "blob-report", .delivery = .drive }});
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const ta = arena.allocator();
+    const digest: [64]u8 = @splat('a');
+    try app.compose_measure.operation.set("measure-drive");
+    try app.compose_measure.content_digest.set(&digest);
+    app.job.measure_operation = app.compose_measure.operation;
+    const plan_json = "{\"files\":[{\"index\":0,\"filename\":\"report-final.pdf\",\"size\":27262976,\"requestedDelivery\":\"drive\",\"delivery\":\"drive\",\"reuse\":\"none\",\"newCopy\":false}],\"attachedBytes\":0,\"mimeBytes\":4096,\"mimeEstimate\":true,\"driveFileCount\":1,\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}";
+    // Actual backend shape for a Drive send: exact:false with a numeric estimate.
+    try app.apply(.draft_measure, try std.fmt.allocPrint(ta, "{{\"ok\":true,\"data\":{{\"operationId\":\"measure-drive\",\"revision\":0,\"contentDigest\":\"{s}\",\"exact\":false,\"bytes\":4096,\"maxBytes\":36700160,\"overLimit\":false,\"sendable\":true,\"attachmentPlan\":{s}}}}}", .{ &digest, plan_json }));
+    try std.testing.expect(app.composeMeasureCurrent() and app.compose_measure.sendable and app.compose_measure.estimated);
+    try std.testing.expect(app.currentPlan() != null and !app.deliveryBlocksSend());
+    try std.testing.expect(std.mem.indexOf(u8, try app.composeSizeLabel(false), "estimate") != null);
+    // A non-exact numeric size without the backend's estimate plan is malformed.
+    app.compose_measure.measured = false;
+    try std.testing.expectError(error.SizeUnavailable, app.apply(.draft_measure, try std.fmt.allocPrint(ta, "{{\"ok\":true,\"data\":{{\"operationId\":\"measure-drive\",\"revision\":0,\"contentDigest\":\"{s}\",\"exact\":false,\"bytes\":4096,\"maxBytes\":36700160,\"overLimit\":false,\"sendable\":true}}}}", .{&digest})));
+    try std.testing.expect(!app.composeMeasureCurrent() and app.deliveryBlocksSend());
+    // A rendered-body failure keeps its protection: measured, never sendable.
+    try app.apply(.draft_measure, try std.fmt.allocPrint(ta, "{{\"ok\":true,\"data\":{{\"operationId\":\"measure-drive\",\"revision\":0,\"contentDigest\":\"{s}\",\"exact\":false,\"bytes\":null,\"maxBytes\":36700160,\"overLimit\":true,\"sendable\":false,\"admissionError\":\"RenderedBodyTooLarge\"}}}}", .{&digest}));
+    try std.testing.expect(app.composeMeasureCurrent() and !app.compose_measure.sendable and !app.compose_measure.estimated);
+    // An autosaved recovery source is not measurable; the composer shows the
+    // read-only plan for exactly this revision, and Send stays blocked.
+    app.compose_measure = .{};
+    app.composer_plan_requested = app.compose.revision;
+    const blocked_plan = try std.mem.replaceOwned(u8, ta, plan_json, "\"blockers\":[]", "\"blockers\":[{\"code\":\"DriveWithBcc\",\"message\":\"Bcc\"}]");
+    app.applyComposerPlan(try std.fmt.allocPrint(ta, "{{\"ok\":true,\"data\":{s}}}", .{blocked_plan}));
+    try std.testing.expect(app.currentPlan() == null and app.displayPlan() != null);
+    try std.testing.expect(std.mem.indexOf(u8, (try app.deliveryWarning()).?, "Bcc") != null);
+    try std.testing.expect(app.deliveryBlocksSend());
+    app.compose.revision += 1;
+    try std.testing.expect(app.displayPlan() == null and app.composerPlanWanted());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: a restarted paused Drive queue keeps progress and Stop on explicit Retry" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    try app.compose.id.set(a, "draft-paused");
+    try app.compose.fields[3].set(a, "Q3 report");
+    // notes: Attach; deck: Auto; video and raw: explicit Drive.
+    try app.compose.replaceAttachments(a, &.{
+        .{ .id = "", .filename = "notes.txt", .size = 4, .data = "bm90ZQ" },
+        .{ .id = "", .filename = "deck.pdf", .size = 20971520, .blobId = "blob-deck", .delivery = .auto },
+        .{ .id = "", .filename = "video.bin", .size = 31457280, .blobId = "blob-video", .delivery = .drive },
+        .{ .id = "", .filename = "raw.zip", .size = 8388608, .blobId = "blob-raw", .delivery = .drive },
+    });
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const ta = arena.allocator();
+    const queue_entry = "{{\"ok\":true,\"data\":{{\"queue\":[{{\"queueId\":\"q-paused\",\"draftId\":\"draft-paused\",\"state\":\"queued\",\"resumeRequired\":true,\"errorCode\":\"InterruptedPreparation\",\"dueAtMs\":0,\"preparation\":{{\"operationId\":\"op-paused\",\"canRetryPreparation\":true,\"driveFiles\":[{s}]}}}}]}}}}";
+    const plan_reply = "{{\"ok\":true,\"data\":{{\"files\":[{{\"index\":0,\"filename\":\"notes.txt\",\"size\":4,\"requestedDelivery\":\"attach\",\"delivery\":\"attach\"}},{{\"index\":1,\"filename\":\"deck.pdf\",\"size\":20971520,\"requestedDelivery\":\"auto\",\"delivery\":\"{s}\"}},{{\"index\":2,\"filename\":\"video.bin\",\"size\":31457280,\"requestedDelivery\":\"drive\",\"delivery\":\"drive\"}},{{\"index\":3,\"filename\":\"raw.zip\",\"size\":8388608,\"requestedDelivery\":\"drive\",\"delivery\":\"drive\"}}],\"attachedBytes\":4,\"mimeBytes\":900,\"mimeEstimate\":true,\"driveFileCount\":{d},\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}}}}";
+    // Receipts are not a plan: none reserved yet, or only one of several.
+    for ([_][]const u8{ "", "{\"index\":2,\"filename\":\"video.bin\",\"size\":31457280,\"state\":\"uploading\",\"sharedWith\":[]}" }) |receipts| for ([_][]const u8{ "drive", "attach" }) |auto_resolution| {
+        app.resetSendState();
+        // Fresh session: no measured plan; the persisted queue is paused.
+        try app.apply(.queue_inspect, try std.fmt.allocPrint(ta, queue_entry, .{receipts}));
+        try std.testing.expect(app.currentPlan() == null and app.displayPlan() == null and app.sendFailureVisible());
+        try std.testing.expectEqual(send_drive.Kind.paused, app.send_failure.kind);
+        try std.testing.expectEqualStrings("InterruptedPreparation", app.send_failure.code.slice());
+        // Explicit Retry reads the saved source's complete plan first.
+        try app.retry_plan_draft.set("draft-paused");
+        try app.retry_plan_queue.set("q-paused");
+        try app.retry_plan_operation.set("op-paused");
+        app.retry_plan_revision = app.compose.revision;
+        app.retry_plan_account = app.account_index;
+        const auto_drive = std.mem.eql(u8, auto_resolution, "drive");
+        const reply = try std.fmt.allocPrint(ta, plan_reply, .{ auto_resolution, @as(usize, if (auto_drive) 3 else 2) });
+        const pinned = (try app.applyRetryPlan(reply)).?;
+        // Every file is labelled from the plan: Auto as resolved, explicit
+        // Drive files whether or not a receipt exists yet.
+        try std.testing.expect(pinned.active and pinned.count == 4);
+        try std.testing.expect(!pinned.files[0].drive and pinned.files[1].drive == auto_drive and pinned.files[2].drive and pinned.files[3].drive);
+        try std.testing.expectEqual(@as(usize, if (auto_drive) 3 else 2), pinned.drive_count);
+        app.job.kind = .retry_plan;
+        app.job.future = .{ .any_future = null, .result = {} };
+        try app.onSendFailureKey(.{ .codepoint = Key.escape });
+        try std.testing.expect(app.job.future == null and app.send_failure.kind == .none and !app.compose.unknown_outcome);
+        try std.testing.expect((try app.applyRetryPlan(reply)) == null);
+        try app.apply(.queue_inspect, try std.fmt.allocPrint(ta, queue_entry, .{receipts}));
+        // A stale queue or an incomplete plan never pins guessed rows.
+        try app.retry_plan_queue.set("q-other");
+        try std.testing.expect((try app.applyRetryPlan(reply)) == null);
+        try app.retry_plan_queue.set("q-paused");
+        try std.testing.expectError(error.InvalidAttachmentPlan, app.applyRetryPlan("{\"ok\":true,\"data\":{\"files\":[],\"attachedBytes\":0,\"mimeBytes\":0,\"driveFileCount\":0,\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}}"));
+        app.resetSendState();
+        app.send_pinned = pinned;
+    };
+    app.job.kind = .grace_process;
+    app.job.future = .{ .any_future = null, .result = {} }; // The queued send is running.
+    defer app.job.future = null;
+    app.drive_progress.publish(.uploading, 2, 2, 1024, 31457280);
+    try std.testing.expect(app.sendProgressActive() and app.sendCancellable());
+    try std.testing.expectEqual(send_drive.FileState.uploading, app.drive_progress.snapshot().find(2).?.state);
+    // While files upload, the say line and the status describe Drive work
+    // and an unsent message; nothing claims Gmail submission yet.
+    app.noteSendPhase();
+    try std.testing.expectEqualStrings("Uploading to Drive · message not sent yet", app.status[0..app.status_len]);
+    try std.testing.expect(std.mem.indexOf(u8, app.sendStatusLabel(), "Submitting") == null);
+    // Before Gmail, Cancel opens Stop with Keep sending focused; not after.
+    try std.testing.expect(try app.onSendProgressKey(.{ .codepoint = Key.escape }));
+    try std.testing.expectEqual(@as(?u1, 1), app.send_stop_focus);
+    app.send_stop_focus = null;
+    app.drive_progress.publish(.submitting, null, null, 0, 0);
+    try std.testing.expect(!app.sendCancellable());
+    // Only mail_submitting reads as Submitting; an ordinary send, with no
+    // Drive file pinned, keeps that wording from the start.
+    app.noteSendPhase();
+    try std.testing.expectEqualStrings("Submitting · waiting for the provider receipt", app.status[0..app.status_len]);
+    app.send_pinned.drive_count = 0;
+    app.drive_progress.reset();
+    try std.testing.expectEqualStrings("Submitting · waiting for the provider receipt", app.sendStatusLabel());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: :resume-send of a restarted Drive queue plans first, then keeps the ordinary countdown" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    app.loop = loop;
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.capabilities.send_queue = true;
+    app.compose_active = true;
+    app.mode = .compose;
+    try app.compose.id.set(a, "draft-q");
+    try app.compose.fields[3].set(a, "Q3 report");
+    try app.compose.replaceAttachments(a, &.{
+        .{ .id = "", .filename = "notes.txt", .size = 4, .data = "bm90ZQ" },
+        .{ .id = "", .filename = "deck.pdf", .size = 20971520, .blobId = "blob-deck", .delivery = .auto },
+        .{ .id = "", .filename = "video.bin", .size = 31457280, .blobId = "blob-video", .delivery = .drive },
+    });
+    // Fresh session: an intent paused before any preparation (no receipt).
+    try app.apply(.queue_inspect, "{\"ok\":true,\"data\":{\"queue\":[{\"queueId\":\"q-1\",\"draftId\":\"draft-q\",\"operationId\":\"op-q\",\"state\":\"queued\",\"resumeRequired\":true,\"dueAtMs\":0}]}}");
+    try std.testing.expect(app.pausedGraceForCompose() and app.currentPlan() == null and app.send_failure.kind == .none);
+    try std.testing.expectEqualStrings("op-q", app.pausedOperation());
+    const plan_reply = "{\"ok\":true,\"data\":{\"files\":[{\"index\":0,\"filename\":\"notes.txt\",\"size\":4,\"requestedDelivery\":\"attach\",\"delivery\":\"attach\"},{\"index\":1,\"filename\":\"deck.pdf\",\"size\":20971520,\"requestedDelivery\":\"auto\",\"delivery\":\"attach\"},{\"index\":2,\"filename\":\"video.bin\",\"size\":31457280,\"requestedDelivery\":\"drive\",\"delivery\":\"drive\"}],\"attachedBytes\":20971524,\"mimeBytes\":28000000,\"mimeEstimate\":true,\"driveFileCount\":1,\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}}";
+    // :resume-send reads the saved source's plan first; nothing is resumed yet.
+    try app.startPausedRetry(.resume_countdown);
+    try std.testing.expectEqual(JobKind.retry_plan, app.job.kind);
+    try std.testing.expect(std.mem.indexOf(u8, app.job.request, "\"draft.delivery-plan\"") != null and std.mem.indexOf(u8, app.job.request, "\"op-q\"") != null);
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    // A stale plan (queue changed meanwhile) never resumes anything.
+    try app.retry_plan_queue.set("q-other");
+    app.job.failure = null;
+    app.job.response = plan_reply;
+    app.finishRetryPlan();
+    try std.testing.expect(app.job.future == null and !app.send_pinned.active and !app.grace_active);
+    // The current plan resumes the ordinary countdown, never Send now.
+    try app.retry_plan_queue.set("q-1");
+    app.job.response = plan_reply;
+    app.finishRetryPlan();
+    try std.testing.expectEqual(JobKind.grace_resume, app.job.kind);
+    try std.testing.expect(std.mem.indexOf(u8, app.job.request, "\"queue.resume\"") != null and std.mem.indexOf(u8, app.job.request, "delaySeconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.job.request, "send-now") == null);
+    try std.testing.expect(app.send_pinned.active and app.send_pinned.drive_count == 1 and app.send_pinned.files[2].drive and !app.send_pinned.files[1].drive);
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    const due = Io.Timestamp.now(app.io, .real).toMilliseconds() + 10_000;
+    try app.apply(.grace_resume, try std.fmt.allocPrint(app.frame.allocator(), "{{\"ok\":true,\"data\":{{\"state\":\"queued\",\"queueId\":\"q-1\",\"draftId\":\"draft-q\",\"dueAtMs\":{d},\"resumeRequired\":false}}}}", .{due}));
+    try std.testing.expect(app.grace_active and app.grace_pending.load(.acquire) and app.grace_drive);
+    // Countdown not yet due: nothing is processed early.
+    try app.processGrace(false);
+    try std.testing.expect(app.job.future == null and app.grace_active);
+    // At the countdown's end the pinned rows give the panel and Stop.
+    app.grace_active = false;
+    app.job.kind = .grace_process;
+    app.job.future = .{ .any_future = null, .result = {} };
+    defer app.job.future = null;
+    app.drive_progress.publish(.uploading, 2, 1, 4096, 31457280);
+    try std.testing.expect(app.sendProgressActive() and app.sendCancellable());
+}
+
+test "local UI: a closed and reopened draft never reuses its display-only plan" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    try app.compose.id.set(a, "draft-a");
+    try app.compose.replaceAttachments(a, &.{.{ .id = "", .filename = "video.bin", .size = 31457280, .blobId = "blob-video", .delivery = .drive }});
+    app.composer_plan_requested = app.compose.revision;
+    try app.composer_plan_draft.set("draft-a");
+    app.applyComposerPlan("{\"ok\":true,\"data\":{\"files\":[{\"index\":0,\"filename\":\"video.bin\",\"size\":31457280,\"requestedDelivery\":\"drive\",\"delivery\":\"drive\"}],\"attachedBytes\":0,\"mimeBytes\":900,\"mimeEstimate\":true,\"driveFileCount\":1,\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}}");
+    try std.testing.expect(app.displayPlan() != null and !app.composerPlanWanted());
+    // Same ID, revision 0 and file count after another client changed it.
+    app.closeComposer();
+    app.compose_active = true;
+    try app.compose.id.set(a, "draft-a");
+    try app.compose.fields[0].set(a, "changed@example.test");
+    try app.compose.replaceAttachments(a, &.{.{ .id = "", .filename = "other.bin", .size = 31457280, .blobId = "blob-other", .delivery = .drive }});
+    try std.testing.expectEqual(@as(u64, 0), app.compose.revision);
+    try std.testing.expect(app.displayPlan() == null and app.composerPlanWanted());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: cancelling the picker discards its pending selection plan" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.previous_mode = .compose;
+    app.mode = .attachment;
+    try app.ensureFileFields(&app.pending_files, 1);
+    try app.pending_files.items[0].set(a, "/nonexistent/never-imported.bin");
+    app.pending_file_count = 1;
+    app.selection_confirm = true;
+    app.file_selection_request_generation = app.file_selection_generation;
+    app.selection_plan_count = 1;
+    app.selection_plan_revision = app.compose.revision;
+    // Esc closes the picker while the confirming plan is still running.
+    try app.handleFileDialogKey(.{ .codepoint = Key.escape }, &app.input, false);
+    try std.testing.expect(app.mode == .compose and !app.selection_confirm and app.pending_file_count == 0);
+    // Reopened with a new selection of the same size; the old reply arrives.
+    app.mode = .attachment;
+    app.pending_file_count = 1;
+    app.selection_confirm = true;
+    try app.applySelectionPlan("{\"ok\":true,\"data\":{\"selectedStart\":0,\"selectedAttachedCount\":1,\"selectedAttachedBytes\":4,\"selectedDriveCount\":0,\"selectedDriveBytes\":0,\"selectionOverLimit\":false,\"attachmentPlan\":{\"files\":[{\"index\":0,\"filename\":\"never-imported.bin\",\"size\":4,\"requestedDelivery\":\"attach\",\"delivery\":\"attach\"}],\"attachedBytes\":4,\"mimeBytes\":900,\"mimeEstimate\":true,\"driveFileCount\":0,\"driveFileLimit\":16,\"decodedLimitBytes\":26214400,\"mimeLimitBytes\":36700160,\"blockers\":[]}}}");
+    // Nothing is imported, saved or asked: no job, no dialog, no files.
+    try std.testing.expect(app.job.future == null and app.oversized == null and app.compose.attachments.len == 0);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: Stop is verified by a durable read before any receipt is shown" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.mode = .review;
+    // A closed socket or unknown reply is not a stop acknowledgement.
+    try std.testing.expect(!app.stopResponseDefinitive(.send, "{\"ok\":false,\"error\":{\"code\":\"UnknownOutcome\"}}"));
+    try std.testing.expect(!app.stopResponseDefinitive(.grace_process, "{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":true}}"));
+    try std.testing.expect(app.stopResponseDefinitive(.grace_process, "{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":true,\"errorCode\":\"InterruptedPreparation\",\"preparation\":{\"driveFiles\":[]}}}"));
+    try std.testing.expect(app.stopResponseDefinitive(.send, "{\"ok\":true,\"data\":{\"outcome\":\"preparationStopped\"}}"));
+    // operation.read: a stopped preparation opens the outcome panel with Retry.
+    app.stop_probe_queue = false;
+    try app.applyStopProbe("{\"ok\":true,\"data\":{\"outcome\":\"preparationStopped\",\"status\":\"stopped\",\"operationId\":\"op-stop-1\",\"draftId\":\"\",\"errorCode\":\"PreparationStopped\",\"canRetryPreparation\":true,\"driveFiles\":[{\"index\":0,\"filename\":\"raw.zip\",\"size\":4,\"state\":\"uploaded\",\"sharedWith\":[]}]}}");
+    try std.testing.expect(app.sendFailureVisible() and !app.compose.unknown_outcome);
+    try std.testing.expectEqual(send_drive.Kind.stopped, app.send_failure.kind);
+    var buffer: [4]App.SendAction = undefined;
+    try std.testing.expectEqual(App.SendAction.retry, app.sendFailureActions(&buffer)[0]);
+    // An unreadable or unknown receipt keeps the protection and no Retry.
+    app.send_failure = .{};
+    app.job.failure = error.ConnectionResetByPeer;
+    app.finishStopProbe();
+    app.job.failure = null;
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expect(!app.sendFailureVisible());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
 
 test "local UI: plain forward offers original attachment and browser files remain removable without native Add" {
     const a = std.testing.allocator;
@@ -19430,41 +21405,65 @@ test "sidebar navigation: focused native destinations remain visible with exact 
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
+/// The last registered hit for a control, matching mouse_hits.at precedence.
+fn composeTestHit(app: *const App, kind: layout.HitKind, index: usize) ?layout.Hit {
+    var found: ?layout.Hit = null;
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+        if (hit.kind == kind and hit.index == index) found = hit;
+    }
+    return found;
+}
+
 test "compose attachments: compact list shows file sizes and scrolls to all sixteen removal targets" {
     const allocator = std.testing.allocator;
-    var client: CacheTestClient = .{};
-    var app = client.app(allocator);
-    defer app.deinit();
-    var screen = try vaxis.Screen.init(allocator, .{ .cols = 70, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
-    defer screen.deinit(allocator);
-    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 70, .height = 12, .screen = &screen };
-    var attachments: [16]types.Attachment = undefined;
-    for (&attachments, 0..) |*attachment, index| attachment.* = .{ .id = "", .filename = if (index == 15) "final report.pdf" else "fixture.txt", .size = if (index == 15) 1536 else 12, .data = "Zml4dHVyZQ" };
-    try app.compose.replaceAttachments(allocator, &attachments);
-    app.mode = .compose;
-    try app.composeAttachmentsDraw(win, 5, 3);
-    try std.testing.expectEqual(layout.HitKind.compose_attachment_add, app.mouse_hits.at(65, 5).?.kind);
-    try std.testing.expectEqual(layout.HitKind.compose_attachment_remove, app.mouse_hits.at(68, 6).?.kind);
-    try std.testing.expectEqual(@as(usize, 0), app.mouse_hits.at(68, 6).?.index);
-    for (0..20) |_| try app.onMouse(.{ .col = 2, .row = 7, .button = .wheel_down, .mods = .{}, .type = .press });
-    try std.testing.expectEqual(@as(usize, 13), app.compose.attachment_scroll);
-    app.mouse_hits.clear();
-    screen.clear();
-    try app.composeAttachmentsDraw(win, 5, 3);
-    try std.testing.expectEqual(@as(usize, 15), app.mouse_hits.at(68, 8).?.index);
-    var rendered: std.ArrayList(u8) = .empty;
-    defer rendered.deinit(allocator);
-    for (0..screen.height) |row| for (0..screen.width) |col| try rendered.appendSlice(allocator, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "16. final report.pdf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "1.5 kB") != null);
-    try app.onMouse(.{ .col = 68, .row = 8, .button = .left, .mods = .{}, .type = .press });
-    try std.testing.expectEqual(@as(usize, 15), app.compose.attachments.len);
-    try std.testing.expectEqual(@as(usize, 12), app.compose.attachment_scroll);
-    try app.onMouse(.{ .col = 65, .row = 5, .button = .left, .mods = .{}, .type = .press });
-    try std.testing.expectEqual(Mode.attachment, app.mode);
-    try std.testing.expectEqual(Mode.compose, app.previous_mode);
-    try std.testing.expect(app.job.future == null and !app.quit);
-    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    // Under 72 columns each file uses two lines (name and size, then its
+    // delivery button and [x]); wider composers keep one row per file.
+    for ([_]u16{ 70, 100 }) |width| {
+        var client: CacheTestClient = .{};
+        var app = client.app(allocator);
+        defer app.deinit();
+        var screen = try vaxis.Screen.init(allocator, .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(allocator);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen };
+        var attachments: [16]types.Attachment = undefined;
+        for (&attachments, 0..) |*attachment, index| attachment.* = .{ .id = "", .filename = if (index == 15) "final report.pdf" else "fixture.txt", .size = if (index == 15) 1536 else 12, .data = "Zml4dHVyZQ" };
+        try app.compose.replaceAttachments(allocator, &attachments);
+        app.mode = .compose;
+        try app.composeAttachmentsDraw(win, 5, 3);
+        const per_file: usize = if (width < 72) 2 else 1;
+        const visible = 3 / per_file;
+        try std.testing.expectEqual(visible, app.compose.attachment_height);
+        const add = composeTestHit(&app, .compose_attachment_add, 0).?.rect;
+        try std.testing.expect(add.y == 5 and add.x + add.width == width);
+        try std.testing.expectEqual(layout.HitKind.compose_attachment_add, app.mouse_hits.at(@intCast(add.x + 1), 5).?.kind);
+        // The first file's [x] is on its controls line, right of its delivery button.
+        const first = composeTestHit(&app, .compose_attachment_remove, 0).?.rect;
+        const delivery = composeTestHit(&app, .compose_attachment_select, delivery_hit_base).?.rect;
+        try std.testing.expect(first.y == 5 + per_file and delivery.y == first.y and delivery.x + delivery.width < first.x);
+        try std.testing.expectEqual(@as(usize, 0), app.mouse_hits.at(@intCast(first.x + 1), @intCast(first.y)).?.index);
+        try std.testing.expectEqual(layout.HitKind.compose_attachment_remove, app.mouse_hits.at(@intCast(first.x + 1), @intCast(first.y)).?.kind);
+        for (0..20) |_| try app.onMouse(.{ .col = 2, .row = 7, .button = .wheel_down, .mods = .{}, .type = .press });
+        try std.testing.expectEqual(16 - visible, app.compose.attachment_scroll);
+        app.mouse_hits.clear();
+        screen.clear();
+        try app.composeAttachmentsDraw(win, 5, 3);
+        // Scrolling reaches the sixteenth removal target.
+        const last = composeTestHit(&app, .compose_attachment_remove, 15).?.rect;
+        try std.testing.expect(last.y < 5 + 1 + 3);
+        var rendered: std.ArrayList(u8) = .empty;
+        defer rendered.deinit(allocator);
+        for (0..screen.height) |row| for (0..screen.width) |col| try rendered.appendSlice(allocator, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.items, "16. final report.pdf") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.items, "1.5 kB") != null);
+        try app.onMouse(.{ .col = @intCast(last.x + 1), .row = @intCast(last.y), .button = .left, .mods = .{}, .type = .press });
+        try std.testing.expectEqual(@as(usize, 15), app.compose.attachments.len);
+        try std.testing.expectEqual(15 - visible, app.compose.attachment_scroll);
+        try app.onMouse(.{ .col = @intCast(add.x + 1), .row = 5, .button = .left, .mods = .{}, .type = .press });
+        try std.testing.expectEqual(Mode.attachment, app.mode);
+        try std.testing.expectEqual(Mode.compose, app.previous_mode);
+        try std.testing.expect(app.job.future == null and !app.quit);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    }
 }
 
 test "compose attachments: protected recovery and pending writes block local attachment edits" {
@@ -19536,23 +21535,37 @@ test "compose actions: complete labels and keyboard focus survive narrow split a
         }
         try std.testing.expectEqual(@as(usize, 2), buttons);
         try std.testing.expect(body_height >= 5);
-        // Preserve the existing attachment/format/preview/Alias order, then
-        // visit the new actions before wrapping back to the text fields.
-        for (0..app.compose.attachments.len + 6) |index| {
+        // Body → [Upload all] → [Add A] → each file's delivery button then
+        // [x] → format/preview/Alias → the new actions, then the text fields.
+        const Step = struct { cursor: usize, secondary: bool };
+        var steps: std.ArrayList(Step) = .empty;
+        defer steps.deinit(a);
+        try steps.append(a, .{ .cursor = 0, .secondary = true });
+        try steps.append(a, .{ .cursor = 0, .secondary = false });
+        for (1..app.compose.attachments.len + 1) |row| {
+            try steps.append(a, .{ .cursor = row, .secondary = true });
+            try steps.append(a, .{ .cursor = row, .secondary = false });
+        }
+        for (app.compose.attachments.len + 1..app.compose.attachments.len + 6) |control| try steps.append(a, .{ .cursor = control, .secondary = false });
+        for (steps.items) |step| {
             try app.onComposeKey(.{ .codepoint = Key.tab });
             try std.testing.expect(app.compose.attachment_focus);
-            try std.testing.expectEqual(index, app.compose.attachment_cursor);
+            try std.testing.expectEqual(step.cursor, app.compose.attachment_cursor);
+            try std.testing.expectEqual(step.secondary, app.compose_secondary);
         }
         try app.onComposeKey(.{ .codepoint = Key.tab });
         try std.testing.expect(!app.compose.attachment_focus and app.compose.selected == 0);
-        var remaining = app.compose.attachments.len + 6;
+        var remaining = steps.items.len;
         while (remaining > 0) {
             remaining -= 1;
             try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
-            try std.testing.expectEqual(remaining, app.compose.attachment_cursor);
+            try std.testing.expectEqual(steps.items[remaining].cursor, app.compose.attachment_cursor);
+            try std.testing.expectEqual(steps.items[remaining].secondary, app.compose_secondary);
         }
         try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
         try std.testing.expect(!app.compose.attachment_focus and app.compose.selected == 4);
+        // Visiting delivery buttons never changes a file's delivery.
+        for (app.compose.attachments) |attachment| try std.testing.expect(delivery_view.isAttach(attachment.delivery));
         if (size[0] < 90) {
             app.compose_preview_full = true;
             app.dialog_focus.reset(.preview, 0);
@@ -19796,18 +21809,30 @@ test "compose attachments: Tab reaches Add and every remove button without chang
         .{ .id = "", .filename = "first.txt", .size = 1, .data = "MQ" },
         .{ .id = "", .filename = "second.txt", .size = 1, .data = "Mg" },
     });
+    // Body → [Upload all] → [Add A] → delivery 1 → [x] 1 → delivery 2 → [x] 2.
     try app.onComposeKey(.{ .codepoint = Key.tab });
-    try std.testing.expect(app.compose.attachment_focus);
+    try std.testing.expect(app.compose.attachment_focus and app.compose_secondary);
     try std.testing.expectEqual(@as(usize, 0), app.compose.attachment_cursor);
     try app.onComposeKey(.{ .codepoint = Key.tab });
-    try std.testing.expectEqual(@as(usize, 1), app.compose.attachment_cursor);
-    try app.onComposeKey(.{ .codepoint = Key.tab });
-    try std.testing.expectEqual(@as(usize, 2), app.compose.attachment_cursor);
+    try std.testing.expect(app.compose.attachment_cursor == 0 and !app.compose_secondary);
+    for ([_]usize{ 1, 2 }) |row| {
+        try app.onComposeKey(.{ .codepoint = Key.tab });
+        try std.testing.expect(app.compose.attachment_cursor == row and app.compose_secondary);
+        try app.onComposeKey(.{ .codepoint = Key.tab });
+        try std.testing.expect(app.compose.attachment_cursor == row and !app.compose_secondary);
+    }
     try app.onComposeKey(.{ .codepoint = Key.enter });
     try std.testing.expectEqual(@as(usize, 1), app.compose.attachments.len);
     try std.testing.expectEqualStrings("first.txt", app.compose.attachments[0].filename);
+    try std.testing.expect(delivery_view.isAttach(app.compose.attachments[0].delivery));
+    // Back: [x] 1 → delivery 1 → [Add A] → [Upload all] → Body.
+    try std.testing.expect(app.compose.attachment_cursor == 1 and !app.compose_secondary);
     try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
-    try std.testing.expectEqual(@as(usize, 0), app.compose.attachment_cursor);
+    try std.testing.expect(app.compose.attachment_cursor == 1 and app.compose_secondary);
+    try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expect(app.compose.attachment_cursor == 0 and !app.compose_secondary);
+    try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expect(app.compose.attachment_cursor == 0 and app.compose_secondary);
     try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
     try std.testing.expect(!app.compose.attachment_focus);
     try std.testing.expectEqual(@as(usize, 4), app.compose.selected);
@@ -20147,6 +22172,100 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = Key.escape });
     try std.testing.expectEqual(Mode.contacts, app.mode);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: version reports the compiled build from the command prompt and restores each view without client work" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"person@example.test\"}]", .{}));
+    const version = @import("build_options").version;
+    try std.testing.expect(version.len > 0);
+    const expected = try std.fmt.allocPrint(a, "Running Omagma {s} in this TUI", .{version});
+    defer a.free(expected);
+    try app.compose.fields[4].set(a, "Fictional draft body");
+    for ([_]Mode{ .browse, .compose, .contacts }) |view| {
+        app.mode = view;
+        // A stale return mode proves each view's own `:` key records it.
+        app.previous_mode = .help;
+        app.compose_active = view == .compose;
+        app.compose.insert_mode = false;
+        app.say(false, "Mail action: 1 applied · :undo", .{});
+        app.action_notice = true;
+        app.status_kind = .action;
+        const generation = app.selection_generation;
+        const account_index = app.account_index;
+        const contact = app.contacts_selected;
+        try app.onKey(.{ .codepoint = ':', .text = ":" });
+        try std.testing.expectEqual(Mode.command, app.mode);
+        try std.testing.expectEqual(view, app.previous_mode);
+        try std.testing.expectEqualStrings("", app.input.value());
+        for ("version") |c| try app.onKey(.{ .codepoint = c, .text = &[_]u8{c} });
+        try app.onKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(view, app.mode);
+        try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], expected));
+        try std.testing.expect(app.status_kind == .view and !app.warning and !app.action_notice);
+        try std.testing.expect(app.job.future == null and app.ux_overlay == .none and !app.update_open);
+        try std.testing.expectEqual(generation, app.selection_generation);
+        try std.testing.expectEqual(account_index, app.account_index);
+        try std.testing.expectEqual(contact, app.contacts_selected);
+        try std.testing.expect(!app.compose.insert_mode);
+        try std.testing.expectEqualStrings("Fictional draft body", app.compose.fields[4].value());
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.local_calls);
+    app.mode = .browse;
+    try app.openHelp();
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    try app.onHelpKey(.{ .codepoint = 'v', .text = "VERSION" });
+    try std.testing.expectEqualStrings(":version", help_rows[app.help_match orelse return error.MissingHelpMatch].keys);
+
+    // Contacts runs only :version; mailbox commands never reach hidden mail.
+    app.mode = .contacts;
+    app.compose_active = false;
+    const generation = app.selection_generation;
+    const account_index = app.account_index;
+    for ([_][]const u8{ "next-unread", "resume-send", "send", "undo", "", "version" }) |command| {
+        const previous_warning = app.warning;
+        try app.onKey(.{ .codepoint = ':', .text = ":" });
+        try std.testing.expectEqual(Mode.command, app.mode);
+        for (command) |c| try app.onKey(.{ .codepoint = c, .text = &[_]u8{c} });
+        try app.onKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(Mode.contacts, app.mode);
+        if (same(command, "version")) {
+            try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], expected) and !app.warning);
+        } else if (command.len > 0) {
+            try std.testing.expectEqualStrings("Only :version runs from Contacts · use mail commands from the mailbox", app.status[0..app.status_len]);
+            try std.testing.expect(app.warning);
+        } else try std.testing.expectEqual(previous_warning, app.warning);
+        try std.testing.expect(app.job.future == null and app.ux_overlay == .none);
+        try std.testing.expectEqual(generation, app.selection_generation);
+        try std.testing.expectEqual(account_index, app.account_index);
+        try std.testing.expectEqualStrings("Fictional draft body", app.compose.fields[4].value());
+    }
+    try app.onKey(.{ .codepoint = ':', .text = ":" });
+    for ("undo") |c| try app.onKey(.{ .codepoint = c, .text = &[_]u8{c} });
+    try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(Mode.contacts, app.mode);
+
+    // A protected unknown-outcome warning outranks :version and stays.
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.insert_mode = false;
+    app.compose.unknown_outcome = true;
+    app.say(true, "Fictional send outcome unknown · check Sent", .{});
+    app.status_kind = .unknown;
+    try app.onKey(.{ .codepoint = ':', .text = ":" });
+    try std.testing.expectEqual(Mode.command, app.mode);
+    for ("version") |c| try app.onKey(.{ .codepoint = c, .text = &[_]u8{c} });
+    try app.onKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings("Fictional send outcome unknown · check Sent", app.status[0..app.status_len]);
+    try std.testing.expect(app.status_kind == .unknown and app.warning and app.job.future == null);
+    app.compose.unknown_outcome = false;
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.local_calls);
 }
 
 test "local UI: help search keeps typing literal bounded and no matches navigable" {
@@ -20573,7 +22692,8 @@ test "composer polish: body focus From action and attachment spacing match real 
             body_selected = screen.readCell(2, @intCast(row)).?.style.bold;
             try std.testing.expectEqualDeep(app.style(.accent).bg, screen.readCell(70, @intCast(row)).?.style.bg); // Preview is not focused while Body is.
         }
-        gap_seen = gap_seen or std.mem.indexOf(u8, text_row.items, "29 B [x]") != null;
+        // Size, one space, the fixed 15-cell delivery button, one space, [x].
+        gap_seen = gap_seen or std.mem.indexOf(u8, text_row.items, "29 B [Attach       ] [x]") != null;
         try std.testing.expect(std.mem.indexOf(u8, text_row.items, "i Insert") == null);
     }
     try std.testing.expect(body_selected and gap_seen);
@@ -25996,10 +28116,26 @@ test "calendar composer: discard is modal and stale underlying Cancel clicks can
 
 const CalendarGuestsTestClient = struct {
     account: @import("../bounded.zig").Text(254) = .{},
+    recent_account: @import("../bounded.zig").Text(254) = .{},
     denied: bool = false,
+    recent: bool = false,
+    provider_calls: usize = 0,
+    fn provider(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.provider_calls += 1;
+        return error.UnexpectedProviderCall;
+    }
     fn cached(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(ctx));
         const request = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+        if (same(text(get(request, "cmd")), "mail.recipients")) {
+            try std.testing.expect(truth(get(request, "cacheOnly")));
+            try self.recent_account.set(text(get(request, "account")));
+            if (!self.recent) return error.CacheMiss;
+            return a.dupe(u8,
+                \\{"ok":true,"data":{"recipients":[{"name":"Robin Recent","address":"robin.recent@example.test"},{"name":"Alex Work","address":"ALEX@example.test"}]}}
+            );
+        }
         try std.testing.expectEqualStrings("contacts.list", text(get(request, "cmd")));
         try self.account.set(text(get(request, "account")));
         if (self.denied) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}");
@@ -26049,6 +28185,43 @@ test "calendar composer: guest picker uses destination contacts and preserves lo
     }
 }
 
+test "calendar composer: guest picker adds a destination recent-mail recipient absent from contacts without provider reads" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |denied| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var client: CalendarGuestsTestClient = .{ .denied = denied, .recent = true };
+        app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.provider, .cachedFn = CalendarGuestsTestClient.cached };
+        try calendarGuestsTestForm(&app, "work@example.test");
+        try app.calendar_form_fields[8].set(a, "typed@example.test");
+        app.calendar_form_dirty = false;
+        app.calendar_form_notify_chosen = false;
+        try app.calendarGuestsOpen();
+        try std.testing.expect(app.calendar_guests_open);
+        // Mail stays on another account; only the Calendar destination is read.
+        try std.testing.expectEqualStrings("work@example.test", client.recent_account.slice());
+        try std.testing.expectEqualStrings("personal@example.test", app.account());
+        if (denied) try std.testing.expect(std.mem.indexOf(u8, app.calendar_guests_error.slice(), "recent-mail") != null);
+        // Contacts and recent mail share one case-insensitive projection.
+        try std.testing.expectEqual(@as(usize, if (denied) 2 else 3), (try app.calendarGuestsMatches()).len);
+        try app.calendar_guests_query.set(a, "ROBIN");
+        var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 30, .screen = &screen };
+        try app.drawCalendarComposer(win);
+        const visible = try markdownTestScreenText(a, &screen);
+        defer a.free(visible);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Contacts or recent mail") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "robin.recent@example.test") != null);
+        try app.onCalendarGuestsKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(!app.calendar_guests_open and app.calendar_form_dirty);
+        try std.testing.expectEqualStrings("typed@example.test, robin.recent@example.test", app.calendar_form_fields[8].value());
+        try std.testing.expect(!app.calendar_form_notify_chosen and !app.compose_active and app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    }
+}
+
 test "calendar composer: guest loading Back remains keyboard accessible and late replies cannot reopen it" {
     const a = std.testing.allocator;
     for ([_]bool{ false, true }) |mouse| {
@@ -26074,7 +28247,8 @@ test "calendar composer: guest loading Back remains keyboard accessible and late
         try client.waitEntered();
         const old_generation = app.calendar_form_generation;
         if (mouse) try app.calendarGuestsActivate(272) else {
-            for (0..3) |_| try app.onCalendarGuestsKey(.{ .codepoint = Key.tab });
+            // Search, results, [Search Contacts], Add, then Back.
+            for (0..4) |_| try app.onCalendarGuestsKey(.{ .codepoint = Key.tab });
             try std.testing.expectEqual(@as(usize, 3), app.calendar_guests_focus);
             try app.onCalendarGuestsKey(.{ .codepoint = Key.enter });
         }
@@ -26086,6 +28260,300 @@ test "calendar composer: guest loading Back remains keyboard accessible and late
         try app.finishCalendarCompose();
         try std.testing.expect(!app.calendar_guests_open and app.calendar.page == .compose);
     }
+}
+
+test "calendar composer: explicit guest Contacts search is account and query bound and keeps every source" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: CalendarGuestsTestClient = .{ .recent = true };
+    app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.provider, .cachedFn = CalendarGuestsTestClient.cached };
+    try calendarGuestsTestForm(&app, "work@example.test");
+    try app.calendar_form_fields[8].set(a, "\"Typed, Person\" <typed@example.test>");
+    try app.calendarGuestsOpen();
+    try std.testing.expectEqual(@as(usize, 3), (try app.calendarGuestsMatches()).len);
+    // Pasted surrounding spaces: dispatch, tag and filtering share "morgan".
+    try app.calendar_guests_query.set(a, "  morgan ");
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    const answer = "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Morgan Beyond\",\"emails\":[{\"address\":\"morgan.beyond@example.test\"}]}],\"contactWarnings\":{\"omittedContacts\":2,\"partialContacts\":1},\"partial\":true}}";
+    const current = "{\"cmd\":\"contacts.search\",\"account\":\"work@example.test\",\"query\":\"morgan\"}";
+    // Another account, an older query, an old generation or a closed picker are ignored.
+    for ([_][]const u8{ "{\"cmd\":\"contacts.search\",\"account\":\"personal@example.test\",\"query\":\"morgan\"}", "{\"cmd\":\"contacts.search\",\"account\":\"work@example.test\",\"query\":\"morg\"}", current, current }, 0..) |request, case| {
+        app.calendar_guests_open = case != 3;
+        app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = if (case == 2) app.calendar_form_generation -% 1 else app.calendar_form_generation, .request = request, .response = answer };
+        try app.finishCalendarCompose();
+        app.calendar_guests_open = true;
+        try std.testing.expect(app.calendar_guests_search.value == .null);
+    }
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = current, .response = answer };
+    try app.finishCalendarCompose();
+    const found = try app.calendarGuestsMatches();
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqualStrings("morgan.beyond@example.test", found[0].address);
+    // The partial warning stays visible beside the result at 48 and 132 columns.
+    for ([_]u16{ 48, 132 }) |width| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
+        try app.drawCalendarComposer(win);
+        const visible = try markdownTestScreenText(a, &screen);
+        defer a.free(visible);
+        try std.testing.expect(std.mem.indexOf(u8, visible, if (width == 48) "Partial: 2 omitted, 1 with warnings" else "Partial contacts · 2 omitted · 1 with warnings") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "morgan.beyond@example.test") != null and std.mem.indexOf(u8, visible, "[Ctrl+F Search Contacts]") != null);
+    }
+    // A failed search keeps the earlier answer, contacts and recent mail.
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = current, .failure = error.SyntheticSearchFailure };
+    try app.finishCalendarCompose();
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_guests_error.slice(), "Contacts search failed") != null);
+    try std.testing.expectEqual(@as(usize, 1), (try app.calendarGuestsMatches()).len);
+    // Clearing the query restores the loaded coverage; a refresh keeps the selected person.
+    try app.calendar_guests_query.set(a, "");
+    var matches = try app.calendarGuestsMatches();
+    try std.testing.expectEqual(@as(usize, 3), matches.len);
+    for (matches) |candidate| try std.testing.expect(!std.mem.eql(u8, candidate.address, "morgan.beyond@example.test"));
+    app.calendar_guests_selected = 2;
+    try app.calendar_guests_drawn_address.set(matches[2].address);
+    const selected = try a.dupe(u8, matches[2].address);
+    defer a.free(selected);
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = "{\"cmd\":\"contacts.list\",\"account\":\"work@example.test\"}", .response = "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Zed New\",\"emails\":[{\"address\":\"zed@example.test\"}]},{\"name\":\"Alex Work\",\"emails\":[{\"address\":\"alex@example.test\"},{\"address\":\"alex.work@example.test\"}]}]}}" };
+    try app.finishCalendarCompose();
+    matches = try app.calendarGuestsMatches();
+    try std.testing.expectEqual(@as(usize, 4), matches.len);
+    try std.testing.expectEqualStrings(selected, matches[app.calendar_guests_selected].address);
+    try std.testing.expectEqualStrings("\"Typed, Person\" <typed@example.test>", app.calendar_form_fields[8].value());
+    // No query means nothing to search; no request is started.
+    try app.calendarGuestsSearch();
+    try std.testing.expect(app.calendar_guests_choice_error and app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    app.job = .{ .kind = .calendar_guest_contacts };
+}
+
+test "calendar composer: provider hidden-field matches stay bound to the picker query account and generation" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: CalendarGuestsTestClient = .{ .recent = true };
+    app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.provider, .cachedFn = CalendarGuestsTestClient.cached };
+    try calendarGuestsTestForm(&app, "work@example.test");
+    try app.calendarGuestsOpen();
+    try app.calendar_guests_query.set(a, " nickname ");
+    const head = try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"contacts\":[{\"name\":\"Alex Work\",\"emails\":[{\"address\":\"alex@example.test\"},{\"address\":\"alex.work@example.test\"}]}],\"contactWarnings\":{\"omittedContacts\":2,\"partialContacts\":1},\"partial\":true}", .{});
+    try app.calendarGuestsReplace(head, false);
+    const answer = try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"contacts\":[{\"name\":\"Robert Smith\",\"emails\":[{\"address\":\"rsmith@example.test\"}]}],\"contactWarnings\":{\"omittedContacts\":2,\"partialContacts\":1},\"partial\":true}", .{});
+    try app.calendarGuestsApplySearch(answer, "nickname");
+    try std.testing.expectEqual(@as(usize, 1), (try app.calendarGuestsMatches()).len);
+    try std.testing.expectEqualStrings("rsmith@example.test", (try app.calendarGuestsMatches())[0].address);
+    const visible = try calendarGuestsTestText(&app, a, 48);
+    defer a.free(visible);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "Partial: 2 omitted, 1 with warnings") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "4 omitted") == null);
+    try app.calendar_guests_query.set(a, "nicknames");
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    try app.calendar_guests_query.set(a, "nickname");
+    try app.calendar_form.account.set("personal@example.test");
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    try app.calendar_form.account.set("work@example.test");
+    app.calendar_form_generation +%= 1;
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    app.calendar_form_generation -%= 1;
+    app.calendar_guests_open = false;
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    app.calendar_guests_open = true;
+    try app.calendar_guests_query.set(a, "");
+    try std.testing.expectEqual(@as(usize, 3), (try app.calendarGuestsMatches()).len);
+    // Real editor changes, including away then back, retire the old answer.
+    try app.calendar_guests_query.set(a, "nickname");
+    try app.calendarGuestsApplySearch(answer, "nickname");
+    app.calendar_guests_focus = 0;
+    const before = app.calendar_form_generation;
+    try app.onCalendarGuestsKey(.{ .codepoint = 's', .text = "s" });
+    try std.testing.expectEqual(before +% 1, app.calendar_form_generation);
+    try app.onCalendarGuestsKey(.{ .codepoint = Key.backspace });
+    try std.testing.expectEqualStrings("nickname", app.calendarGuestsQuery());
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+}
+
+fn calendarGuestsTestText(app: *App, a: Allocator, width: u16) ![]u8 {
+    var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
+    try app.drawCalendarComposer(win);
+    return markdownTestScreenText(a, &screen);
+}
+
+test "calendar composer: guest search beside local matches keeps selection, partial flags and its answer together" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: CalendarGuestsTestClient = .{ .recent = true };
+    app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.provider, .cachedFn = CalendarGuestsTestClient.cached };
+    try calendarGuestsTestForm(&app, "work@example.test");
+    try app.calendarGuestsOpen();
+    // Local matches exist before the explicit search; the selected one stays.
+    try app.calendar_guests_query.set(a, "alex");
+    try std.testing.expectEqual(@as(usize, 2), (try app.calendarGuestsMatches()).len);
+    app.calendar_guests_selected = 1;
+    try app.calendar_guests_drawn_address.set("alex.work@example.test");
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = "{\"cmd\":\"contacts.search\",\"account\":\"work@example.test\",\"query\":\"alex\"}", .response = "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Alex Beyond\",\"emails\":[{\"address\":\"alex.beyond@example.test\"}]},{\"name\":\"Alex Work\",\"emails\":[{\"address\":\"alex.work@example.test\"}]}],\"partial\":true}}" };
+    try app.finishCalendarCompose();
+    const merged = try app.calendarGuestsMatches();
+    try std.testing.expectEqual(@as(usize, 3), merged.len);
+    try std.testing.expectEqualStrings("alex.beyond@example.test", merged[1].address);
+    try std.testing.expectEqualStrings("alex.work@example.test", merged[app.calendar_guests_selected].address);
+    // partial:true without counts is partial data at both widths.
+    for ([_]u16{ 48, 132 }) |width| {
+        const visible = try calendarGuestsTestText(&app, a, width);
+        defer a.free(visible);
+        try std.testing.expect(std.mem.indexOf(u8, visible, if (width == 48) "Partial: some contacts omitted/incomplete" else "Partial contacts · some were omitted or incomplete") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Contacts search + recent mail") != null);
+    }
+    // A partial empty answer is not a confident no-match, even at 48 columns.
+    try app.calendar_guests_query.set(a, "zz");
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = "{\"cmd\":\"contacts.search\",\"account\":\"work@example.test\",\"query\":\"zz\"}", .response = "{\"ok\":true,\"data\":{\"contacts\":[],\"partial\":true}}" };
+    try app.finishCalendarCompose();
+    {
+        const visible = try calendarGuestsTestText(&app, a, 48);
+        defer a.free(visible);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "No readable match; some contacts omitted") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Partial: some contacts omitted/incomplete") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "No matching contacts") == null);
+    }
+    // A malformed completeness flag fails closed and keeps the earlier answer.
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = "{\"cmd\":\"contacts.search\",\"account\":\"work@example.test\",\"query\":\"zz\"}", .response = "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Z\",\"emails\":[{\"address\":\"zz@example.test\"}]}],\"partial\":\"yes\"}}" };
+    try app.finishCalendarCompose();
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_guests_error.slice(), "Contacts search failed") != null);
+    try std.testing.expectEqual(@as(usize, 0), (try app.calendarGuestsMatches()).len);
+    // A failed store keeps the previous answer and its query tag together.
+    const replacement = try App.calendarGuestsData(app.frame.allocator(), "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Other\",\"emails\":[{\"address\":\"other@example.test\"}]}]}}");
+    const original = app.allocator;
+    var failing: std.testing.FailingAllocator = .init(original, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    const stored = app.calendarGuestsApplySearch(replacement, "other");
+    app.allocator = original;
+    try std.testing.expectError(error.OutOfMemory, stored);
+    try std.testing.expectEqualStrings("zz", app.calendar_guests_searched.slice());
+    try std.testing.expect(truth(get(app.calendar_guests_search.value, "partial")) and items(get(app.calendar_guests_search.value, "contacts")).len == 0);
+    // An ordinary next page is a bounded head, never reported as partial.
+    try app.calendar_guests_query.set(a, "");
+    app.job = .{ .kind = .calendar_guest_contacts, .calendar_compose_generation = app.calendar_form_generation, .request = "{\"cmd\":\"contacts.list\",\"account\":\"work@example.test\"}", .response = "{\"ok\":true,\"data\":{\"contacts\":[{\"name\":\"Alex Work\",\"emails\":[{\"address\":\"alex@example.test\"}]}],\"nextCursor\":\"page-2\"}}" };
+    try app.finishCalendarCompose();
+    {
+        const visible = try calendarGuestsTestText(&app, a, 48);
+        defer a.free(visible);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Type a name · Ctrl+F searches all Contacts") != null);
+        try std.testing.expect(std.mem.indexOf(u8, visible, "Partial") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    app.job = .{ .kind = .calendar_guest_contacts };
+}
+
+fn calendarComposeTestKeys(app: *App, index: usize, value: []const u8, clear: bool, paste: bool) !void {
+    app.calendar_form_focus = index;
+    if (clear) {
+        try app.onCalendarComposeKey(.{ .codepoint = 'e', .mods = .{ .ctrl = true } });
+        for (0..16) |_| try app.onCalendarComposeKey(.{ .codepoint = Key.backspace });
+    }
+    app.paste = paste;
+    defer app.paste = false;
+    for (value, 0..) |byte, at| try app.onCalendarComposeKey(.{ .codepoint = byte, .text = value[at .. at + 1] });
+}
+
+test "calendar composer: editing only Start moves an untouched End, by keyboard or paste, never an edited End" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarGuestsTestForm(&app, "personal@example.test");
+    const zone: timezone.Zone = .{};
+    const options: calendar_composer.Init = .{ .target = .{ .account = "personal@example.test", .calendar_id = "primary" }, .day = try timezone.dateDay("2026-10-24"), .now_ms = 0, .zone_name = "UTC", .zone = &zone };
+    app.calendar_form = try calendar_composer.Model.init(app.frame.allocator(), options);
+    try app.calendarComposeLoadFields();
+    try std.testing.expectEqualStrings("10:00", app.calendar_form_fields[4].value());
+    // Partial typing leaves End alone; the completed date moves it.
+    try calendarComposeTestKeys(&app, 1, "2026-10-2", true, false);
+    try std.testing.expectEqualStrings("2026-10-24", app.calendar_form_fields[3].value());
+    try calendarComposeTestKeys(&app, 1, "8", false, false);
+    try std.testing.expectEqualStrings("2026-10-28", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("10:00", app.calendar_form_fields[4].value());
+    // A pasted late start time carries the one-hour end past midnight.
+    try calendarComposeTestKeys(&app, 2, "23:30", true, true);
+    try std.testing.expectEqualStrings("2026-10-29", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("00:30", app.calendar_form_fields[4].value());
+    try calendarComposeTestKeys(&app, 2, "00:00", true, false);
+    try std.testing.expectEqualStrings("2026-10-28", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("01:00", app.calendar_form_fields[4].value());
+    // Focus changes and the model used by review are untouched until review.
+    try app.onCalendarComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqualStrings("2026-10-24", app.calendar_form.get(.end_date));
+    try std.testing.expect(app.calendar_form_dirty);
+    // A moved End drops its stale DST occurrence at once; an unmoved End
+    // (Start retyped to the same date) keeps it.
+    try app.calendar_form_fields[11].set(a, "+01:00");
+    try calendarComposeTestKeys(&app, 1, "2026-10-28", true, false);
+    try std.testing.expectEqualStrings("+01:00", app.calendar_form_fields[11].value());
+    try calendarComposeTestKeys(&app, 1, "2026-10-30", true, true);
+    try std.testing.expectEqualStrings("2026-10-30", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("01:00", app.calendar_form_fields[4].value());
+    try std.testing.expectEqualStrings("", app.calendar_form_fields[11].value());
+    // After an explicit End edit, Start moves alone.
+    try calendarComposeTestKeys(&app, 4, "02:15", true, false);
+    try calendarComposeTestKeys(&app, 1, "2026-11-02", true, true);
+    try std.testing.expectEqualStrings("2026-10-30", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("02:15", app.calendar_form_fields[4].value());
+    // An End typed back to its previous value is still an explicit End.
+    app.calendar_form = try calendar_composer.Model.init(app.frame.allocator(), options);
+    try app.calendarComposeLoadFields();
+    try calendarComposeTestKeys(&app, 4, "10:00", true, true);
+    try calendarComposeTestKeys(&app, 1, "2026-11-02", true, false);
+    try std.testing.expectEqualStrings("2026-10-24", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("10:00", app.calendar_form_fields[4].value());
+    // A fresh all-day editor keeps its included days while Start moves.
+    app.calendar_form = try calendar_composer.Model.init(app.frame.allocator(), options);
+    try app.calendarComposeLoadFields();
+    try app.calendarComposeControl(13);
+    try std.testing.expect(app.calendar_form.all_day);
+    try calendarComposeTestKeys(&app, 1, "2026-12-31", true, true);
+    try std.testing.expectEqualStrings("2026-12-31", app.calendar_form_fields[3].value());
+    // Back to timed: the interval is relearned from what is shown, not the
+    // stale timed one, and the hidden End time was left untouched meanwhile.
+    try app.calendarComposeControl(13);
+    try std.testing.expect(!app.calendar_form.all_day);
+    try std.testing.expectEqualStrings("10:00", app.calendar_form_fields[4].value());
+    try calendarComposeTestKeys(&app, 2, "15:30", true, false);
+    try std.testing.expectEqualStrings("2026-12-31", app.calendar_form_fields[3].value());
+    try std.testing.expectEqualStrings("16:30", app.calendar_form_fields[4].value());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar permissions: guide keeps explicit routing and every capability, never a guessed list" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const f = app.frame.allocator();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-send\",\"contacts-read\",\"drive-upload\",\"calendar-rsvp\"]}]", .{}));
+    try app.calendar.account.set("self@example.test");
+    app.options.backend_socket = "/run/user/1000/omagma's vault $HOME.sock";
+    app.options.config_file = "/private/omagma config;rm.json";
+    app.options.grant_file = "/private/\"quoted\" grants.json";
+    const routing = try std.fmt.allocPrint(f, " --backend {s} --config {s} --grant-file {s}", .{ try calendar_ui.shellQuoted(f, app.options.backend_socket.?), try calendar_ui.shellQuoted(f, app.options.config_file.?), try calendar_ui.shellQuoted(f, app.options.grant_file.?) });
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(f, "omagma terminal-auth authorize --account 'self@example.test'{s} --capabilities mail-read,mail-send,contacts-read,drive-upload,calendar-rsvp,calendar-read", .{routing}), (try app.calendarGrantCommand()).?);
+    try app.calendar.error_code.set("CalendarWritePermissionRequired");
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(f, "omagma terminal-auth authorize --account 'self@example.test'{s} --capabilities mail-read,mail-send,contacts-read,drive-upload,calendar-rsvp,calendar-read,calendar-write-shared", .{routing}), (try app.calendarGrantCommand()).?);
+    try std.testing.expect(std.mem.indexOf(u8, try app.calendarGuide(), routing) != null);
+    // Missing, non-string, non-canonical or repeated capabilities: no command.
+    for ([_][]const u8{ "[{\"address\":\"self@example.test\"}]", "[{\"address\":\"self@example.test\",\"capabilities\":[]}]", "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",7]}]", "[{\"address\":\"self@example.test\",\"capabilities\":[\"Mail-Read\"]}]", "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-read\"]}]", "[{\"address\":\"other@example.test\",\"capabilities\":[\"mail-read\"]}]" }) |accounts| {
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), accounts, .{}));
+        try std.testing.expect((try app.calendarGrantCommand()) == null);
+        const guide = try app.calendarGuide();
+        try std.testing.expect(std.mem.indexOf(u8, guide, try std.fmt.allocPrint(f, "omagma terminal-auth status --account 'self@example.test'{s}", .{routing})) != null);
+        try std.testing.expect(std.mem.indexOf(u8, guide, "plus calendar-read,calendar-write-shared") != null);
+        try std.testing.expect(std.mem.indexOf(u8, guide, "--capabilities mail-read") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
 test "calendar composer: short guest picker cannot add an unseen address" {

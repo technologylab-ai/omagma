@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Small local account/help checks in owned PTYs; no desktop or live mail."""
+"""Small local account/help/version checks in owned PTYs; no desktop or live mail."""
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 
+from build_info import read_build_info
 from terminal_integration import Client, require
 from terminal_html import screen_capture
 from terminal_mouse import click
@@ -157,6 +161,60 @@ def help_case(binary, directory, config, capture_dir=None):
         terminal.close()
 
 
+REPLACEMENT = b"Fictional replacement: not an Omagma executable\n"
+
+
+def version_case(binary, directory, config, capture_dir=None):
+    # Model an atomic upgrade under an open TUI: run a private copy, rename a
+    # different non-executable file over that path, then ask the open TUI.
+    expected = read_build_info(binary)["appVersion"]
+    source_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    installed = directory / "fictional-install" / "omagma"
+    installed.parent.mkdir(mode=0o700)
+    shutil.copy2(binary, installed)
+    terminal = BuiltinTerminal(installed, directory, config, account=ACCOUNTS[0], screen_type=MouseScreen)
+    literal = f"Running Omagma {expected} in this TUI"
+    try:
+        terminal.until(lambda: terminal.screen.locate("Contacts") is not None)
+        staged = installed.with_name(".omagma.upgrade")
+        staged.write_bytes(REPLACEMENT)
+        staged.chmod(0o600)
+        os.replace(staged, installed)
+        require(not os.access(installed, os.X_OK), "replacement path is still executable")
+        require(literal not in terminal.text(), "version shown before it was requested")
+        terminal.send(b":")
+        terminal.gap(.05)
+        terminal.send(b"version\r")
+        terminal.until(lambda: literal in terminal.text())
+        capture(terminal, capture_dir, "version")
+        require(terminal.process.poll() is None, ":version exited the TUI")
+        # The running TUI stays usable and help finds the command.
+        terminal.send(b"?")
+        terminal.until(lambda: terminal.screen.locate("Keyboard & mouse") is not None)
+        terminal.send(b"/version\r")
+        terminal.until(lambda: terminal.screen.locate(":version") is not None)
+        terminal.send(b"\x1b")
+        terminal.gap(.2)
+        terminal.send(b"\x1b")
+        terminal.until(lambda: terminal.screen.locate("Keyboard & mouse") is None)
+        require(terminal.process.poll() is None, "closing help exited the TUI")
+        require(installed.read_bytes() == REPLACEMENT, "TUI touched its replaced installation path")
+        # finish() reads post-exit fixture stats through Client(terminal.binary).
+        # The replaced path stays non-executable, so only that harness step
+        # uses the original verified binary.
+        terminal.binary = binary
+        terminal.finish()
+        require(installed.read_bytes() == REPLACEMENT and not os.access(installed, os.X_OK),
+                "replaced installation path changed before the end")
+        print("PASS version: replaced installation, running build reported, view usable")
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+    require(hashlib.sha256(binary.read_bytes()).hexdigest() == source_digest, "tested source binary changed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -171,7 +229,10 @@ def main():
         help_directory = Path(temporary) / "help"
         help_config = setup(help_directory)
         help_case(binary, help_directory, help_config, args.capture_dir)
-        for root, cfg in ((directory, config), (help_directory, help_config)):
+        version_directory = Path(temporary) / "version"
+        version_config = setup(version_directory)
+        version_case(binary, version_directory, version_config, args.capture_dir)
+        for root, cfg in ((directory, config), (help_directory, help_config), (version_directory, version_config)):
             with Client(binary, root, fixtures=False, extra=("--fixtures", "--config", str(cfg))) as client:
                 for account in ACCOUNTS:
                     require(client.request("cache.stats", account, cacheOnly=True)["fixtureSends"] == 0,

@@ -14,6 +14,7 @@ pub const Writer = struct {
 
     pub fn init(self: *Writer, directory: *storage.Directory, key: *const t.DataKey, record: storage.Record, size: usize, workspace: *t.StreamWorkspace, replace: bool, faults: storage.Faults) !void {
         errdefer workspace.wipe();
+        if (size > t.recordLimit(record.kind)) return error.VaultRecordTooLarge;
         self.output = try directory.begin(record.handle, size, replace, faults);
         errdefer self.output.deinit();
         const handle_text = record.handle.text();
@@ -24,6 +25,7 @@ pub const Writer = struct {
     }
     pub fn initInPlace(self: *Writer, directory: *storage.Directory, key: *const t.DataKey, record: storage.Record, size: usize, buffer: *[t.chunk_bytes]u8) !void {
         errdefer std.crypto.secureZero(u8, buffer);
+        if (size > t.recordLimit(record.kind)) return error.VaultRecordTooLarge;
         self.output = try directory.begin(record.handle, size, false, .{});
         errdefer self.output.deinit();
         const handle_text = record.handle.text();

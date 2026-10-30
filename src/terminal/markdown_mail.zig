@@ -16,16 +16,21 @@ pub const logo_content_id = "omagma-logo@omagma.invalid";
 pub const Rendered = struct { plain: []const u8, html: []const u8, logoOffset: usize };
 pub const Prepared = struct { plain: []const u8, html: ?[]const u8 = null, logoOffset: ?usize = null, resources: []const t.Attachment = &.{} };
 pub fn prepare(a: std.mem.Allocator, draft: t.Draft) !Prepared {
+    return prepareWithSuffix(a, draft, "");
+}
+/// Generated delivery links are parsed independently so an unfinished authored
+/// code fence cannot hide the links or alter their semantic meaning.
+pub fn prepareWithSuffix(a: std.mem.Allocator, draft: t.Draft, suffix: []const u8) !Prepared {
     const source = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText;
     if (if (draft.includeOriginal) draft.original else null) |original| {
-        const note = try renderNote(a, source, draft.bodyFormat);
+        const note = try renderNoteWithSuffix(a, source, draft.bodyFormat, suffix);
         defer a.free(note.plain);
         defer a.free(note.html);
         const assembled = try original_mail.prepare(a, .{ .html = note.html, .plain = note.plain, .logoOffset = note.logoOffset }, original);
         return .{ .plain = assembled.plain, .html = assembled.html, .logoOffset = assembled.logoOffset, .resources = assembled.resources };
     }
-    if (draft.bodyFormat == .plain) return .{ .plain = source };
-    const rendered = try render(a, source);
+    if (draft.bodyFormat == .plain) return .{ .plain = if (suffix.len == 0) source else try std.fmt.allocPrint(a, "{s}{s}", .{ source, suffix }) };
+    const rendered = try renderSourceWithSuffix(a, source, .markdown, true, suffix);
     return .{ .plain = rendered.plain, .html = rendered.html, .logoOffset = rendered.logoOffset };
 }
 
@@ -504,7 +509,10 @@ pub fn render(a: std.mem.Allocator, source: []const u8) !Rendered {
 /// Owns both returned strings. This is a trusted, generated fragment; received
 /// HTML must never pass through protectNote or acquire generated-Markdown trust.
 pub fn renderNote(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat) !Rendered {
-    const rendered = try renderSource(a, source, format, false);
+    return renderNoteWithSuffix(a, source, format, "");
+}
+fn renderNoteWithSuffix(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, suffix: []const u8) !Rendered {
+    const rendered = try renderSourceWithSuffix(a, source, format, false, suffix);
     defer a.free(rendered.html);
     errdefer a.free(rendered.plain);
     const html = try protectNote(a, rendered.html);
@@ -517,6 +525,12 @@ pub fn renderNote(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat
 }
 
 fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool) !Rendered {
+    return renderSourceWithSuffix(a, source, format, standalone, "");
+}
+fn renderSourceWithSuffix(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool, suffix: []const u8) !Rendered {
+    if (suffix.len > t.Limits.compose_body_bytes -| source.len) return error.BodyTooLarge;
+    if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
+    for (suffix) |c| if ((c < 0x20 and c != '\n' and c != '\r' and c != '\t') or c == 0x7f) return error.InvalidBody;
     if (source.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidUtf8;
     for (source) |c| if ((c < 0x20 and c != '\n' and c != '\r' and c != '\t') or c == 0x7f) return error.InvalidBody;
@@ -529,7 +543,7 @@ fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, 
             try lines.append(a, .{ .text = std.mem.trimEnd(u8, raw, "\r") });
         }
     }
-    var context: Context = .{ .a = a, .html = .{ .allocator = a }, .plain = .{ .allocator = a }, .search_budget = @max(4096, source.len * 32) };
+    var context: Context = .{ .a = a, .html = .{ .allocator = a }, .plain = .{ .allocator = a }, .search_budget = @max(4096, (source.len + suffix.len) * 32) };
     errdefer context.html.bytes.deinit(a);
     errdefer context.plain.bytes.deinit(a);
     if (standalone) try context.html.append(document_prefix);
@@ -540,6 +554,23 @@ fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, 
         try context.html.append("<div style=\"white-space:pre-wrap;overflow-wrap:anywhere\">");
         try context.literalText(source);
         try context.html.append("</div>");
+    }
+    if (suffix.len != 0) {
+        try context.plain.newline(2);
+        if (format == .markdown) {
+            var suffix_lines: std.ArrayList(Line) = .empty;
+            defer suffix_lines.deinit(a);
+            var iterator = std.mem.splitScalar(u8, suffix, '\n');
+            while (iterator.next()) |raw| {
+                if (suffix_lines.items.len == max_lines) return error.MarkdownTooComplex;
+                try suffix_lines.append(a, .{ .text = std.mem.trimEnd(u8, raw, "\r") });
+            }
+            try context.blocks(suffix_lines.items, 0, false, false);
+        } else {
+            try context.html.append("<div style=\"white-space:pre-wrap;overflow-wrap:anywhere\">");
+            try context.literalText(suffix);
+            try context.html.append("</div>");
+        }
     }
     try context.html.append(footer_prefix);
     const logo_offset = context.html.bytes.items.len;
@@ -940,4 +971,18 @@ test "original mail: plain and recovery notes stay literal inside branded HTML" 
     const legacy = try prepare(std.testing.allocator, .{ .bodyText = "**Literal**" });
     try std.testing.expect(legacy.html == null and legacy.logoOffset == null and legacy.resources.len == 0);
     try std.testing.expectEqualStrings("**Literal**", legacy.plain);
+}
+
+test "attachment delivery: generated suffix stays outside an unfinished Markdown fence" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const draft: t.Draft = .{ .bodyText = "```\nUnfinished example", .bodyFormat = .markdown };
+    const prepared = try prepareWithSuffix(a, draft, "\n\nFiles shared via Google Drive:\n\n- file.zip (1.0 MiB): <https://drive.google.com/file/d/synthetic/view>\n");
+    const html = prepared.html.?;
+    const close = std.mem.indexOf(u8, html, "</code></pre>").?;
+    const link = std.mem.indexOf(u8, html, "href=\"https://drive.google.com/file/d/synthetic/view\"").?;
+    try std.testing.expect(close < link);
+    try std.testing.expect(link < prepared.logoOffset.?);
+    try std.testing.expectEqualStrings("```\nUnfinished example", draft.bodyText);
 }

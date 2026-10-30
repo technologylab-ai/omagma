@@ -19,7 +19,20 @@ fn canonicalValue(a: std.mem.Allocator, draft: t.Draft, account: []const u8) !st
     if (canonical.includeOriginal) _ = value.object.orderedRemove("includeOriginal");
     if (canonical.bodyFormat == .plain) _ = value.object.orderedRemove("bodyFormat");
     _ = value.object.orderedRemove("omittedAttachments");
+    stripDefaultDelivery(&value);
     return value;
+}
+fn stripDefaultDelivery(value: *std.json.Value) void {
+    switch (value.*) {
+        .object => |*object| {
+            if (object.get("delivery")) |delivery| {
+                if (delivery == .string and std.mem.eql(u8, delivery.string, "attach")) _ = object.orderedRemove("delivery");
+            }
+            for (object.values()) |*child| stripDefaultDelivery(child);
+        },
+        .array => |array| for (array.items) |*child| stripDefaultDelivery(child),
+        else => {},
+    }
 }
 pub fn payload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar_identity: ?[]const u8) ![]const u8 {
     return @import("json.zig").encodeAlloc(a, .{ .draft = try canonicalValue(a, draft, account), .calendar = calendar_identity }, .{});
@@ -142,4 +155,23 @@ test "send outcome: streaming digest allocation failures release metadata and pr
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Test.run, .{std.fmt.bytesToHex(hash, .lower)});
+}
+
+test "attachment delivery: explicit Attach keeps legacy fingerprint while Auto and Drive bind review" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var file: [1]t.Attachment = .{.{ .id = "file", .filename = "file.bin", .size = 3, .data = "YWJj" }};
+    const draft: t.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .attachments = &file };
+    const legacy = try payload(a, draft, "self@example.test", null);
+    const legacy_digest = try digest(a, draft, "self@example.test", null);
+    file[0].delivery = .attach;
+    try std.testing.expectEqualStrings(legacy, try payload(a, draft, "self@example.test", null));
+    try std.testing.expectEqualStrings(&legacy_digest, &try digest(a, draft, "self@example.test", null));
+    file[0].delivery = .auto;
+    const auto_digest = try digest(a, draft, "self@example.test", null);
+    try std.testing.expect(!std.mem.eql(u8, &legacy_digest, &auto_digest));
+    file[0].delivery = .drive;
+    const drive_digest = try digest(a, draft, "self@example.test", null);
+    try std.testing.expect(!std.mem.eql(u8, &drive_digest, &auto_digest));
 }

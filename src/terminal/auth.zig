@@ -9,7 +9,7 @@ const calendar_permissions = @import("calendar_permissions.zig");
 
 pub const allowed_capabilities = [_][]const u8{
     "mail-read",     "mail-drafts",          "mail-send",             "mail-modify",       "contacts-read", "contacts-write", "calendar-rsvp",
-    "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy",
+    "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy", "drive-upload",
 };
 
 pub const Grant = struct {
@@ -37,6 +37,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
     var drafts = false;
     var contacts_read = false;
     var contacts_write = false;
+    var drive_upload = false;
     var calendar: calendar_permissions.Selection = .{};
     for (capabilities, 0..) |capability, index| {
         var known = false;
@@ -49,6 +50,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
         drafts = drafts or std.mem.eql(u8, capability, "mail-drafts");
         contacts_read = contacts_read or std.mem.eql(u8, capability, "contacts-read");
         contacts_write = contacts_write or std.mem.eql(u8, capability, "contacts-write");
+        drive_upload = drive_upload or std.mem.eql(u8, capability, "drive-upload");
         calendar.read = calendar.read or std.mem.eql(u8, capability, "calendar-read");
         calendar.write_owned = calendar.write_owned or std.mem.eql(u8, capability, "calendar-write-owned");
         calendar.write_shared = calendar.write_shared or std.mem.eql(u8, capability, "calendar-write-shared");
@@ -64,6 +66,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
     const calendar_scopes = try calendar_permissions.scopes(a, calendar);
     defer a.free(calendar_scopes);
     try scopes.appendSlice(a, calendar_scopes);
+    if (drive_upload) try scopes.append(a, "https://www.googleapis.com/auth/drive.file");
     return try scopes.toOwnedSlice(a);
 }
 pub fn grantIdentity(scopes: []const []const u8) [64]u8 {
@@ -161,6 +164,14 @@ fn requestCapabilities(a: std.mem.Allocator, request: j.Value) ![]const []const 
     return result;
 }
 
+/// Reconsent keeps this account's terminal registration unless explicitly
+/// replaced. Falling back to the bar registration would broaden its grant.
+fn authorizationClient(request: j.Value, current: ?*const Grant, configured: []const u8) ![]const u8 {
+    const selected = if (j.get(request, "clientFile")) |value| try j.string(value) else if (current) |grant| grant.clientFile else configured;
+    if (selected.len == 0) return error.OAuthClientRequired;
+    return selected;
+}
+
 pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const std.process.Environ.Map, request: j.Value) !j.Value {
     const command = try j.required(request, "cmd");
     const account = try j.required(request, "account");
@@ -184,8 +195,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     if (!std.mem.eql(u8, command, "auth.authorize")) return error.UnsupportedCommand;
     const caps = try requestCapabilities(a, request);
     const scopes = try scopesFor(a, caps);
-    const client_file = if (j.get(request, "clientFile")) |v| try j.string(v) else config.client_file.slice();
-    if (client_file.len == 0) return error.OAuthClientRequired;
+    const client_file = try authorizationClient(request, current, config.client_file.slice());
     var desktop: oauth.DesktopClient = .{};
     defer desktop.wipe();
     try oauth.loadDesktopWithSettings(io, client_file, &desktop, config.credentials());
@@ -239,7 +249,7 @@ test "calendar: terminal grants preserve mail and contacts while requesting exac
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const shared = try scopesFor(a, &allowed_capabilities);
+    const shared = try scopesFor(a, allowed_capabilities[0 .. allowed_capabilities.len - 1]);
     try std.testing.expectEqual(@as(usize, 5), shared.len);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.modify", shared[0]);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/contacts", shared[1]);
@@ -277,4 +287,73 @@ test "grant registry reads require private regular files and reject final symlin
     try std.testing.expectError(error.InsecureGrantRegistryFile, loadFrom(temporary.dir, io, a, "registry-directory"));
     const absent = try loadFrom(temporary.dir, io, a, "absent.json");
     try std.testing.expectEqual(@as(usize, 0), absent.accounts.len);
+}
+
+test "Drive authorization: upload capability adds only per-file scope" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const scopes = try scopesFor(arena.allocator(), &.{ "mail-read", "drive-upload" });
+    try std.testing.expectEqual(@as(usize, 2), scopes.len);
+    try std.testing.expectEqualStrings(oauth.readonly_scope, scopes[0]);
+    try std.testing.expectEqualStrings("https://www.googleapis.com/auth/drive.file", scopes[1]);
+    try oauth.validateScopeSet(scopes);
+}
+
+test "attachment delivery: reconsent retains the existing terminal registration separately from the bar" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const grant: Grant = .{ .account = "self@example.test", .clientFile = "existing-terminal-registration", .clientId = "synthetic.apps.googleusercontent.com", .grantId = "synthetic", .capabilities = &.{"mail-read"}, .scopes = &.{oauth.readonly_scope} };
+    const request = j.object(a);
+    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, "bar-registration"));
+    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, ""));
+    const explicit = try j.value(a, .{ .clientFile = "replacement-terminal-registration" });
+    try std.testing.expectEqualStrings("replacement-terminal-registration", try authorizationClient(explicit, &grant, "bar-registration"));
+    try std.testing.expectEqualStrings("bar-registration", try authorizationClient(request, null, "bar-registration"));
+    try std.testing.expectError(error.OAuthClientRequired, authorizationClient(request, null, ""));
+}
+
+test "attachment delivery: reconsent via a persisted terminal registration cannot broaden the bar client" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Native = @import("../native_identity.zig");
+    const Fixture = struct {
+        registry: []const u8,
+        client_reads: usize = 0,
+        writes: usize = 0,
+        fn read(ctx: *anyopaque, kind: Native.Kind, key: Native.Key) !?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (kind == .grants) return self.registry;
+            if (kind == .desktop_client) {
+                try std.testing.expectEqualStrings(if (self.client_reads == 0) "existing-terminal-registration" else "bar-registration", key.name);
+                self.client_reads += 1;
+                return "{\"installed\":{\"client_id\":\"synthetic.apps.googleusercontent.com\",\"client_secret\":\"synthetic-secret\"}}";
+            }
+            return error.UnexpectedIdentityRead;
+        }
+        fn apply(ctx: *anyopaque, _: []const Native.Change) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.writes += 1;
+            return error.UnexpectedIdentityWrite;
+        }
+    };
+    const scopes = try scopesFor(a, &.{"mail-read"});
+    const grant_id = grantIdentity(scopes);
+    const grant: Grant = .{ .account = "self@example.test", .clientFile = "existing-terminal-registration", .clientId = "synthetic.apps.googleusercontent.com", .grantId = &grant_id, .capabilities = &.{"mail-read"}, .scopes = scopes };
+    var grants = [_]Grant{grant};
+    var fixture: Fixture = .{ .registry = try j.encodeAlloc(a, Registry{ .accounts = &grants }, .{}) };
+    const config = try a.create(Config);
+    try config.defaults("/nonexistent/synthetic-home");
+    config.count = 1;
+    try config.accounts[0].address.set(grant.account);
+    try config.client_file.set("bar-registration");
+    config.credential_store = .vault;
+    config.runtime_provider = .{ .context = &fixture, .readFn = Fixture.read, .applyFn = Fixture.apply };
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    const request = try j.value(a, .{ .cmd = "auth.authorize", .account = grant.account, .capabilities = [_][]const u8{ "mail-read", "mail-send", "drive-upload" } });
+    try std.testing.expectError(error.SeparateTerminalClientRequired, run(std.testing.io, a, config, &env, request));
+    try std.testing.expectEqual(@as(usize, 2), fixture.client_reads);
+    try std.testing.expectEqual(@as(usize, 0), fixture.writes);
 }

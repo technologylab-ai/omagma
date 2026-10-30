@@ -49,7 +49,7 @@ const Workspace = struct {
     }
 };
 
-pub const Response = struct { status: u16, body: []const u8, retry_after: u32 = 0, bytes: usize = 0 };
+pub const Response = struct { status: u16, body: []const u8, retry_after: u32 = 0, bytes: usize = 0, location: []const u8 = "", range: []const u8 = "" };
 /// Unit-test-only routing for real HTTP authorization/count oracles. Original
 /// production host/method/body validation still runs first. No runtime option,
 /// environment variable or production declaration can redirect credentials.
@@ -83,6 +83,11 @@ pub const MetadataEndpoint = enum {
     }
 };
 pub const metadata_bytes = 64 * 1024;
+pub const DriveHeaders = struct {
+    storage: [4096]u8 = undefined,
+    content_range: ?[]const u8 = null,
+    upload_content_length: ?[]const u8 = null,
+};
 const Upload = struct { source: Source, size: usize, content_type: []const u8 };
 const Download = struct { writer: *std.Io.Writer, limit: usize };
 pub const terminal_probe_body_bytes = 128 * 1024;
@@ -115,6 +120,11 @@ pub const Client = struct {
     pub fn initMailTransfer(io: std.Io) !Client {
         var client = try init(io);
         client.job_deadline = .fromNow(io, platform.seconds(@import("attachment_limits.zig").download_seconds));
+        return client;
+    }
+    pub fn initDrivePreparation(io: std.Io, deadline: std.Io.Clock.Timestamp) !Client {
+        var client = try init(io);
+        client.job_deadline = deadline;
         return client;
     }
     pub fn deinit(self: *Client) void {
@@ -201,19 +211,35 @@ pub const Client = struct {
     /// Response JSON retains the ordinary terminal response-buffer ceiling.
     pub fn requestTerminalFile(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, content_type: []const u8, source: Source, content_length: usize, out: []u8) !Response {
         if (method != .POST and method != .PUT and method != .PATCH) return error.InvalidStreamMethod;
-        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, method, token, @as(?Upload, .{ .source = source, .size = content_length, .content_type = content_type }), @as(?Download, null), out, false });
+        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, method, token, @as(?Upload, .{ .source = source, .size = content_length, .content_type = content_type }), @as(?Download, null), out, false, @as(?*DriveHeaders, null) });
     }
     /// Only 2xx bytes enter the destination writer. Errors remain in the small
     /// caller-provided buffer, so a 401 retry never appends provider error JSON
     /// to an attachment. Successful response.body is empty; bytes is its size.
     pub fn requestTerminalDownload(self: *Client, url: []const u8, token: ?[]const u8, writer: *std.Io.Writer, max_response_bytes: usize, error_out: []u8) !Response {
-        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .GET, token, @as(?Upload, null), @as(?Download, .{ .writer = writer, .limit = max_response_bytes }), error_out, false });
+        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .GET, token, @as(?Upload, null), @as(?Download, .{ .writer = writer, .limit = max_response_bytes }), error_out, false, @as(?*DriveHeaders, null) });
     }
     pub fn requestLoopbackFileProbe(self: *Client, url: []const u8, content_type: []const u8, source: Source, content_length: usize, out: []u8) !Response {
-        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .POST, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?Upload, .{ .source = source, .size = content_length, .content_type = content_type }), @as(?Download, null), out, true });
+        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .POST, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?Upload, .{ .source = source, .size = content_length, .content_type = content_type }), @as(?Download, null), out, true, @as(?*DriveHeaders, null) });
     }
     pub fn requestLoopbackDownloadProbe(self: *Client, url: []const u8, writer: *std.Io.Writer, max_response_bytes: usize, error_out: []u8) !Response {
-        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .GET, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?Upload, null), @as(?Download, .{ .writer = writer, .limit = max_response_bytes }), error_out, true });
+        return platform.deadline(self.io, try self.streamDuration(), requestStreamingInner, .{ self, url, .GET, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?Upload, null), @as(?Download, .{ .writer = writer, .limit = max_response_bytes }), error_out, true, @as(?*DriveHeaders, null) });
+    }
+    /// Dedicated Drive route: bounded resumable chunks, no redirects, captured
+    /// session/range headers owned by the caller's private workspace.
+    pub fn requestDrive(self: *Client, url: []const u8, method: std.http.Method, token: []const u8, source: ?Source, length: usize, content_type: []const u8, out: []u8, headers: *DriveHeaders) !Response {
+        if (out.len > 256 * 1024 or length > 8 * limits.MiB) return error.FormTooLarge;
+        if (source != null and !method.requestHasBody()) return error.InvalidStreamMethod;
+        if (source == null and length != 0) return error.BodySizeMismatch;
+        const body_source: ?Source = source orelse if (method.requestHasBody()) Source{ .ctx = self, .readFn = emptyDriveBody } else null;
+        const upload: ?Upload = if (body_source) |value| .{ .source = value, .size = length, .content_type = content_type } else null;
+        const remaining = try self.streamDuration();
+        const request_seconds: i64 = if (method == .PUT and length != 0) 120 else limits.request_seconds;
+        const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), request_seconds * std.time.ns_per_s)) };
+        return platform.deadline(self.io, duration, requestStreamingInner, .{ self, url, method, @as(?[]const u8, token), upload, @as(?Download, null), out, false, @as(?*DriveHeaders, headers) });
+    }
+    fn emptyDriveBody(_: *anyopaque, _: []u8) !usize {
+        return 0;
     }
     fn streamDuration(self: *Client) !std.Io.Clock.Duration {
         const remaining = self.job_deadline.durationFromNow(self.io);
@@ -318,12 +344,14 @@ pub const Client = struct {
         }
         return .{ .status = status, .body = out[0..n], .retry_after = retry_after };
     }
-    fn requestStreamingInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, upload: ?Upload, download: ?Download, out: []u8, loopback: bool) anyerror!Response {
+    fn requestStreamingInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, upload: ?Upload, download: ?Download, out: []u8, loopback: bool, drive: ?*DriveHeaders) anyerror!Response {
         if (out.len > 3 * limits.MiB) return error.ResponseBufferTooLarge;
         if (url.len > 4096) return error.UrlTooLarge;
         const uri = try std.Uri.parse(url);
-        try validateDestination(uri, loopback, true);
-        if (!loopback and !std.mem.eql(u8, uri.host.?.percent_encoded, "gmail.googleapis.com")) return error.InvalidHost;
+        if (drive != null) try validateDriveDestination(uri) else {
+            try validateDestination(uri, loopback, true);
+            if (!loopback and !std.mem.eql(u8, uri.host.?.percent_encoded, "gmail.googleapis.com")) return error.InvalidHost;
+        }
         if (upload) |body| {
             if (body.size > terminal_upload_bytes) return error.FormTooLarge;
             if (body.content_type.len == 0 or body.content_type.len > 512) return error.InvalidContentType;
@@ -340,9 +368,22 @@ pub const Client = struct {
         } else null;
         var route_buffer: [4096]u8 = undefined;
         const request_uri = try routeForTest(uri, url, &route_buffer);
+        var extra: [2]std.http.Header = undefined;
+        var extra_count: usize = 0;
+        if (drive) |policy| {
+            const values = [_]?[]const u8{ policy.content_range, policy.upload_content_length };
+            const names = [_][]const u8{ "Content-Range", "X-Upload-Content-Length" };
+            for (values, names) |value, name| if (value) |v| {
+                if (v.len == 0 or v.len > 128) return error.InvalidDriveHeader;
+                for (v) |byte| if (byte < 32 or byte >= 127) return error.InvalidDriveHeader;
+                extra[extra_count] = .{ .name = name, .value = v };
+                extra_count += 1;
+            };
+        }
         var request_value = try self.inner.?.request(method, request_uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
+            .extra_headers = extra[0..extra_count],
             .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (upload) |body| .{ .override = body.content_type } else .omit },
         });
         defer request_value.deinit();
@@ -366,7 +407,7 @@ pub const Client = struct {
         } else try request_value.sendBodiless();
         var response = try request_value.receiveHead(&.{});
         const status: u16 = @backingInt(response.head.status);
-        if (status >= 300 and status < 400) return error.RedirectRejected;
+        if (status >= 300 and status < 400 and !(drive != null and status == 308)) return error.RedirectRejected;
         if (response.head.content_encoding != .identity) return error.CompressionRejected;
         const destination: ?Download = if (status >= 200 and status < 300) download else null;
         const limit = if (destination) |body| body.limit else out.len;
@@ -376,6 +417,28 @@ pub const Client = struct {
         while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
             retry_after = @min(std.fmt.parseInt(u32, std.mem.trim(u8, header.value, " \t"), 10) catch 300, 300);
         };
+        var location: []const u8 = "";
+        var accepted_range: []const u8 = "";
+        if (drive) |policy| {
+            var used: usize = 0;
+            var iterator = response.head.iterateHeaders();
+            while (iterator.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "location") or std.ascii.eqlIgnoreCase(header.name, "range")) {
+                    if (header.value.len > policy.storage.len - used) return error.InvalidDriveHeader;
+                    const copy = policy.storage[used..][0..header.value.len];
+                    @memcpy(copy, header.value);
+                    used += copy.len;
+                    if (std.ascii.eqlIgnoreCase(header.name, "location")) {
+                        if (location.len != 0) return error.InvalidDriveHeader;
+                        try validateDriveDestination(try std.Uri.parse(copy));
+                        location = copy;
+                    } else {
+                        if (accepted_range.len != 0) return error.InvalidDriveHeader;
+                        accepted_range = copy;
+                    }
+                }
+            }
+        }
         const reader = response.reader(&.{});
         var buffer: [32 * 1024]u8 = undefined;
         var received: usize = 0;
@@ -393,7 +456,7 @@ pub const Client = struct {
             if (destination) |body| try body.writer.writeAll(buffer[0..count]) else @memcpy(out[received..][0..count], buffer[0..count]);
             received += count;
         }
-        return .{ .status = status, .body = if (destination != null) "" else out[0..received], .retry_after = retry_after, .bytes = received };
+        return .{ .status = status, .body = if (destination != null) "" else out[0..received], .retry_after = retry_after, .bytes = received, .location = location, .range = accepted_range };
     }
 };
 fn validateCalendarDestination(uri: std.Uri, loopback: bool) !void {
@@ -514,3 +577,95 @@ test "terminal HTTPS policy adds only People and preserves bar and loopback host
 }
 
 pub const reservation_bytes = @sizeOf(@TypeOf(slab)) + @sizeOf(@TypeOf(reserved)) + 64;
+
+/// Drive credentials are never admitted by the Gmail/bar destination policy.
+pub fn validateDriveDestination(uri: std.Uri) !void {
+    if (!std.mem.eql(u8, uri.scheme, "https") or uri.user != null or uri.password != null or uri.fragment != null or (uri.port != null and uri.port.? != 443)) return error.InvalidDriveDestination;
+    const host = uri.host orelse return error.InvalidDriveDestination;
+    if (!std.mem.eql(u8, host.percent_encoded, "www.googleapis.com")) return error.InvalidDriveDestination;
+    const path = uri.path.percent_encoded;
+    if (!std.mem.eql(u8, path, "/drive/v3/files") and !std.mem.startsWith(u8, path, "/drive/v3/files/") and !std.mem.eql(u8, path, "/upload/drive/v3/files") and !std.mem.startsWith(u8, path, "/upload/drive/v3/files/")) return error.InvalidDriveDestination;
+    for (path) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "/_-.", byte) == null) return error.InvalidDriveDestination;
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidDriveDestination;
+}
+test "Drive HTTP: dedicated destination policy keeps Gmail and other origins isolated" {
+    for ([_][]const u8{ "https://www.googleapis.com/drive/v3/files/generateIds?count=1", "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable" }) |url| try validateDriveDestination(try std.Uri.parse(url));
+    for ([_][]const u8{ "http://www.googleapis.com/drive/v3/files", "https://evil.test/drive/v3/files", "https://www.googleapis.com:444/drive/v3/files", "https://www.googleapis.com/drive/v3/files/../other", "https://www.googleapis.com/drive/v3/files%2fother", "https://www.googleapis.com/other", "https://www.googleapis.com/drive/v3/files#secret" }) |url| try std.testing.expectError(error.InvalidDriveDestination, validateDriveDestination(try std.Uri.parse(url)));
+    // Construct synthetic URL credentials explicitly so they cannot be
+    // confused with literal mail addresses by the publication audit.
+    for ([_][]const u8{ "synthetic-user", "synthetic-user:synthetic-password" }) |credentials| {
+        var buffer: [128]u8 = undefined;
+        const url = try std.fmt.bufPrint(&buffer, "https://{s}@{s}/drive/v3/files", .{ credentials, "www.googleapis.com" });
+        try std.testing.expectError(error.InvalidDriveDestination, validateDriveDestination(try std.Uri.parse(url)));
+    }
+    try std.testing.expectError(error.InvalidHost, validateDestination(try std.Uri.parse("https://www.googleapis.com/drive/v3/files"), false, true));
+}
+
+test "attachment delivery: Drive wire streams zero-byte probes and preserves resumable headers" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 });
+    defer listener.deinit(io);
+    const origin = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    defer a.free(origin);
+    TestRoute.origin = origin;
+    defer TestRoute.origin = null;
+    const Oracle = struct {
+        fn run(server: *std.Io.net.Server) !void {
+            const peer_io = std.testing.io;
+            for (0..3) |index| {
+                const stream = try server.accept(peer_io);
+                defer stream.close(peer_io);
+                var input: [4096]u8 = undefined;
+                var output: [4096]u8 = undefined;
+                var reader = stream.reader(peer_io, &input);
+                var writer = stream.writer(peer_io, &output);
+                var http_server = std.http.Server.init(&reader.interface, &writer.interface);
+                var request = try http_server.receiveHead();
+                try std.testing.expectEqual(if (index == 1) std.http.Method.PATCH else std.http.Method.PUT, request.head.method);
+                var iter = request.iterateHeaders();
+                var authorized = false;
+                while (iter.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                    try std.testing.expectEqualStrings("Bearer synthetic-drive-wire-token", header.value);
+                    authorized = true;
+                };
+                try std.testing.expect(authorized);
+                var data: [8]u8 = undefined;
+                const count = try request.readerExpectNone(&.{}).readSliceShort(&data);
+                try std.testing.expectEqualStrings(if (index == 2) "abc" else "", data[0..count]);
+                try std.testing.expectEqual(@as(?u64, if (index == 2) 3 else 0), request.head.content_length);
+                const headers: []const std.http.Header = switch (index) {
+                    0 => &.{.{ .name = "Range", .value = "bytes=0-2" }},
+                    1 => &.{.{ .name = "Location", .value = "https://www.googleapis.com/upload/drive/v3/files/synthetic?uploadType=resumable&upload_id=private" }},
+                    else => &.{},
+                };
+                try request.respond("", .{ .status = if (index == 0) @fromBackingInt(308) else .ok, .keep_alive = false, .extra_headers = headers });
+            }
+        }
+        fn read(context: *anyopaque, out: []u8) !usize {
+            const left: *[]const u8 = @ptrCast(@alignCast(context));
+            const count = @min(left.len, out.len);
+            @memcpy(out[0..count], left.*[0..count]);
+            left.* = left.*[count..];
+            return count;
+        }
+    };
+    var task = try io.concurrent(Oracle.run, .{&listener});
+    defer task.cancel(io) catch {};
+    var client = try Client.initMailTransfer(io);
+    defer client.deinit();
+    var output: [1024]u8 = undefined;
+    var headers: DriveHeaders = .{ .content_range = "bytes */3" };
+    const probe = try client.requestDrive("https://www.googleapis.com/upload/drive/v3/files/synthetic?uploadType=resumable&upload_id=private", .PUT, "synthetic-drive-wire-token", null, 0, "application/octet-stream", &output, &headers);
+    try std.testing.expectEqual(@as(u16, 308), probe.status);
+    try std.testing.expectEqualStrings("bytes=0-2", probe.range);
+    headers = .{ .upload_content_length = "3" };
+    const session = try client.requestDrive("https://www.googleapis.com/upload/drive/v3/files/synthetic?uploadType=resumable", .PATCH, "synthetic-drive-wire-token", null, 0, "application/json", &output, &headers);
+    try std.testing.expect(std.mem.endsWith(u8, session.location, "upload_id=private"));
+    var remaining: []const u8 = "abc";
+    headers = .{ .content_range = "bytes 0-2/3" };
+    const completed = try client.requestDrive("https://www.googleapis.com/upload/drive/v3/files/synthetic?uploadType=resumable&upload_id=private", .PUT, "synthetic-drive-wire-token", .{ .ctx = @ptrCast(&remaining), .readFn = Oracle.read }, 3, "application/octet-stream", &output, &headers);
+    try std.testing.expectEqual(@as(u16, 200), completed.status);
+    try task.await(io);
+}

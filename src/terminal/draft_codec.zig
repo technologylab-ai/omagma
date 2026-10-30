@@ -137,6 +137,8 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (d.original) |original| try @import("original_mail.zig").validate(original);
     var attachment_bytes: usize = 0;
     var embedded_bytes: usize = 0;
+    var automatic = false;
+    for (d.attachments) |attachment| automatic = automatic or attachment.delivery == .auto;
     for ([_][]const t.Attachment{ d.attachments, related }, 0..) |list, group| {
         // Omitted originals remain validated and durable, but do not consume
         // the outgoing file budget while their inclusion is disabled.
@@ -145,6 +147,8 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
             embedded_bytes = 0;
         }
         for (list) |attachment| {
+            if (group == 1 and attachment.delivery != null) return error.InvalidAttachmentDelivery;
+            if (attachment.delivery != null and !t.Limits.native) return error.UnsupportedAttachmentDelivery;
             if (attachment.filename.len == 0 or attachment.filename.len > mail_limits.filename_bytes or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
             try recipients.validateHeader(attachment.filename);
             try recipients.validateHeader(attachment.mimeType);
@@ -154,8 +158,15 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
                 if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
                 break :blk attachment.size;
             } else std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
-            attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
-            if (attachment_bytes > t.Limits.attachment_bytes or n != attachment.size) return error.InvalidAttachment;
+            if (n != attachment.size) return error.InvalidAttachment;
+            if (n > (if (group == 1 or !t.Limits.native) t.Limits.attachment_bytes else t.Limits.disk_hard)) return error.InvalidAttachment;
+            if (attachment.delivery != null and attachment.delivery.? != .attach) {
+                if (attachment.blobId == null or n > t.Limits.disk_hard) return error.InvalidAttachmentDelivery;
+            }
+            if (attachment.delivery != .drive) {
+                attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
+                if (send and !automatic and attachment_bytes > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+            }
             if (attachment.blobId == null) {
                 embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;
                 if (embedded_bytes > t.Limits.body_bytes) return error.InvalidAttachment;

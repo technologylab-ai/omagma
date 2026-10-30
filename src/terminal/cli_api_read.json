@@ -950,7 +950,7 @@
         },
         "clientFile": {
           "type": "string",
-          "description": "Private Desktop OAuth registration JSON path. Optional only when config.oauthClientFile supplies one; otherwise required. Use an absolute expanded private path, not file contents. Broader-than-mail-read access must use a different Client ID from an existing read-only/bar registration.",
+          "description": "Private Desktop OAuth registration JSON path. Defaults to this account’s existing terminal registration, then config.oauthClientFile. Required for fresh terminal-only setup. Use an absolute expanded private path, not file contents. Broader-than-mail-read access must use a different Client ID from an existing read-only/bar registration.",
           "minLength": 1
         }
       },
@@ -964,7 +964,8 @@
         "Local capabilities remain distinct even where Google scopes overlap. Request mail-send for ordinary sending, contacts-read for browsing, and calendar-rsvp for RSVP emails. Calendar API/scope is unnecessary for RSVP email. Optional calendar-read, calendar-write-owned, calendar-write-shared and calendar-freebusy select Calendar API access; see docs/CALENDAR-PERMISSIONS.md. Shared writes subsume event-read/owned scopes, while freebusy uses a separate scope.",
         "For fresh terminal-only setup, one registration and clientFile is enough with config.oauthClientFile omitted. Alongside a read-only/bar setup, broader terminal authorization requires a different Desktop Client ID in the same project; copying/renaming its JSON does not create another registration.",
         "Stores the verified refresh token in the selected keyring/file backend, then persists the terminal grant registry. The file backend is private owner-only unencrypted storage. Does not send mail or modify contacts; later writes still require the user's task authorization.",
-        "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow."
+        "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow.",
+        "Optional drive-upload adds Google drive.file for app-created attachment uploads and viewer sharing at confirmed send. Request the complete existing capability set plus drive-upload; no broad Drive scope is required."
       ],
       "examples": [
         {
@@ -1059,7 +1060,7 @@
     "ReadCapabilities": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 10,
+      "maxItems": 12,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -1073,7 +1074,9 @@
           "calendar-read",
           "calendar-write-owned",
           "calendar-write-shared",
-          "calendar-freebusy"
+          "calendar-freebusy",
+          "mail-drafts",
+          "drive-upload"
         ]
       },
       "contains": {

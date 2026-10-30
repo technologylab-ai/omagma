@@ -6,6 +6,10 @@ test {
     std.testing.refAllDecls(@import("terminal/send_queue.zig"));
     std.testing.refAllDecls(@import("terminal/contact_record.zig"));
     std.testing.refAllDecls(@import("terminal/attachment_blob.zig"));
+    std.testing.refAllDecls(@import("terminal/attachment_delivery.zig"));
+    std.testing.refAllDecls(@import("terminal/native_delivery.zig"));
+    std.testing.refAllDecls(@import("terminal/attachment_dry_run.zig"));
+    std.testing.refAllDecls(@import("terminal/drive_prepare.zig"));
     std.testing.refAllDecls(@import("terminal/attachment_json.zig"));
     std.testing.refAllDecls(@import("terminal/cli_plan.zig"));
 }

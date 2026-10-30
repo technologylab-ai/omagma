@@ -283,7 +283,7 @@ pub fn copy(destination: *Store, source: *Store, object: *const Object) !void {
     if (account.directory.dir.statFile(destination.io, &object.handle.filename(), .{ .follow_symlinks = false })) |_| {
         return verifyCiphertext(destination, object);
     } else |err| if (err != error.FileNotFound) return err;
-    try destination.reserveVaultCiphertext(try vt.sealedSize(object.size));
+    try destination.reserveVaultCiphertext(try vt.sealedStreamSize(object.size));
     var output: stream.Writer = undefined;
     try output.initOwnedInPlace(&account.directory, account.owner.key, account.record(object.kind, object.handle), object.size, &account.owner.workspace.plaintext, &account.writer_owner, @import("vault_catalog.zig").Account.releaseWriter);
     defer output.deinit();
@@ -304,6 +304,6 @@ pub fn copy(destination: *Store, source: *Store, object: *const Object) !void {
         if (err == error.VaultDurabilityUncertain) account.owner.uncertain = true;
         return err;
     };
-    try destination.accountMigrationCiphertext(try vt.sealedSize(object.size), 0);
+    try destination.accountMigrationCiphertext(try vt.sealedStreamSize(object.size), 0);
     try verifyCiphertext(destination, object);
 }

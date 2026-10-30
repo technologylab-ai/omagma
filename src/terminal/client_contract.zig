@@ -5,7 +5,7 @@ const j = @import("json.zig");
 /// Disconnects after a request was submitted are safe to classify as reads
 /// only for this positive allowlist. New/unknown commands default to mutation.
 pub fn readOnlyCommand(command: []const u8) bool {
-    for ([_][]const u8{ "history.operations", "history.drafts", "history.queues", "operation.read", "operation.list", "queue.read" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
+    for ([_][]const u8{ "history.operations", "history.drafts", "history.queues", "operation.read", "operation.list", "queue.read", "draft.measure", "draft.preview", "draft.delivery-plan", "draft.selection-plan" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
     // The command name alone cannot prove whether inspection will continue a
     // previously authorized Calendar write. Callers with flags use the helper.
     if (std.mem.eql(u8, command, "invitation.inspect")) return false;

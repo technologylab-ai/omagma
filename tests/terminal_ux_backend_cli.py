@@ -130,7 +130,25 @@ def main():
         too_large = root / "too-large.bin"
         with too_large.open("wb") as file:
             file.truncate(25 * 1024 * 1024 + 1)
-        run("attachment", "import", "--path", too_large, error="AttachmentsTooLarge")
+        # Local staging is independent of the outgoing email budget. A large
+        # handle can be saved for a later Drive choice; forced sending stays
+        # refused before any provider call or send.
+        staged = run("attachment", "import", "--path", too_large)
+        assert staged["size"] == 25 * 1024 * 1024 + 1 and staged["blobId"]
+        large_source = root / "large-local-draft.json"
+        large_source.write_text(json.dumps({"to": "peer@example.test", "bodyText": "Pending delivery choice", "attachments": [staged]}))
+        pending = run("draft", "create", "--draft-file", large_source)
+        before_refusal = run("cache", "stats")
+        run("draft", "send", "--draft-id", pending["id"], "--operation-id", "refused-large-attach", error="AttachmentsTooLarge")
+        after_refusal = run("cache", "stats")
+        assert after_refusal["fixtureCalls"] == before_refusal["fixtureCalls"]
+        assert after_refusal["fixtureSends"] == before_refusal["fixtureSends"]
+        run("draft", "discard", "--draft-id", pending["id"])
+        assert run("attachment", "discard", "--blob-id", staged["blobId"])["discarded"]
+        above_local_cap = root / "above-local-cap.bin"
+        with above_local_cap.open("wb") as file:
+            file.truncate(1024 * 1024 * 1024 + 1)
+        run("attachment", "import", "--path", above_local_cap, error="AttachmentsTooLarge")
         direct = run("mail", "send", "--to", "peer@example.test", "--body", "Direct grace fixture", "--operation-id", "cli-direct-delay", "--send-delay", 0)
         assert direct["state"] == "applied"
         run("mail", "send", "--to", "peer@example.test", "--body", "Direct grace fixture", "--operation-id", "cli-direct-delay", "--send-delay", 0, error="OperationConflict")
@@ -144,6 +162,9 @@ def main():
         retained = run("draft", "read", "--draft-id", small["id"])
         assert {key: retained[key] for key in small} == small
         assert len(retained["contentDigest"]) == 64 and all(c in "0123456789abcdef" for c in retained["contentDigest"])
+        # Discarding the intervening oversized unsent draft clears the one
+        # regenerable account preview for privacy. Re-render the retained source.
+        assert Path(run("draft", "preview", "--draft-id", small["id"], "--browser")["path"]) == artifact
         assert artifact.read_text() == html, "retained sent source lost its exact preview"
         disposable_draft = run("draft", "create", "--to", "peer@example.test", "--body", "Unsent preview cleanup")
         disposable_preview = Path(run("draft", "preview", "--draft-id", disposable_draft["id"], "--browser")["path"])

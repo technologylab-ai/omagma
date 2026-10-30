@@ -119,8 +119,10 @@ plus reviewed ordinary timed/all-day event creation, editing and rescheduling,
 generated Google Meet details and pasted HTTPS meeting links. Uncertain saves
 survive restart and support read-only checks, explicitly confirmed
 identical-request retry and uncertainty archival. The TUI adds agenda/day/week
-views and a guest picker using the destination account's Contacts; CLI callers
-supply guest emails. See the [Calendar event guide](CALENDAR-EVENTS.md).
+views and a guest picker using the destination account's Contacts (with an
+explicit bounded `contacts.search`). Its Guests field accepts Mail address-list
+paste; CLI callers supply bare guest emails in `event.attendees`. See the
+[Calendar event guide](CALENDAR-EVENTS.md).
 Native Calendar persistence pages settled invitation identities and operation
 receipts instead of expiring UID/version or cancellation protection after 256
 events. Pending reviews and uncertain claims remain in the bounded active
@@ -478,6 +480,60 @@ budget. Incoming MIME bookkeeping accepts up to 1,041 file/resource descriptors,
 including related parts and the sender's generated logo, within a separate
 4,180-part parser bound. These parser limits do not expand quotas for outgoing
 ordinary files or retained resources.
+
+## Google Drive delivery
+
+`mail send` and `draft create|update|preview` accept, in addition to
+`--attach-file FILE` (always attach):
+
+- `--upload-file FILE` (repeatable): always share from Drive.
+- `--file FILE` (repeatable): follows `--attachment-mode attach|auto|drive`
+  (default `attach`). Auto attaches what fits and shares the rest.
+- `--dry-run`: print the plan from local file metadata. No blob import,
+  authorization, network or store write; the reply sets `dryRun` and
+  `mimeEstimate`.
+
+Dry-run requires supplied draft source, rather than `--draft-id` or `--browser`.
+A Draft file containing stored blob handles returns `DryRunRequiresLocalFiles`;
+use `draft preview --draft-id ID` or JSONL `draft.delivery-plan` for a saved
+draft. A blocked dry-run returns `ok:false`, `data.status:"blocked"` and a
+non-zero exit status; inspect its blockers before sending.
+
+Files are compared by canonical path. An explicit flag wins over `--file`
+regardless of order; a path in both `--attach-file` and `--upload-file`
+(`ConflictingAttachmentDelivery`) or twice in one flag
+(`DuplicateAttachmentFile`) is refused. Display order is first appearance.
+Passing `--upload-file`, or `--file` with mode `auto`/`drive`, is consent to
+upload from the account and share viewer-only with the final To and Cc.
+
+JSON drafts carry `attachments[].delivery` (`attach|auto|drive`, default
+attach). `draft.delivery-plan` returns the plan directly under `data` without
+network access; preview/measure use the `attachmentPlan` wrapper. Plan fields:
+`files[]` (`index`, `filename`, `size`, `requestedDelivery`, `delivery`, `reuse`,
+`newCopy`, `sharedWith`),
+`attachedBytes`, `mimeBytes`, `mimeEstimate`, `driveFileCount`,
+`driveFileLimit`, `decodedLimitBytes`, `mimeLimitBytes` and `blockers[]`
+(`code`, `message`). Bcc with Drive is refused and at most 16 Drive files are
+allowed. Saving never uploads; uploads and sharing happen only during the
+confirmed send. Preparation retries are explicit and reuse `operationId`;
+never automatically retry `UnknownOutcome`.
+
+As with other mutation receipts, `ok:true` means a receipt was returned; check
+`data.outcome` to distinguish `applied`, `rejected`, `unknown` and
+`preparationStopped`. `canRetryPreparation` permits an explicit preparation
+retry. Editing/discarding its source or cancelling its queue permanently closes
+that operation (`kind: drivePreparationRetired`); start a newly reviewed send
+with a new operation ID. Its frozen file/access receipt remains readable, and
+retirement never deletes Drive files or revokes permissions.
+One unfinished preparation owns a saved draft at a time. Sending that unchanged
+draft with a fresh operation ID is refused as `DrivePreparationActive`; retry
+the original ID, or change/discard the draft before starting a new send.
+
+```sh
+omagma mail send --account self@example.test --to peer@example.test \
+  --subject Notes --body-file note.md --attachment-mode auto \
+  --file deck.pdf --upload-file raw.zip --operation-id UNIQUE_SEND_ID --dry-run
+```
 
 ## Local send queue and cancellation
 

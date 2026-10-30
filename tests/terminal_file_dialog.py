@@ -535,7 +535,7 @@ def tab_buttons_case(binary, directory, captures):
         terminal.send(b"\x1b")
         assert_composer(terminal, 2)
         original = draft(binary, directory, source)
-        terminal.send(b"\t")  # Body -> Add button.
+        terminal.send(b"\t\t")  # Body -> Upload all -> Add button.
         terminal.until(lambda: "Buttons" in terminal.text() and "Enter Activate" in terminal.text())
         terminal.send(b"\r")
         title = open_popup(terminal)
@@ -546,7 +546,7 @@ def tab_buttons_case(binary, directory, captures):
         terminal.until(lambda: "[Hidden on]" in popup_text(terminal, title))
         terminal.send(b"\t\t\t\r")
         assert_composer(terminal, 2)
-        terminal.send(b"\t\t\r")  # Add -> first[x] -> second[x] -> remove.
+        terminal.send(b"\t\t\t\t\r")  # Add -> first delivery/[x] -> second delivery/[x] -> remove.
         assert_composer(terminal, 1)
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text())
@@ -561,9 +561,9 @@ def tab_buttons_case(binary, directory, captures):
                 "button navigation changed recipients or body")
         terminal.send(b"\x1b")
         assert_composer(terminal, 1)
-        terminal.send(b"\x1b[Z\x1b[Z")  # first[x] -> Add -> Body.
+        terminal.send(b"\x1b[Z\x1b[Z\x1b[Z\x1b[Z")  # first[x] -> delivery -> Add -> Upload all -> Body.
         terminal.until(lambda: "Enter Activate" not in terminal.text())
-        terminal.send(b"\t\t")
+        terminal.send(b"\t\t\t\t")  # Body -> Upload all -> Add -> delivery -> first[x].
         terminal.until(lambda: "Enter Activate" in terminal.text())
         capture(terminal, captures, "focused-remove-button")
         terminal.send(b"x")

@@ -178,7 +178,7 @@ fn bindingHash(binding: t.Binding) ![Hash.digest_length]u8 {
 // different nonce domain and authenticates the header, expected identity,
 // frame count and total length. No extra bytes may follow that final tag.
 fn recordHeader(io: std.Io, key: *const t.DataKey, size: usize) ![t.record_header_bytes]u8 {
-    _ = try t.sealedSize(size);
+    _ = try t.sealedStreamSize(size);
     var header: [t.record_header_bytes]u8 = @splat(0);
     @memcpy(header[0..8], t.record_magic);
     putInt(u16, &header, 8, t.format_version);
@@ -190,13 +190,13 @@ fn recordHeader(io: std.Io, key: *const t.DataKey, size: usize) ![t.record_heade
     try io.randomSecure(header[56..80]);
     return header;
 }
-fn validateHeader(header: *const [t.record_header_bytes]u8, key: *const t.DataKey) !usize {
+fn validateHeader(header: *const [t.record_header_bytes]u8, key: *const t.DataKey, kind: t.RecordKind) !usize {
     if (!std.mem.eql(u8, header[0..8], t.record_magic)) return error.InvalidVaultRecord;
     if (getInt(u16, header, 8) != t.format_version or getInt(u16, header, 10) != 1) return error.UnsupportedVaultVersion;
     if (getInt(u32, header, 12) != t.chunk_bytes) return error.InvalidVaultRecord;
     if (!std.mem.eql(u8, header[24..40], &key.vault_id) or !std.mem.eql(u8, header[40..56], &key.key_id)) return error.VaultIdentityMismatch;
     const size = getInt(u64, header, 16);
-    if (size > t.max_record_bytes) return error.VaultRecordTooLarge;
+    if (size > t.recordLimit(kind)) return error.VaultRecordTooLarge;
     return @intCast(size);
 }
 fn frameNonce(header: *const [t.record_header_bytes]u8, index: u64, final: bool) [t.nonce_bytes]u8 {
@@ -238,6 +238,7 @@ pub fn sealStream(io: std.Io, key: *const t.DataKey, binding: t.Binding, plainte
     defer workspace.wipe();
     errdefer destination.abortFn(destination.context);
     const identity = try bindingHash(binding);
+    if (plaintext_size > t.recordLimit(binding.kind)) return error.VaultRecordTooLarge;
     const header = try recordHeader(io, key, plaintext_size);
     try io.checkCancel();
     try destination.writeFn(destination.context, &header);
@@ -295,6 +296,7 @@ pub const PushSealer = struct {
             destination.abortFn(destination.context);
         }
         const identity = try bindingHash(binding);
+        if (size > t.recordLimit(binding.kind)) return error.VaultRecordTooLarge;
         const header = try recordHeader(io, key, size);
         try io.checkCancel();
         try destination.writeFn(destination.context, &header);
@@ -379,7 +381,7 @@ pub const PullReader = struct {
         errdefer std.crypto.secureZero(u8, buffer);
         var header: [t.record_header_bytes]u8 = undefined;
         try readExact(source, &header);
-        const size = try validateHeader(&header, key);
+        const size = try validateHeader(&header, key, binding.kind);
         return .{ .io = io, .key = key, .source = source, .buffer = buffer, .header = header, .identity = try bindingHash(binding), .size = size, .remaining = size };
     }
     pub fn close(self: *PullReader) void {
@@ -450,7 +452,7 @@ pub fn openStream(io: std.Io, key: *const t.DataKey, binding: t.Binding, source:
     var header: [t.record_header_bytes]u8 = undefined;
     try io.checkCancel();
     try readExact(source, &header);
-    var remaining = try validateHeader(&header, key);
+    var remaining = try validateHeader(&header, key, binding.kind);
     var index: u64 = 0;
     while (remaining != 0) : (index += 1) {
         try io.checkCancel();
@@ -514,12 +516,25 @@ const SliceSink = struct {
 /// Slice convenience adapters allocate nothing. Buffers and workspace must be
 /// disjoint. On error the entire output is wiped, including partial plaintext.
 pub fn sealRecord(io: std.Io, key: *const t.DataKey, binding: t.Binding, plaintext: []const u8, output: []u8, workspace: *t.StreamWorkspace) ![]const u8 {
+    errdefer {
+        workspace.wipe();
+        std.crypto.secureZero(u8, output);
+    }
+    _ = try t.sealedSize(plaintext.len);
     var source: SliceSource = .{ .bytes = plaintext };
     var sink: SliceSink = .{ .bytes = output };
     try sealStream(io, key, binding, plaintext.len, source.adapter(), sink.adapter(), workspace);
     return output[0..sink.offset];
 }
 pub fn openRecord(io: std.Io, key: *const t.DataKey, binding: t.Binding, wire: []const u8, output: []u8, workspace: *t.StreamWorkspace) ![]u8 {
+    errdefer {
+        workspace.wipe();
+        std.crypto.secureZero(u8, output);
+    }
+    if (wire.len >= t.record_header_bytes) {
+        const header: *const [t.record_header_bytes]u8 = @ptrCast(wire.ptr);
+        if (try validateHeader(header, key, binding.kind) > t.max_record_bytes) return error.VaultRecordTooLarge;
+    }
     var source: SliceSource = .{ .bytes = wire };
     var sink: SliceSink = .{ .bytes = output };
     try openStream(io, key, binding, source.adapter(), sink.adapter(), workspace);

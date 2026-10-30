@@ -31,6 +31,11 @@ For manual Linux setup:
 
 [AGENTS.md](AGENTS.md) directs agents to the included [setup workflow](skills/omagma-setup/SKILL.md). They can read it directly; installing it as a global skill is optional.
 
+For an existing installation, the [Omagma usage skill](skills/omagma/SKILL.md)
+guides mail, Calendar, drafts, attachment delivery and CLI discovery. See
+[skill registration](docs/AGENT-SETUP.md#optional-usage-skill) to make it available
+to your agent.
+
 ## Mail and Calendar in the terminal
 
 **The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides separate accounts, full mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, local drafts, replies/forwarding, contacts, custom labels, attachments, mailbox changes and invitation replies. Copy received text by dragging or using Vim visual selection, or open the message in `$EDITOR`. The editor takes over the terminal and returns to the TUI; compose edits return to the draft, while received-message snapshots are discarded. No tmux is required. Permanent mail deletion and contact deletion remain outside the current scope. [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) describes their interface differences.

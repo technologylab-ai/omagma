@@ -275,6 +275,12 @@ pub const NetworkSession = struct {
     /// credential backend and verified-profile path. An empty set preserves the
     /// ordinary mail initializer; a nonempty set requires a terminal grant.
     pub fn initRequiringAnyCapabilityWithAllocator(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, buffer_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, required_any: []const []const u8) !void {
+        return self.initWithDeadline(io, a, buffer_allocator, config, account, cmd, request, required_any, null);
+    }
+    pub fn initDrivePreparation(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, deadline: std.Io.Clock.Timestamp) !void {
+        return self.initWithDeadline(io, a, a, config, account, "drive.prepare", request, &.{}, deadline);
+    }
+    fn initWithDeadline(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, buffer_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, required_any: []const []const u8, drive_deadline: ?std.Io.Clock.Timestamp) !void {
         const index = config.index(account) orelse {
             if (config.runtime_access_cache) |cache| cache.clear();
             return error.UnknownAccount;
@@ -317,7 +323,7 @@ pub const NetworkSession = struct {
         // One absolute attachment deadline covers token refresh, the profile
         // check, the streamed download and its single 401 retry. Every other
         // command keeps the ordinary client deadline.
-        self.client = if (std.mem.eql(u8, cmd, "mail.attachment") or @import("send_memory.zig").command(j.text(request, "cmd"))) try http.Client.initMailTransfer(io) else try http.Client.init(io);
+        self.client = if (drive_deadline) |deadline| try http.Client.initDrivePreparation(io, deadline) else if (std.mem.eql(u8, cmd, "mail.attachment") or @import("send_memory.zig").command(j.text(request, "cmd"))) try http.Client.initMailTransfer(io) else try http.Client.init(io);
         errdefer self.client.deinit();
         const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
         const capabilities: []const []const u8 = if (grant) |g| g.capabilities else &.{"mail-read"};
@@ -813,6 +819,7 @@ fn downloadAttachment(a: std.mem.Allocator, transport: Transport, message_id: []
 }
 
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, cmd, "drive.prepare")) return "drive-upload";
     if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete") or std.mem.eql(u8, cmd, "labels.color")) return "mail-modify";
     if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) return "mail-send";
     if (std.mem.eql(u8, cmd, "invitation.reply")) return "calendar-rsvp";
@@ -1130,16 +1137,7 @@ pub fn executeSpool(io: std.Io, a: std.mem.Allocator, config: *const Config, acc
     var session: NetworkSession = undefined;
     try session.init(io, a, config, account, if (std.mem.eql(u8, j.text(request, "cmd"), "invitation.reply")) "invitation.reply" else "mail.send", request);
     defer session.close();
-    const transport = session.transport();
-    if (draft.from) |identity| if (!std.ascii.eqlIgnoreCase(identity.address, account)) {
-        var verified = false;
-        for (try aliases(a, transport)) |alias| verified = verified or std.ascii.eqlIgnoreCase(identity.address, alias);
-        if (!verified) return error.UnverifiedSender;
-    };
-    if (draft.threadId.len > 0) {
-        try b.identifier(draft.threadId);
-        if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
-    }
+    try preflightSender(a, account, session.transport(), draft);
     const boundary = try std.fmt.allocPrint(a, "omagma-upload-{s}", .{spool.hash});
     const metadata = try std.json.Stringify.valueAlloc(a, .{ .threadId = if (draft.threadId.len > 0) draft.threadId else @as(?[]const u8, null) }, .{ .emit_null_optional_fields = false });
     const prefix = try std.fmt.allocPrint(a, "--{s}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{s}\r\n--{s}\r\nContent-Type: message/rfc822\r\n\r\n", .{ boundary, metadata, boundary });
@@ -2811,4 +2809,17 @@ test "cache activity: only typed incoming Inbox additions count and replay keeps
     plan.resync = false;
     plan.added = &.{};
     try std.testing.expectEqual(@as(usize, 0), plan.inboxArrivals());
+}
+
+/// Known send admission checks run before Drive side effects and again at Gmail.
+pub fn preflightSender(a: std.mem.Allocator, account: []const u8, transport: Transport, draft: types.Draft) !void {
+    if (draft.from) |identity| if (!std.ascii.eqlIgnoreCase(identity.address, account)) {
+        var verified = false;
+        for (try aliases(a, transport)) |alias| verified = verified or std.ascii.eqlIgnoreCase(identity.address, alias);
+        if (!verified) return error.UnverifiedSender;
+    };
+    if (draft.threadId.len > 0) {
+        try b.identifier(draft.threadId);
+        if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
+    }
 }

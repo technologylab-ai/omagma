@@ -125,13 +125,21 @@ an existing project, audience and branding when available. Prepare independent
 local work while the user completes Google steps; the user approves consent.
 Keep the detailed Console procedure in `docs/SETUP.md`.
 
-For all currently implemented terminal features, request
+For ordinary mail, contacts and RSVP terminal features, request
 `mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
 The backend maps these six local capabilities to only `gmail.modify` and
 `contacts`. Alongside an existing bar, keep the original registration/config
 entry and create a different registration for terminal permissions; copying or
 renaming its JSON does not create another registration. TUI and CLI share the
 terminal grant. Use the guide’s fresh-terminal-only or existing-bar route as appropriate.
+
+Drive attachment delivery adds optional `drive-upload` (`drive.file`) and needs
+Drive API enabled for the existing Google project. Add it only when requested,
+preserving the complete current capability set and account/config/grant routing;
+**Connect Drive** supplies the exact command when that set is known. Calendar
+reading and event editing have their own optional permissions in
+[Calendar setup](../../docs/CALENDAR-PERMISSIONS.md). Use the separate
+[omagma usage skill](../omagma/SKILL.md) for everyday tasks after setup.
 
 Preserve the existing Google audience/publishing choice. For External Testing,
 ensure each requested account is a test user. Use current primary Google docs

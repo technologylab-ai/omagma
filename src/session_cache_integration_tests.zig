@@ -54,6 +54,8 @@ const draft_full =
     \\{"id":"remote-message","threadId":"remote-thread","labelIds":["DRAFT"],"internalDate":"1","payload":{"mimeType":"multipart/mixed","headers":[{"name":"From","value":"self@example.test"},{"name":"To","value":"reader@example.test"},{"name":"Bcc","value":"hidden@example.test"},{"name":"Subject","value":"Remote draft text"}],"parts":[{"mimeType":"text/plain","body":{"size":12,"data":"UmVtb3RlIHRleHQu"}},{"mimeType":"application/octet-stream","filename":"first.bin","body":{"size":5,"attachmentId":"file-a"}},{"mimeType":"application/octet-stream","filename":"second.bin","body":{"size":6,"attachmentId":"file-b"}}]}}
 ;
 const Oracle = struct {
+    labels_hook: ?struct { context: *anyopaque, callFn: *const fn (*anyopaque) anyerror!void } = null,
+    token_scopes: ?[]const u8 = null,
     listener: std.Io.net.Server,
     refreshes: std.atomic.Value(usize) = .init(0),
     profiles: std.atomic.Value(usize) = .init(0),
@@ -143,7 +145,7 @@ const Oracle = struct {
             try std.testing.expectEqual(std.http.Method.POST, method);
             try std.testing.expect(std.mem.indexOf(u8, body[0..body_size], "refresh_token=synthetic-refresh-") != null);
             _ = self.refreshes.fetchAdd(1, .acq_rel);
-            response = if (self.draft_flow) "{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose\"}" else try std.fmt.bufPrint(&token_buffer, "{{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":{d},\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send\"}}", .{self.ttl.load(.acquire)});
+            response = if (self.token_scopes) |scope| try std.fmt.bufPrint(&token_buffer, "{{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"{s}\"}}", .{scope}) else if (self.draft_flow) "{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose\"}" else try std.fmt.bufPrint(&token_buffer, "{{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":{d},\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send\"}}", .{self.ttl.load(.acquire)});
             if (self.invalid_refresh.load(.acquire)) {
                 status = .bad_request;
                 response = "{\"error\":\"invalid_grant\"}";
@@ -171,6 +173,7 @@ const Oracle = struct {
                 response = "{\"size\":6,\"data\":\"c2Vjb25k\"}";
             } else response = draft_full;
         } else if (method == .GET) {
+            if (std.mem.indexOf(u8, path, "/labels") != null) if (self.labels_hook) |hook| try hook.callFn(hook.context);
             _ = self.reads.fetchAdd(1, .acq_rel);
             if (self.read_401.load(.acquire) != 0) {
                 _ = self.read_401.fetchSub(1, .acq_rel);
@@ -1285,4 +1288,174 @@ pub fn retainedSendLifecycle(encrypted: bool, many_blobs: bool) !void {
     oracle_joined = true;
     task.cancel(io) catch |err| if (err != error.Canceled) return err;
     try oracle.requireHistorySuccess();
+}
+
+test "attachment delivery: Drive uses the refreshed access token after sender alias preflight" {
+    const drive = @import("terminal/drive_prepare.zig");
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var identity = try Identity.init(alloc);
+    const caps = [_][]const u8{ "mail-read", "mail-send", "drive-upload" };
+    const scopes = try auth.scopesFor(alloc, &caps);
+    identity.grant = auth.grantIdentity(scopes);
+    var rows = [_]auth.Grant{.{ .account = account, .clientFile = "synthetic-client", .clientId = client_id, .grantId = &identity.grant, .capabilities = &caps, .scopes = scopes }};
+    identity.registry = try j.encodeAlloc(alloc, auth.Registry{ .accounts = &rows }, .{});
+    var cache: cache_module.Cache = .{};
+    defer cache.clear();
+    const config = try alloc.create(Config);
+    try config.defaults("/nonexistent/synthetic-home");
+    config.count = 1;
+    try config.accounts[0].address.set(account);
+    config.credential_store = .vault;
+    config.runtime_provider = identity.provider();
+    config.runtime_access_cache = &cache;
+    const DriveOracle = struct {
+        listener: std.Io.net.Server,
+        tokens: usize = 0,
+        aliases: usize = 0,
+        drives: usize = 0,
+        const fresh = "synthetic-new-access-token-with-a-different-length";
+        fn run(self: *@This()) anyerror!void {
+            for (0..8) |_| {
+                const stream = try self.listener.accept(io);
+                defer stream.close(io);
+                var in_buffer: [4096]u8 = undefined;
+                var out_buffer: [4096]u8 = undefined;
+                var reader = stream.reader(io, &in_buffer);
+                var writer = stream.writer(io, &out_buffer);
+                var server = std.http.Server.init(&reader.interface, &writer.interface);
+                var request = try server.receiveHead();
+                var path_buffer: [1024]u8 = undefined;
+                const path = try std.fmt.bufPrint(&path_buffer, "{s}", .{request.head.target});
+                var status: std.http.Status = .ok;
+                var body: []const u8 = "{}";
+                var response_buffer: [1024]u8 = undefined;
+                if (std.mem.eql(u8, path, "/oauth2.googleapis.com/token")) {
+                    var discarded: [4096]u8 = undefined;
+                    _ = try request.readerExpectNone(&.{}).readSliceShort(&discarded);
+                    self.tokens += 1;
+                    body = try std.fmt.bufPrint(&response_buffer, "{{\"access_token\":\"{s}\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive.file\"}}", .{if (self.tokens == 1) "old" else fresh});
+                } else {
+                    var headers = request.iterateHeaders();
+                    var authorized = false;
+                    while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                        try std.testing.expectEqualStrings(if (self.tokens == 1) "Bearer old" else "Bearer " ++ fresh, header.value);
+                        authorized = true;
+                    };
+                    try std.testing.expect(authorized);
+                    if (std.mem.indexOf(u8, path, "/profile?") != null) {
+                        body = "{\"emailAddress\":\"self@example.test\"}";
+                    } else if (std.mem.indexOf(u8, path, "/settings/sendAs?") != null) {
+                        self.aliases += 1;
+                        if (self.aliases == 1) {
+                            status = .unauthorized;
+                        } else body = "{\"sendAs\":[{\"sendAsEmail\":\"alias@example.test\",\"verificationStatus\":\"accepted\"}]}";
+                    } else {
+                        try std.testing.expect(std.mem.startsWith(u8, path, "/www.googleapis.com/drive/v3/files/generateIds?"));
+                        try std.testing.expectEqual(@as(usize, 2), self.tokens);
+                        self.drives += 1;
+                        body = "{\"ids\":[\"synthetic-generated-id\"]}";
+                    }
+                }
+                try request.respond(body, .{ .status = status, .keep_alive = false });
+                if (self.drives != 0) return;
+            }
+        }
+    };
+    var oracle: DriveOracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }) };
+    defer oracle.listener.deinit(io);
+    http.TestRoute.origin = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
+    defer http.TestRoute.origin = null;
+    var task = try io.concurrent(DriveOracle.run, .{&oracle});
+    defer task.cancel(io) catch {};
+    var network: drive.Network = undefined;
+    const preparation_deadline = std.Io.Clock.Timestamp.fromNow(io, @import("platform.zig").seconds(@import("terminal/send_budget.zig").preparation_seconds));
+    try network.init(io, alloc, config, account, try j.value(alloc, .{ .cmd = "draft.send" }), preparation_deadline);
+    defer network.close();
+    try std.testing.expect(network.session.client.job_deadline.durationFromNow(io).raw.toSeconds() > 1700);
+    try gmail.preflightSender(alloc, account, network.session.transport(), .{ .from = .{ .address = "alias@example.test" } });
+    var headers: http.DriveHeaders = .{};
+    const transport = network.transport();
+    const response = try transport.requestFn(transport.ctx, .GET, "https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=drive&type=files", null, null, 0, "application/json", &headers);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try task.await(io);
+    try std.testing.expectEqual(@as(usize, 2), oracle.tokens);
+    try std.testing.expectEqual(@as(usize, 2), oracle.aliases);
+    try std.testing.expectEqual(@as(usize, 1), oracle.drives);
+}
+
+test "attachment delivery: label-list authentication gap rechecks reserved operation before mutation" {
+    const Core = @import("terminal/core.zig").Session;
+    const storage = @import("terminal/store.zig");
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var identity = try Identity.init(alloc);
+    const caps = [_][]const u8{ "mail-read", "mail-send", "mail-modify", "drive-upload" };
+    const scopes = try auth.scopesFor(alloc, &caps);
+    identity.grant = auth.grantIdentity(scopes);
+    var rows = [_]auth.Grant{.{ .account = account, .clientFile = "synthetic-client", .clientId = client_id, .grantId = &identity.grant, .capabilities = &caps, .scopes = scopes }};
+    identity.registry = try j.encodeAlloc(alloc, auth.Registry{ .accounts = &rows }, .{});
+    const config = try alloc.create(Config);
+    try config.defaults("/nonexistent/synthetic-label-race");
+    config.count = 1;
+    try config.accounts[0].address.set(account);
+    config.credential_store = .vault;
+    config.runtime_provider = identity.provider();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    const root = try std.fmt.allocPrint(alloc, "{s}/cache", .{base});
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.bin", .data = "Synthetic identity reservation" });
+    var draft_id: []const u8 = undefined;
+    var digest: [64]u8 = undefined;
+    {
+        var store = try storage.Store.open(io, alloc, root, account, .{});
+        defer store.close();
+        const file = try @import("terminal/attachment_blob.zig").importDelivery(&store, try std.fmt.allocPrint(alloc, "{s}/file.bin", .{base}), "", .drive);
+        const draft = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .attachments = &.{file} }, null);
+        draft_id = draft.id;
+        digest = try @import("terminal/send_outcome.zig").digest(alloc, draft, account, null);
+    }
+    const Reservation = struct {
+        root: []const u8,
+        draft_id: []const u8,
+        digest: [64]u8,
+        invoked: std.atomic.Value(bool) = .init(false),
+        fn reserve(ctx: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.invoked.swap(true, .acq_rel)) return;
+            var temporary: std.heap.ArenaAllocator = .init(a);
+            defer temporary.deinit();
+            var store = try storage.Store.open(io, temporary.allocator(), self.root, account, .{});
+            defer store.close();
+            try store.recordPreparedDraft(self.draft_id, "shared-reservation-id", &self.digest);
+        }
+    };
+    var reservation: Reservation = .{ .root = root, .draft_id = draft_id, .digest = digest };
+    var oracle: Oracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }), .labels_hook = .{ .context = &reservation, .callFn = Reservation.reserve }, .token_scopes = try std.mem.join(alloc, " ", scopes) };
+    defer oracle.listener.deinit(io);
+    http.TestRoute.origin = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
+    defer http.TestRoute.origin = null;
+    var task = try io.concurrent(Oracle.run, .{&oracle});
+    defer task.cancel(io) catch {};
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    try env.put("HOME", base);
+    const session = try a.create(Core);
+    defer a.destroy(session);
+    try session.initInto(io, a, &env, .{ .cache_dir = root }, config);
+    defer session.deinit();
+    const raw = try session.execute(alloc, try j.encodeAlloc(alloc, .{ .cmd = "labels.create", .account = account, .operationId = "shared-reservation-id", .name = "Synthetic raced label" }, .{}));
+    const response = try std.json.parseFromSliceLeaky(j.Value, alloc, raw, .{});
+    try std.testing.expectEqualStrings("OperationConflict", j.text(j.get(response, "error").?, "code"));
+    try std.testing.expect(reservation.invoked.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), oracle.reads.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), oracle.writes.load(.acquire));
+    var store = try storage.Store.open(io, alloc, root, account, .{});
+    defer store.close();
+    try std.testing.expectEqual(@as(usize, 1), store.state.driveSources.len);
+    try std.testing.expect(try store.findOperation(alloc, "shared-reservation-id") == null);
+    try std.testing.expectEqualStrings(&digest, store.state.driveSources[0].hash);
 }

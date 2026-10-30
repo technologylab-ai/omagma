@@ -288,6 +288,11 @@ allocation exhaustion remain failures; individual malformed contacts are isolate
 
 - Normal/insert modes keep editing separate from commands. To/Cc/Bcc/subject
   and body remain visible; sending requires a review and explicit confirmation.
+- Large files can be shared from Google Drive: per-file Attach/Auto/Drive,
+  **Upload all**, a **Too large to attach** choice, and a review that blocks
+  Bcc, missing Drive access or limit overruns. Nothing uploads before the
+  confirmed send; Drive files are shared viewer-only with To and Cc. The CLI
+  offers `--upload-file`, `--file`, `--attachment-mode` and `--dry-run`.
 - Replies, reply-all and forwards offer **Keep formatting** for HTML mail:
   write a branded Markdown or plain-text note above the read-only original,
   retaining its layout, styling and embedded images. **Text quote** remains

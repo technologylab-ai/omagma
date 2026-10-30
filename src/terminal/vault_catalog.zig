@@ -255,6 +255,7 @@ pub const Owner = struct {
         const handle = self.identity orelse return error.VaultIdentityRequired;
         var reader = try self.directory.reader(handle);
         defer reader.close();
+        if (reader.initial.size > try t.sealedSize(t.max_record_bytes)) return error.VaultRecordTooLarge;
         const size = try reader.verify(self.key, identityRecord(handle), self.workspace);
         if (size > max_identity_bytes) return error.VaultIdentityTooLarge;
         const bytes = try a.alloc(u8, size);
@@ -455,6 +456,7 @@ pub const Account = struct {
     }
     pub fn write(self: *Account, kind: t.RecordKind, handle: storage.Handle, bytes: []const u8, replace: bool) !void {
         try self.requireSharedWorkspace();
+        _ = try t.sealedSize(bytes.len);
         var source: SliceSource = .{ .bytes = bytes };
         try self.directory.seal(self.owner.key, self.record(kind, handle), bytes.len, source.source(), self.owner.workspace, replace);
     }

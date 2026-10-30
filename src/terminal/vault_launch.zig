@@ -128,7 +128,7 @@ test "vault launch: owned socket permissions become ready before the first statu
             try std.testing.expectEqual(@as(usize, 0), frame.body.len);
             _ = requests.fetchAdd(1, .release);
             var bytes: [128]u8 = undefined;
-            const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\",\"executionProtocol\":2}}}}", .{std.fmt.bytesToHex(id, .lower)});
+            const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\",\"executionProtocol\":3}}}}", .{std.fmt.bytesToHex(id, .lower)});
             try transport.writeFrame(peer_io, stream, .response, response, transport.response_limit);
         }
     };
@@ -196,7 +196,7 @@ test "vault protocol: startup requires compatible generation while control owner
                 defer frame.deinit(test_allocator.allocator);
                 try std.testing.expectEqual(transport.Kind.status, frame.kind);
                 var bytes: [160]u8 = undefined;
-                const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"{s}}}}}", .{ std.fmt.bytesToHex(id, .lower), if (index == 4) ",\"executionProtocol\":2" else "" });
+                const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"{s}}}}}", .{ std.fmt.bytesToHex(id, .lower), if (index == 4) ",\"executionProtocol\":3" else "" });
                 try transport.writeFrame(std.testing.io, stream, .response, response, transport.response_limit);
             }
         }

@@ -10,6 +10,10 @@ pub const tag_bytes = 16;
 pub const salt_bytes = 32;
 pub const chunk_bytes = 64 * 1024;
 pub const max_record_bytes = 64 * 1024 * 1024;
+pub const max_stream_record_bytes = @import("types.zig").Limits.disk_hard;
+pub fn recordLimit(kind: RecordKind) usize {
+    return if (kind == .attachment) max_stream_record_bytes else max_record_bytes;
+}
 pub const max_account_bytes = 254;
 pub const max_record_id_bytes = 1024;
 pub const max_password_bytes = 1024;
@@ -130,6 +134,10 @@ pub const StreamWorkspace = struct {
 
 pub fn sealedSize(plaintext_bytes: usize) !usize {
     if (plaintext_bytes > max_record_bytes) return error.VaultRecordTooLarge;
+    return sealedStreamSize(plaintext_bytes);
+}
+pub fn sealedStreamSize(plaintext_bytes: usize) !usize {
+    if (plaintext_bytes > max_stream_record_bytes) return error.VaultRecordTooLarge;
     const chunks = (plaintext_bytes + chunk_bytes - 1) / chunk_bytes;
     return record_header_bytes + plaintext_bytes + (chunks + 1) * tag_bytes;
 }

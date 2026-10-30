@@ -11,4 +11,7 @@ test {
     std.testing.refAllDecls(@import("terminal/composer_hints.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));
     std.testing.refAllDecls(@import("terminal/invitation_receipt.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_files.zig"));
+    std.testing.refAllDecls(@import("terminal/delivery_view.zig"));
+    std.testing.refAllDecls(@import("terminal/send_drive.zig"));
 }

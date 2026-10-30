@@ -6,12 +6,16 @@ pub const Mailbox = struct {
     phase: std.atomic.Value(u8) = .init(0),
     completed: std.atomic.Value(usize) = .init(0),
     total: std.atomic.Value(usize) = .init(0),
+    file_index: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+    file_count: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
     wake_pending: std.atomic.Value(bool) = .init(false),
     pub fn publish(self: *Mailbox, update: t.FetchProgress) bool {
         _ = self.sequence.fetchAdd(1, .acq_rel);
         self.total.store(update.total, .release);
         self.completed.store(@min(update.completed, update.total), .release);
         self.phase.store(@backingInt(update.phase), .release);
+        self.file_index.store(update.fileIndex orelse std.math.maxInt(usize), .release);
+        self.file_count.store(update.fileCount orelse std.math.maxInt(usize), .release);
         _ = self.sequence.fetchAdd(1, .release);
         return !self.wake_pending.swap(true, .acq_rel);
     }
@@ -22,7 +26,9 @@ pub const Mailbox = struct {
             const phase = self.phase.load(.acquire);
             const total = self.total.load(.acquire);
             const completed = self.completed.load(.acquire);
-            if (before == self.sequence.load(.acquire)) return .{ .phase = @fromBackingInt(@intCast(phase)), .completed = @min(completed, total), .total = total };
+            const index = self.file_index.load(.acquire);
+            const count = self.file_count.load(.acquire);
+            if (before == self.sequence.load(.acquire)) return .{ .phase = @fromBackingInt(@intCast(phase)), .completed = @min(completed, total), .total = total, .fileIndex = if (index == std.math.maxInt(usize)) null else index, .fileCount = if (count == std.math.maxInt(usize)) null else count };
         }
     }
     pub fn acknowledged(self: *Mailbox) void {

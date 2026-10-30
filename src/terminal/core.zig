@@ -423,7 +423,7 @@ pub const Session = struct {
             const registry = if (!s.options.fixtures) try @import("auth.zig").loadConfigured(s.io, a, &s.config, if (s.config.credential_store == .vault) "" else try j.required(req, "grantFile")) else @import("auth.zig").Registry{};
             for (s.config.accounts[0..s.config.count]) |*account| {
                 const grant = @import("auth.zig").find(&registry, account.address.slice());
-                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and !s.scenario("readonly")) (if (s.scenario("calendar-readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-freebusy" } else &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy" }) else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
+                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and s.fixtureDriveEnabled()) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy", "drive-upload" } else if (s.options.fixtures and !s.scenario("readonly")) (if (s.scenario("calendar-readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-freebusy" } else &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy" }) else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
             }
             return j.value(a, .{ .accounts = list.items });
         }
@@ -474,9 +474,31 @@ pub const Session = struct {
             return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, request });
         }
         if (std.mem.eql(u8, cmd, "mail.refresh")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, req });
-        var store = try s.openStore(a, address, std.mem.eql(u8, cmd, "draft.measure") or (std.mem.eql(u8, cmd, "invitation.inspect") and try j.boolean(req, "cacheOnly", false)));
+        var store = try s.openStore(a, address, std.mem.eql(u8, cmd, "draft.measure") or std.mem.eql(u8, cmd, "draft.selection-plan") or std.mem.eql(u8, cmd, "draft.delivery-plan") or (std.mem.eql(u8, cmd, "invitation.inspect") and try j.boolean(req, "cacheOnly", false)));
         defer store.close();
-        if (std.mem.eql(u8, cmd, "attachment.import")) return j.value(a, try @import("attachment_blob.zig").importFile(&store, try j.required(req, "path"), j.text(req, "mimeType")));
+        if (std.mem.eql(u8, cmd, "attachment.import")) {
+            const delivery: ?t.AttachmentDelivery = if (j.get(req, "delivery")) |value| std.meta.stringToEnum(t.AttachmentDelivery, try j.string(value)) orelse return error.InvalidAttachmentDelivery else null;
+            return j.value(a, try @import("attachment_blob.zig").importDelivery(&store, try j.required(req, "path"), j.text(req, "mimeType"), delivery));
+        }
+        if (std.mem.eql(u8, cmd, "draft.delivery-plan")) {
+            const source = if (j.get(req, "draft")) |value| try decodeDraft(a, value) else try store.draft(try j.required(req, "draftId"));
+            try validateDraft(source, false);
+            return s.planCapabilities(a, req, try @import("native_delivery.zig").valueWithStore(a, &store, source, try @import("native_delivery.zig").preview(a, &store, source), j.text(req, "operationId")));
+        }
+        if (std.mem.eql(u8, cmd, "draft.selection-plan")) {
+            const input = j.get(req, "draft") orelse return error.MissingField;
+            var draft = if (j.get(input, "recoveryFields") != null and j.get(input, "recoveryFields").? != .null) try @import("draft_codec.zig").decodeRecoveryDraftWithScratch(a, s.allocator, input) else try decodeDraft(a, input);
+            if (draft.recoveryFields) |fields| {
+                draft.to = @import("draft_codec.zig").decodeAddresses(a, .{ .string = fields[0] }) catch &.{};
+                draft.cc = @import("draft_codec.zig").decodeAddresses(a, .{ .string = fields[1] }) catch &.{};
+                draft.bcc = @import("draft_codec.zig").decodeAddresses(a, .{ .string = fields[2] }) catch &.{};
+            }
+            const paths = try j.decode([]const []const u8, a, j.get(req, "paths") orelse return error.MissingField);
+            if (paths.len == 0 or paths.len > t.Limits.attachments -| draft.attachments.len) return error.TooManyAttachments;
+            const method = std.meta.stringToEnum(t.AttachmentDelivery, try j.required(req, "delivery")) orelse return error.InvalidAttachmentDelivery;
+            const plan = try @import("attachment_dry_run.zig").selection(s.io, a, address, draft, paths, method);
+            return s.planCapabilities(a, req, plan);
+        }
         if (std.mem.eql(u8, cmd, "attachment.discard")) {
             try @import("attachment_blob.zig").discard(&store, try j.required(req, "blobId"));
             return j.value(a, .{ .discarded = true });
@@ -546,7 +568,16 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "operation.read")) {
             const operation_id = try j.required(req, "operationId");
-            if (try store.findOperation(a, operation_id)) |operation| return j.value(a, operation);
+            if (try store.findOperation(a, operation_id)) |operation| {
+                var result = try j.value(a, operation);
+                if (operation.driveFiles != null) return result;
+                const book = @import("drive_prepare.zig").Book.load(a, &store) catch return result;
+                const receipts = book.receipts(a, operation_id) catch return result;
+                if (receipts.array.items.len != 0) try result.object.put(a, "driveFiles", receipts);
+                return result;
+            }
+            for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) return preparationReceipt(a, &store, operation_id, source.draftId, "InterruptedPreparation");
+            for (store.state.sendQueue) |entry| if (entry.preparationId != null and std.mem.eql(u8, entry.operationId, operation_id)) return preparationReceipt(a, &store, operation_id, entry.draftId, if (entry.errorCode.len != 0) entry.errorCode else "InterruptedPreparation");
             return error.OperationNotFound;
         }
         if (std.mem.eql(u8, cmd, "draft.list")) {
@@ -587,9 +618,25 @@ pub const Session = struct {
             const draft = if (j.get(req, "draft")) |input| try decodeDraft(a, input) else try store.draft(try j.required(req, "draftId"));
             try validateDraft(draft, false);
             const prepared = try markdown_mail.prepare(a, draft);
-            return j.value(a, .{ .bodyFormat = draft.bodyFormat, .bodyText = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText, .plainText = prepared.plain, .bodyHtml = prepared.html });
+            var result = try j.value(a, .{ .bodyFormat = draft.bodyFormat, .bodyText = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText, .plainText = prepared.plain, .bodyHtml = prepared.html });
+            if (@import("native_delivery.zig").requested(draft)) {
+                const plan = try s.planCapabilities(a, req, try @import("native_delivery.zig").valueWithStore(a, &store, draft, try @import("native_delivery.zig").preview(a, &store, draft), j.text(req, "operationId")));
+                try result.object.put(a, "attachmentPlan", plan);
+            }
+            return result;
         }
-        if (std.mem.eql(u8, cmd, "draft.measure")) return @import("draft_measure_commands.zig").run(a, &store, req);
+        if (std.mem.eql(u8, cmd, "draft.measure")) {
+            var result = try @import("draft_measure_commands.zig").run(a, &store, req);
+            if (j.get(result, "attachmentPlan")) |plan| {
+                const decorated = try s.planCapabilities(a, req, plan);
+                try result.object.put(a, "attachmentPlan", decorated);
+                if ((j.get(decorated, "blockers") orelse return error.InvalidAttachmentDelivery).array.items.len != 0) {
+                    try result.object.put(a, "sendable", .{ .bool = false });
+                    if (j.get(result, "admissionError") == null or j.get(result, "admissionError").? == .null) try result.object.put(a, "admissionError", .{ .string = "AttachmentPlanBlocked" });
+                }
+            }
+            return result;
+        }
         if (std.mem.eql(u8, cmd, "draft.recovery-save")) {
             const acknowledgement_only = try j.boolean(req, "acknowledgementOnly", false);
             const previous_id = j.text(req, "draftId");
@@ -1251,6 +1298,7 @@ pub const Session = struct {
         if (deleting and color != null) return error.InvalidLabelColor;
         const operation_id = try j.required(req, "operationId");
         if (operation_id.len > 256) return error.InvalidOperationId;
+        for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) return error.OperationConflict;
         try recipients.validateHeader(operation_id);
         const id = if (create) "" else try j.required(req, "labelId");
         const name = if (deleting or coloring) "" else try j.required(req, "name");
@@ -1277,6 +1325,7 @@ pub const Session = struct {
         _ = try s.loadLabels(a, store, req, false);
         // The live list temporarily releases the store; another client may
         // have journaled this identity while the GET was in progress.
+        for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) return error.OperationConflict;
         if (try store.findOperation(a, operation_id)) |operation| {
             if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
             return labelReceipt(a, operation);
@@ -2268,12 +2317,34 @@ pub const Session = struct {
     fn scenario(s: *Session, name: []const u8) bool {
         return std.mem.eql(u8, s.options.fixture_scenario, name);
     }
+    fn planCapabilities(s: *Session, a: std.mem.Allocator, req: Value, input: Value) !Value {
+        var plan = try j.copyObject(a, input);
+        if (try j.integer(plan, "driveFileCount", 0) == 0) return plan;
+        var connected = true;
+        s.capability(a, j.text(req, "account"), req, "drive-upload") catch |err| switch (err) {
+            error.PermissionDenied, error.NotConnected => connected = false,
+            else => return err,
+        };
+        try plan.object.put(a, "driveCapability", .{ .string = if (connected) "connected" else "not_connected" });
+        if (!connected) {
+            var blockers: Value = .{ .array = .init(a) };
+            if (j.get(plan, "blockers")) |existing| try blockers.array.appendSlice(existing.array.items);
+            try blockers.array.append(try j.value(a, .{ .code = "DriveNotConnected", .message = "Drive isn't connected for this account." }));
+            try plan.object.put(a, "blockers", blockers);
+        }
+        return plan;
+    }
+    fn fixtureDriveEnabled(s: *Session) bool {
+        for ([_][]const u8{ "drive-enabled", "drive-unknown-send", "drive-rejected-send", "drive-upload-interrupted", "drive-share-interrupted", "drive-progress", "drive-submit-progress", "drive-share-progress", "drive-auth-gap" }) |name| if (s.scenario(name)) return true;
+        return false;
+    }
     fn capability(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value, name: []const u8) !void {
         if (try j.boolean(req, "barGrantOnly", false) or try j.boolean(req, "auto", false)) {
             if (!std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
             return;
         }
         if (s.options.fixtures) {
+            if (std.mem.eql(u8, name, "drive-upload") and !s.fixtureDriveEnabled()) return error.PermissionDenied;
             if (s.scenario("readonly") and !std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
             return;
         }
@@ -3221,7 +3292,7 @@ pub const Session = struct {
         if (!found and try @import("operation_history.zig").source(store, store.allocator, draft_id) == null) return error.DraftNotFound;
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, draft_id) and std.mem.eql(u8, operation.outcome, "unknown")) return error.UnknownOutcome;
         for (store.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, draft_id)) switch (entry.state) {
-            .queued => return error.DraftQueued,
+            .queued, .preparing => return error.DraftQueued,
             .submitting, .unknown => return error.UnknownOutcome,
             else => {},
         };
@@ -3230,10 +3301,32 @@ pub const Session = struct {
             if (link.phase == .unknown) return error.GmailDraftOutcomeUnknown;
         };
     }
+    fn queuedReadReceipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.QueuedSend) !Value {
+        var book: ?@import("drive_prepare.zig").Book = null;
+        return queuedReceiptWithBook(a, store, entry, &book);
+    }
+    fn queuedReceiptWithBook(a: std.mem.Allocator, store: *storage.Store, entry: storage.QueuedSend, book: *?@import("drive_prepare.zig").Book) !Value {
+        var result = try send_queue.receipt(a, store, entry);
+        if (entry.preparationId != null) {
+            if (entry.state == .queued and entry.resumeRequired and entry.errorCode.len != 0) {
+                if (book.* == null) book.* = try @import("drive_prepare.zig").Book.load(a, store);
+                const preparation = try preparationReceiptFromBook(a, store, &book.*.?, entry.operationId, entry.draftId, entry.errorCode);
+                try result.object.put(a, "preparation", preparation);
+            } else {
+                const operation = try store.findOperation(a, entry.operationId);
+                const receipts = if (operation != null and operation.?.driveFiles != null) try j.value(a, operation.?.driveFiles.?) else fallback: {
+                    if (book.* == null) book.* = @import("drive_prepare.zig").Book.load(a, store) catch return result;
+                    break :fallback book.*.?.receipts(a, entry.operationId) catch return result;
+                };
+                try result.object.put(a, "driveFiles", receipts);
+            }
+        }
+        return result;
+    }
     fn queuedMutationReceipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.QueuedSend) !Value {
-        const result = send_queue.receipt(a, store, entry) catch |err| {
-            // A send may already exist for these durable states. Keep that
-            // uncertainty through the second, queue-level receipt encoder.
+        const result = queuedReadReceipt(a, store, entry) catch |err| {
+            // A mutation may already have dispatched for these durable states.
+            // Pure queue reads retain their ordinary allocation errors.
             if (err == error.OutOfMemory) switch (entry.state) {
                 .submitting, .unknown, .applied => return error.UnknownOutcome,
                 else => {},
@@ -3246,9 +3339,12 @@ pub const Session = struct {
     fn queuedSend(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
         const cmd = j.text(req, "cmd");
         if (std.mem.eql(u8, cmd, "queue.list")) {
-            var entries: std.ArrayList(Value) = .empty;
-            for (store.state.sendQueue) |entry| try entries.append(a, try send_queue.receipt(a, store, entry));
-            return j.value(a, .{ .queue = entries.items });
+            var book: ?@import("drive_prepare.zig").Book = null;
+            var entries: Value = .{ .array = .init(a) };
+            for (store.state.sendQueue) |entry| try entries.array.append(try queuedReceiptWithBook(a, store, entry, &book));
+            var result = j.object(a);
+            try result.object.put(a, "queue", entries);
+            return result;
         }
         if (std.mem.eql(u8, cmd, "draft.queue")) {
             try s.capability(a, store.state.account, req, "mail-send");
@@ -3278,8 +3374,14 @@ pub const Session = struct {
             return send_queue.receipt(a, store, entry.*);
         }
         const id = try j.required(req, "queueId");
-        if (std.mem.eql(u8, cmd, "queue.read")) return send_queue.receipt(a, store, (try send_queue.find(store, id)).*);
-        if (std.mem.eql(u8, cmd, "queue.cancel")) return send_queue.receipt(a, store, (try send_queue.cancel(store, id)).*);
+        if (std.mem.eql(u8, cmd, "queue.read")) return queuedReadReceipt(a, store, (try send_queue.find(store, id)).*);
+        if (std.mem.eql(u8, cmd, "queue.cancel")) {
+            const entry = (try send_queue.cancel(store, id)).*;
+            try @import("drive_retirement.zig").source(store, entry.draftId, null, entry.operationId);
+            try @import("drive_retirement.zig").requireOperationRetired(store, entry.operationId);
+            try store.compactHistory();
+            return send_queue.receipt(a, store, entry);
+        }
         if (std.mem.eql(u8, cmd, "queue.resume")) {
             try s.capability(a, store.state.account, req, "mail-send");
             try requireReviewedDigest(req, (try send_queue.find(store, id)).hash);
@@ -3324,11 +3426,21 @@ pub const Session = struct {
         try request.object.put(a, "operationId", .{ .string = entry.operationId });
         // The durable claim precedes any send code. After a crash, submitting
         // remains fenced even if the operation journal was not written yet.
+        var preparation_id: ?[]const u8 = null;
+        if (@import("native_delivery.zig").requested(draft)) {
+            var nonce: [32]u8 = undefined;
+            try s.io.randomSecure(&nonce);
+            preparation_id = try a.dupe(u8, &std.fmt.bytesToHex(nonce, .lower));
+        }
+        entry.preparationId = preparation_id;
         entry.resumeRequired = false;
-        entry.state = .submitting;
+        entry.state = if (@import("native_delivery.zig").requested(draft)) .preparing else .submitting;
         try store.save();
         const sent = s.send(a, store, request, draft, null, true) catch |err| {
+            if (!store.lockHeld) try s.reopenBody(a, store);
             entry = try send_queue.find(store, id);
+            if (entry.state == .canceled) return queuedMutationReceipt(a, store, entry.*);
+            if (preparation_id) |claim| if (entry.preparationId == null or !std.mem.eql(u8, claim, entry.preparationId.?)) return queuedMutationReceipt(a, store, entry.*);
             entry.state = .rejected;
             entry.errorCode = @errorName(err);
             for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, entry.operationId)) {
@@ -3339,6 +3451,14 @@ pub const Session = struct {
             return queuedMutationReceipt(a, store, entry.*);
         };
         entry = try send_queue.find(store, id);
+        if (preparation_id) |claim| if (entry.preparationId == null or !std.mem.eql(u8, claim, entry.preparationId.?)) return queuedMutationReceipt(a, store, entry.*);
+        if (std.mem.eql(u8, j.text(sent, "outcome"), "preparationStopped")) {
+            entry.state = .queued;
+            entry.resumeRequired = true;
+            entry.errorCode = j.text(sent, "errorCode");
+            try store.save();
+            return queuedMutationReceipt(a, store, entry.*);
+        }
         entry.state = if (std.mem.eql(u8, j.text(sent, "outcome"), "applied")) .applied else if (std.mem.eql(u8, j.text(sent, "outcome"), "rejected")) .rejected else .unknown;
         entry.errorCode = j.text(sent, "errorCode");
         store.save() catch return error.UnknownOutcome;
@@ -3367,7 +3487,40 @@ pub const Session = struct {
         };
         return error.UnknownOutcome;
     }
+    fn preparationReceipt(a: std.mem.Allocator, store: *storage.Store, operation_id: []const u8, draft_id: []const u8, error_code: []const u8) !Value {
+        const book = try @import("drive_prepare.zig").Book.load(a, store);
+        return preparationReceiptFromBook(a, store, &book, operation_id, draft_id, error_code);
+    }
+    fn preparationReceiptFromBook(a: std.mem.Allocator, store: *storage.Store, book: *const @import("drive_prepare.zig").Book, operation_id: []const u8, draft_id: []const u8, error_code: []const u8) !Value {
+        var source_id = draft_id;
+        for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) {
+            source_id = source.draftId;
+            break;
+        };
+        var result = try j.value(a, .{ .outcome = "preparationStopped", .status = "stopped", .operationId = operation_id, .draftId = source_id, .errorCode = error_code, .canRetryPreparation = @import("drive_prepare.zig").retryablePreparation(error_code) });
+        try result.object.put(a, "driveFiles", try book.receipts(a, operation_id));
+        return result;
+    }
     fn send(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8, claimed_queue: bool) !Value {
+        const result = s.sendInner(a, store, req, draft, calendar, claimed_queue) catch |err| {
+            if (!@import("native_delivery.zig").requested(draft) or err == error.OperationConflict or err == error.UnknownOutcome or err == error.ReviewedDraftChanged) return err;
+            if (!store.lockHeld) s.reopenBody(a, store) catch return err;
+            const operation_id = j.text(req, "operationId");
+            if (operation_id.len == 0) return err;
+            if ((store.findOperation(a, operation_id) catch return error.UnknownOutcome) != null) return err;
+            var has_source = draft.id.len != 0;
+            for (store.state.driveSources) |source| has_source = has_source or std.mem.eql(u8, source.operationId, operation_id);
+            if (!has_source) return err;
+            return preparationReceipt(a, store, operation_id, draft.id, @errorName(err)) catch return err;
+        };
+        if (!@import("native_delivery.zig").requested(draft) or j.get(result, "driveFiles") != null) return result;
+        var augmented = result;
+        const book = @import("drive_prepare.zig").Book.load(a, store) catch return result;
+        const receipts = book.receipts(a, j.text(req, "operationId")) catch return result;
+        augmented.object.put(a, "driveFiles", receipts) catch return result;
+        return augmented;
+    }
+    fn sendInner(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8, claimed_queue: bool) !Value {
         const previous_protected = store.history_protected_draft;
         store.history_protected_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft.id else "";
         defer store.history_protected_draft = previous_protected;
@@ -3377,6 +3530,8 @@ pub const Session = struct {
         if (operation_id.len > 256) return error.InvalidOperationId;
         try recipients.validateHeader(operation_id);
         const digest = try operationDigest(a, draft, store.state.account, calendar);
+        // Preparation reserves this account-wide identity before Gmail's journal.
+        for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id) and !std.mem.eql(u8, source.hash, &digest)) return error.OperationConflict;
         try requireReviewedDigest(req, &digest);
         try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
         for (store.state.sendQueue) |entry| {
@@ -3385,7 +3540,7 @@ pub const Session = struct {
             const same_draft = draft.id.len != 0 and std.mem.eql(u8, entry.draftId, draft.id);
             if (same_operation and !same_content) return error.OperationConflict;
             if (!same_operation and !same_content and !same_draft) continue;
-            if (entry.state == .queued) return error.DraftQueued;
+            if (entry.state == .queued or (entry.state == .preparing and !claimed_queue)) return error.DraftQueued;
             const claimed = claimed_queue and same_operation and same_content and same_draft and std.mem.eql(u8, entry.queueId, j.text(req, "queueId"));
             if (entry.state == .unknown or (entry.state == .submitting and !claimed)) return error.UnknownOutcome;
         }
@@ -3397,10 +3552,91 @@ pub const Session = struct {
         if (draft.id.len != 0 and try @import("operation_history.zig").immutableSource(store, draft.id)) return error.ArchivedDraftReadOnly;
         try store.compactHistory();
         if (store.state.operations.len >= 1000) return error.OperationJournalFull;
-        const prepared = try markdown_mail.prepare(a, draft);
+        var delivery_plan: ?@import("attachment_delivery.zig").Plan = null;
+        var delivery_ids: [@import("attachment_delivery.zig").max_drive_files][]const u8 = undefined;
+        var delivery_slots: [@import("attachment_delivery.zig").max_drive_files]usize = undefined;
+        var drive_book: ?@import("drive_prepare.zig").Book = null;
+        var drive_network: @import("drive_prepare.zig").Network = undefined;
+        var drive_network_active = false;
+        var preparation_deadline: ?std.Io.Clock.Timestamp = null;
+        var submission_deadline: ?std.Io.Clock.Timestamp = null;
+        defer if (drive_network_active) drive_network.close();
+        var saved_delivery_draft: ?t.Draft = null;
+        var shared_with: []const []const u8 = &.{};
+        if (@import("native_delivery.zig").requested(draft)) {
+            if (calendar != null) return error.UnsupportedAttachmentDelivery;
+            delivery_plan = try @import("native_delivery.zig").resolve(a, store, draft);
+            if (delivery_plan.?.drive_count != 0) {
+                s.capability(a, store.state.account, req, "drive-upload") catch |err| return if (err == error.PermissionDenied) error.DriveNotConnected else err;
+                shared_with = try @import("drive_prepare.zig").recipientSet(a, draft);
+                preparation_deadline = if (s.progress_sink != null and s.progress_sink.?.execution_budget != null)
+                    try s.progress_sink.?.execution_budget.?.advance(s.io, .preparation)
+                else
+                    .fromNow(s.io, @import("../platform.zig").seconds(@import("send_budget.zig").preparation_seconds));
+                saved_delivery_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putPreparedDraft(draft, operation_id, &digest);
+                if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) try store.recordPreparedDraft(draft.id, operation_id, &digest);
+                for (delivery_plan.?.items) |item| if (item.delivery == .drive) try @import("attachment_blob.zig").verify(store, draft.attachments[item.index]);
+                const expected_claim = if (claimed_queue) (try send_queue.find(store, try j.required(req, "queueId"))).preparationId else null;
+                const fixture_auth_gap = s.options.fixtures and s.scenario("drive-auth-gap");
+                if (!s.options.fixtures or fixture_auth_gap) {
+                    if (store.vault != null or fixture_auth_gap) store.release();
+                    if (fixture_auth_gap) {
+                        try s.fixtureProgressGate(a, try s.fixture(a, store.state.account), .drive_reserving, 0);
+                    } else {
+                        try drive_network.init(s.io, a, &s.config, store.state.account, req, preparation_deadline.?);
+                        drive_network_active = true;
+                        try @import("gmail.zig").preflightSender(a, store.state.account, drive_network.session.transport(), draft);
+                    }
+                    if (!store.lockHeld) {
+                        try s.reopenBody(a, store);
+                        if (try store.findOperation(a, operation_id)) |old| {
+                            if (!std.mem.eql(u8, old.hash, &digest)) return error.OperationConflict;
+                            return settledMutationReceipt(a, store, old, !claimed_queue);
+                        }
+                        try s.capability(a, store.state.account, req, "mail-send");
+                        try s.capability(a, store.state.account, req, "drive-upload");
+                        if (claimed_queue) {
+                            const current_queue = try send_queue.find(store, try j.required(req, "queueId"));
+                            if (expected_claim == null or current_queue.preparationId == null or !std.mem.eql(u8, expected_claim.?, current_queue.preparationId.?) or (current_queue.state != .queued and current_queue.state != .preparing)) return error.SendCanceledBeforeSubmission;
+                        }
+                        for (store.state.operations) |old| if (std.mem.eql(u8, old.outcome, "unknown") and (std.mem.eql(u8, old.hash, &digest) or std.mem.eql(u8, old.draftId, saved_delivery_draft.?.id))) return settledMutationReceipt(a, store, old, !claimed_queue);
+                        for (store.state.sendQueue) |queued| {
+                            const same_operation = std.mem.eql(u8, queued.operationId, operation_id);
+                            if (!std.mem.eql(u8, queued.hash, &digest) and !std.mem.eql(u8, queued.draftId, saved_delivery_draft.?.id) and !same_operation) continue;
+                            const own_claim = claimed_queue and same_operation and std.mem.eql(u8, queued.queueId, j.text(req, "queueId"));
+                            if (!own_claim and (queued.state == .queued or queued.state == .preparing)) return error.DraftQueued;
+                            if (queued.state == .unknown or queued.state == .submitting) return error.UnknownOutcome;
+                        }
+                        if (try @import("operation_history.zig").immutableSource(store, saved_delivery_draft.?.id)) return error.ArchivedDraftReadOnly;
+                        try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
+                        const current_source = try store.draft(saved_delivery_draft.?.id);
+                        const current_digest = try operationDigest(a, current_source, store.state.account, null);
+                        if (!std.mem.eql(u8, &digest, &current_digest)) return error.ReviewedDraftChanged;
+                    }
+                }
+                drive_book = try @import("drive_prepare.zig").Book.load(a, store);
+                drive_book.?.progress_sink = s.progress_sink;
+                drive_book.?.progress_files = delivery_plan.?.drive_count;
+                if (s.progress_sink) |sink| sink.report(.{ .phase = .drive_reserving, .completed = 0, .total = delivery_plan.?.drive_count });
+                try s.io.checkCancel();
+                var n: usize = 0;
+                for (delivery_plan.?.items) |item| if (item.delivery == .drive) {
+                    delivery_slots[n] = if (s.options.fixtures) try drive_book.?.reserveFixture(operation_id, &digest, item.index, draft.attachments[item.index], shared_with) else try drive_book.?.reserve(drive_network.transport(), operation_id, &digest, item.index, draft.attachments[item.index], shared_with);
+                    delivery_ids[n] = drive_book.?.ledger.entries[delivery_slots[n]].fileId;
+                    n += 1;
+                    if (s.progress_sink) |sink| sink.report(.{ .phase = .drive_reserving, .completed = n, .total = delivery_plan.?.drive_count });
+                    try s.io.checkCancel();
+                };
+                for (delivery_ids[0..n], 0..) |file_id, selected| {
+                    delivery_slots[selected] = try drive_book.?.slotFor(file_id);
+                }
+            }
+        }
+        const materialized = if (delivery_plan) |plan| try @import("native_delivery.zig").materialize(a, draft, plan.items, delivery_ids[0..plan.drive_count]) else @import("native_delivery.zig").Materialized{ .draft = draft, .prepared = try markdown_mail.prepare(a, draft) };
+        const prepared = materialized.prepared;
         // The RSVP's verified attendee may be a send-as alias. Keep this wire
         // identity out of the canonical draft/fingerprint used by old receipts.
-        var wire_draft = draft;
+        var wire_draft = materialized.draft;
         if (calendar) |ics| {
             var reply: invitation.Invitation = .{};
             try invitation.parseReply(ics, store.state.account, try cachedAliases(a, store), &reply);
@@ -3432,11 +3668,11 @@ pub const Session = struct {
             // Production sends always consume this one validated MIME spool.
             // Rebuilding the draft in the provider retained two renders plus
             // MIME/base64/JSON copies inside the same operation arena.
-            if (!s.options.fixtures or @import("send_spool.zig").required(draft.attachments) or @import("send_spool.zig").required(prepared.resources)) {
-                spool = try @import("send_spool.zig").create(store, compose, draft.attachments, prepared.resources);
+            if (!s.options.fixtures or @import("send_spool.zig").required(wire_draft.attachments) or @import("send_spool.zig").required(prepared.resources)) {
+                spool = try @import("send_spool.zig").create(store, compose, wire_draft.attachments, prepared.resources);
             } else {
                 compose.related = try mime.composeAttachments(prepared.resources, a);
-                compose.attachments = try mime.composeAttachments(draft.attachments, a);
+                compose.attachments = try mime.composeAttachments(wire_draft.attachments, a);
                 // MIME base64 and the JSON transport's outer base64 both grow
                 // inline files. Measure the actual wire before choosing the
                 // transport, including preserved images and generated HTML.
@@ -3446,7 +3682,7 @@ pub const Session = struct {
                 try mime.encodeTo(compose, &counting.writer);
                 const raw_size: usize = @intCast(counting.fullCount());
                 if (raw_size > mime.max_raw_bytes or std.base64.url_safe_no_pad.Encoder.calcSize(raw_size) > t.Limits.request_bytes - 1024) {
-                    spool = try @import("send_spool.zig").create(store, compose, draft.attachments, prepared.resources);
+                    spool = try @import("send_spool.zig").create(store, compose, wire_draft.attachments, prepared.resources);
                 } else {
                     const wire = try a.alloc(u8, raw_size);
                     const raw = mime.encode(compose, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
@@ -3474,13 +3710,67 @@ pub const Session = struct {
             const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
             fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
         };
+        // The exact MIME spool already exists and fits before any Drive
+        // upload/sharing. All files finish uploading before sharing starts.
+        if (delivery_plan) |plan| if (plan.drive_count != 0 and !s.options.fixtures) {
+            var n: usize = 0;
+            for (plan.items) |item| if (item.delivery == .drive) {
+                try drive_book.?.upload(drive_network.transport(), delivery_slots[n], draft.attachments[item.index]);
+                n += 1;
+            };
+            for (delivery_slots[0..n]) |slot| try drive_book.?.share(drive_network.transport(), slot, shared_with);
+            for (delivery_slots[0..n]) |slot| try drive_book.?.verifyShared(drive_network.transport(), slot, shared_with);
+            drive_network.close();
+            drive_network_active = false;
+        };
+        if (delivery_plan) |plan| if (plan.drive_count != 0 and s.options.fixtures) try drive_book.?.completeFixture(delivery_slots[0..plan.drive_count], shared_with, s.scenario("drive-upload-interrupted"), s.scenario("drive-share-interrupted"), s.scenario("drive-progress"));
+        if (s.options.fixtures and s.scenario("drive-share-progress")) {
+            if (s.progress_sink) |sink| sink.report(.{ .phase = .drive_sharing, .completed = shared_with.len, .total = shared_with.len, .fileIndex = 0, .fileCount = delivery_plan.?.drive_count });
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10000) }).sleep(s.io);
+        }
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
-        const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
+        const saved_draft = saved_delivery_draft orelse if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
         try operations.appendSlice(a, store.state.operations);
         try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "", .calendarSync = if (calendar != null and !std.mem.eql(u8, j.text(req, "status"), "declined") and try j.boolean(req, "rsvpOnly", false)) .{ .errorCode = "RsvpOnlyRequested" } else null });
+        if (delivery_plan) |plan| if (plan.drive_count != 0) {
+            if (s.progress_sink) |sink| {
+                sink.report(.{ .phase = .mail_submitting, .completed = 0, .total = 1 });
+                try sink.beforeMail();
+            }
+            if (preparation_deadline.?.durationFromNow(s.io).raw.toNanoseconds() <= 0) return error.Timeout;
+            submission_deadline = if (s.progress_sink != null and s.progress_sink.?.execution_budget != null)
+                try s.progress_sink.?.execution_budget.?.advance(s.io, .gmail)
+            else
+                .fromNow(s.io, @import("../platform.zig").seconds(@import("send_budget.zig").gmail_seconds + @import("send_budget.zig").commit_margin_seconds));
+        };
+        try s.io.checkCancel();
+        if (drive_book) |*book| operations.items[operations.items.len - 1].driveFiles = try book.receiptFiles(a, operation_id);
         store.state.operations = operations.items;
+        if (claimed_queue) {
+            const queued = try send_queue.find(store, try j.required(req, "queueId"));
+            queued.state = .submitting;
+        }
         try store.save();
         var operation = &store.state.operations[store.state.operations.len - 1];
+        if (s.options.fixtures and s.scenario("drive-submit-progress")) {
+            if (s.progress_sink) |sink| sink.report(.{ .phase = .mail_submitting, .completed = 1, .total = 1 });
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10000) }).sleep(s.io);
+        }
+        if (submission_deadline) |deadline| {
+            const available = if (s.progress_sink != null and s.progress_sink.?.execution_budget != null)
+                s.progress_sink.?.execution_budget.?.submissionAvailable(s.io)
+            else
+                deadline.durationFromNow(s.io).raw.toNanoseconds() >= @import("send_budget.zig").gmail_seconds * std.time.ns_per_s;
+            if (!available) {
+                // The journal exists but Gmail has not been called. Persist a
+                // definite local rejection, never dispatch on a spent reserve.
+                operation.outcome = "rejected";
+                operation.errorCode = "DriveSubmissionBudgetExpired";
+                operation.kind = "drivePreparationRetired";
+                store.save() catch return error.UnknownOutcome;
+                return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
+            }
+        }
         if (!s.options.fixtures) {
             if (store.vault != null) store.release();
             const result = @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("send_memory.zig").seconds("mail.send")), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, req, wire_draft, &spool.?, operation.rfcMessageId }) catch |err| {
@@ -3513,13 +3803,13 @@ pub const Session = struct {
             return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
         }
         store.state.fixtureCalls += 1;
-        if (s.scenario("rejected-mutation")) operation.outcome = "rejected" else if (s.scenario("unknown-send")) operation.outcome = "unknown" else {
+        if (s.scenario("rejected-mutation") or s.scenario("drive-rejected-send")) operation.outcome = "rejected" else if (s.scenario("unknown-send") or s.scenario("drive-unknown-send")) operation.outcome = "unknown" else {
             store.state.fixtureSends += 1;
             operation.messageId = try store.nextId("sent");
             operation.outcome = if (s.scenario("applied-lost")) "unknown" else "applied";
             var sent_attachments: std.ArrayList(t.Attachment) = .empty;
             try sent_attachments.appendSlice(a, prepared.resources);
-            try sent_attachments.appendSlice(a, draft.attachments);
+            try sent_attachments.appendSlice(a, wire_draft.attachments);
             // Outgoing files may have no provider retrieval ID (RAW forwards
             // are one example). A synthetic Sent message, like a provider
             // response, owns a new message-scoped identity for every part.
@@ -3912,6 +4202,93 @@ test "native mutation receipt: queued send applied DTO failure keeps its durable
 }
 test "native mutation receipt: queued send error DTO failure keeps its durable identity" {
     try testMutationReceipt(.queue_unknown);
+}
+
+test "attachment delivery: preparation expiry and spent journal reserve stop before Gmail for direct and queued sends" {
+    const Budget = @import("send_budget.zig").Budget;
+    const Spend = struct {
+        store: *storage.Store,
+        budget: *Budget,
+        spent: bool = false,
+        expire_preparation: bool,
+        fn spend(self: *@This()) void {
+            if (self.spent or self.store.state.operations.len == 0 or self.budget.phase != .gmail) return;
+            self.spent = true;
+            self.budget.mutex.lockUncancelable(std.testing.io);
+            defer self.budget.mutex.unlock(std.testing.io);
+            // Simulate a slow durable journal consuming its commit allowance.
+            self.budget.deadline_ms = Budget.now(std.testing.io) + 179000;
+        }
+        fn progress(_: *anyopaque, _: t.FetchProgress) void {}
+        fn beforeMail(ctx: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.expire_preparation) return;
+            self.budget.mutex.lockUncancelable(std.testing.io);
+            defer self.budget.mutex.unlock(std.testing.io);
+            self.budget.deadline_ms = Budget.now(std.testing.io) - 1;
+        }
+    };
+    const Sync = struct {
+        var selected: ?*Spend = null;
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            try std.testing.io.vtable.fileSync(userdata, file);
+            if (selected) |context| context.spend();
+        }
+    };
+    for ([_]bool{ false, true }) |expire_preparation| {
+        for ([_]bool{ false, true }) |queued| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+            const root = try std.fmt.allocPrint(a, "{s}/cache", .{base});
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.bin", .data = "Synthetic budget content" });
+            const options: t.Options = .{ .fixtures = true, .fixture_scenario = "drive-enabled", .cache_dir = root };
+            var env: std.process.Environ.Map = .init(a);
+            try env.put("HOME", root);
+            const session = try a.create(Session);
+            session.* = try Session.init(std.testing.io, a, &env, options);
+            defer session.deinit();
+            var store = try storage.Store.open(std.testing.io, a, root, "personal@example.com", options);
+            defer store.close();
+            const file = try @import("attachment_blob.zig").importDelivery(&store, try std.fmt.allocPrint(a, "{s}/file.bin", .{base}), "", .drive);
+            const draft = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .attachments = &.{file} }, null);
+            const digest = try operationDigest(a, draft, store.state.account, null);
+            const queue_id = if (queued) (try send_queue.stage(&store, draft.id, "spent-budget", &digest, 0, 0)).queueId else "";
+            const req = try j.value(a, .{ .cmd = if (queued) @as([]const u8, "queue.send-now") else "draft.send", .draftId = draft.id, .operationId = "spent-budget", .queueId = queue_id });
+            var budget = Budget.init(std.testing.io, 180);
+            var spend: Spend = .{ .store = &store, .budget = &budget, .expire_preparation = expire_preparation };
+            var vtable = std.testing.io.vtable.*;
+            vtable.fileSync = Sync.sync;
+            store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+            Sync.selected = &spend;
+            defer Sync.selected = null;
+            session.progress_sink = .{ .ctx = &spend, .reportFn = Spend.progress, .beforeMailFn = Spend.beforeMail, .execution_budget = &budget };
+            const value = if (queued) try session.queuedSend(a, &store, req) else try session.send(a, &store, req, draft, null, false);
+            if (expire_preparation) {
+                const stopped = if (queued) j.get(value, "preparation").? else value;
+                try std.testing.expectEqualStrings("preparationStopped", j.text(stopped, "outcome"));
+                try std.testing.expectEqualStrings("Timeout", j.text(stopped, "errorCode"));
+                try std.testing.expectEqual(@as(usize, 0), store.state.operations.len);
+                try std.testing.expectEqual(@as(u64, 0), store.state.fixtureCalls);
+                try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+                continue;
+            }
+            const receipt = if (queued) j.get(value, "operation").? else value;
+            try std.testing.expect(spend.spent);
+            try std.testing.expectEqualStrings("rejected", j.text(receipt, "outcome"));
+            try std.testing.expectEqualStrings("DriveSubmissionBudgetExpired", j.text(receipt, "errorCode"));
+            try std.testing.expectEqual(@as(u64, 0), store.state.fixtureCalls);
+            try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+            store.close();
+            store = try storage.Store.open(std.testing.io, a, root, "personal@example.com", options);
+            const durable = (try store.findOperation(a, "spent-budget")).?;
+            try std.testing.expectEqualStrings("rejected", durable.outcome);
+            try std.testing.expect(durable.driveFiles.?.len == 1);
+        }
+    }
 }
 
 test "mock provider label state survives eviction clear restart and newer typed history wins" {

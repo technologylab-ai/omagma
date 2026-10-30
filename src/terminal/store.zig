@@ -20,7 +20,7 @@ fn vaultKind(name: []const u8) !vault_types.RecordKind {
         return if (std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-")) .draft else .operation_ledger;
     }
     if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return .preferences;
-    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json")) return .operation_ledger;
+    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json") or std.mem.eql(u8, name, "drive-uploads.json")) return .operation_ledger;
     if (std.mem.eql(u8, name, "calendar-agenda.json")) return .cache_index;
     const kind: vault_types.RecordKind = if (std.mem.startsWith(u8, name, "mail-")) .mail_body else if (std.mem.startsWith(u8, name, "draft-")) .draft else if (std.mem.startsWith(u8, name, "outbox-")) .outbox else if (std.mem.startsWith(u8, name, "blob-")) .attachment else return error.VaultOperationUnsupported;
     const prefix: usize = switch (kind) {
@@ -253,7 +253,7 @@ pub fn cacheStamp(io: std.Io, root: []const u8, account: []const u8, options: t.
     return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
 }
 
-pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "", sourceInvitationHash: []const u8 = "", invitationCalendarId: []const u8 = "", calendarSync: ?@import("calendar_rsvp.zig").Result = null, kind: []const u8 = "", label: ?Label = null, labelId: []const u8 = "", deleted: bool = false };
+pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "", sourceInvitationHash: []const u8 = "", invitationCalendarId: []const u8 = "", calendarSync: ?@import("calendar_rsvp.zig").Result = null, driveFiles: ?[]const t.DriveFileReceipt = null, kind: []const u8 = "", label: ?Label = null, labelId: []const u8 = "", deleted: bool = false };
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
 pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
@@ -263,7 +263,7 @@ pub const Identity = struct { address: []const u8, name: []const u8 = "", signat
 /// survive undo. An unconfirmed mutation is never replayed automatically.
 pub const UndoItem = struct { messageId: []const u8, addLabels: []const []const u8 = &.{}, removeLabels: []const []const u8 = &.{}, outcome: []const u8 = "pending", errorCode: []const u8 = "", restored: bool = false };
 pub const Undo = struct { token: []const u8, items: []UndoItem = &.{} };
-pub const SendState = enum { queued, canceled, submitting, applied, rejected, unknown };
+pub const SendState = enum { queued, canceled, preparing, submitting, applied, rejected, unknown };
 pub const QueuedSend = struct {
     queueId: []const u8,
     draftId: []const u8,
@@ -272,6 +272,7 @@ pub const QueuedSend = struct {
     state: SendState = .queued,
     /// Migrated queued sends require a fresh explicit resume/send decision.
     resumeRequired: bool = false,
+    preparationId: ?[]const u8 = null,
     createdAtMs: i64,
     dueAtMs: i64,
     errorCode: []const u8 = "",
@@ -280,6 +281,7 @@ pub const QueuedSend = struct {
 pub const decoder_revision = @import("decoder_policy.zig").decoder_revision;
 const retriedByNewerDecoder = @import("decoder_policy.zig").retriedByNewerDecoder;
 
+pub const DriveSource = struct { operationId: []const u8, hash: []const u8, draftId: []const u8 = "" };
 pub const State = struct {
     schema: u8 = 1,
     history: @import("operation_history.zig").Root = .{},
@@ -292,6 +294,7 @@ pub const State = struct {
     attachmentReceipts: []const @import("attachment_receipts.zig").Receipt = &.{},
     drafts: []t.Draft = &.{},
     draftLinks: []@import("draft_link.zig").Link = &.{},
+    driveSources: []DriveSource = &.{},
     relatedDraftBlobs: []const DraftBlobReferences = &.{},
     outbox: []t.Message = &.{},
     contacts: []t.Contact = &.{},
@@ -447,7 +450,7 @@ pub const Store = struct {
                 base = try std.math.add(usize, base, count(VaultObject{ .name = object.name, .kind = object.kind, .handle = &text }) + @intFromBool(mapped_count != 0));
                 mapped_count += 1;
             }
-            object_bytes = try std.math.add(usize, object_bytes, try vault_types.sealedSize(object.size));
+            object_bytes = try std.math.add(usize, object_bytes, try vault_types.sealedStreamSize(object.size));
         }
         var policy = s.state.diskPolicy;
         while (true) {
@@ -475,7 +478,7 @@ pub const Store = struct {
         if (std.mem.startsWith(u8, name, "history-calendar-")) return 256 * 1024;
         return switch (try vaultKind(name)) {
             .mail_body, .draft, .outbox => mail_record_bytes,
-            .attachment => t.Limits.incoming_attachment_bytes,
+            .attachment => t.Limits.disk_hard,
             .operation_ledger, .cache_index, .preferences => s.documentLimit(name),
             else => error.MigrationSourceInvalid,
         };
@@ -654,9 +657,25 @@ pub const Store = struct {
                 if (!pinned) return error.InvalidDraftPins;
             };
             if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.sendQueue.len > 128 or state.fixtureProvider.len > 1024 or state.labels.len > t.Limits.labels or state.fixtureDeletedLabels.len > t.Limits.labels or state.identities.len > (if (@import("send_memory.zig").native) @as(usize, 1024) else 32) or state.undo.len > 16) return error.CacheLimitExceeded;
+            if (state.driveSources.len > 128) return error.InvalidDriveLedger;
+            for (state.driveSources, 0..) |source, source_index| {
+                if (source.operationId.len == 0 or source.operationId.len > 256) return error.InvalidDriveLedger;
+                try @import("draft_codec.zig").validateAttachmentHandle(source.hash);
+                try @import("../bounded.zig").identifier(source.draftId);
+                for (state.driveSources[0..source_index]) |previous| if (std.mem.eql(u8, previous.operationId, source.operationId)) return error.InvalidDriveLedger;
+            }
             for (state.sendQueue) |entry| {
                 if (entry.queueId.len == 0 or entry.queueId.len > 256 or entry.draftId.len == 0 or entry.draftId.len > 256 or entry.operationId.len == 0 or entry.operationId.len > 256 or entry.hash.len != 64 or entry.errorCode.len > 128 or entry.dueAtMs < entry.createdAtMs or entry.dueAtMs - entry.createdAtMs > 30000) return error.CacheLimitExceeded;
             }
+            // Only preparation can be resumed after a process death. The
+            // Gmail unknown receipt is published atomically with submitting.
+            for (state.sendQueue) |*entry| if (entry.state == .preparing) {
+                var submitted = false;
+                for (state.operations) |operation| submitted = submitted or std.mem.eql(u8, operation.id, entry.operationId);
+                entry.state = if (submitted) .unknown else .queued;
+                entry.resumeRequired = true;
+                if (!submitted and entry.errorCode.len == 0) entry.errorCode = "InterruptedPreparation";
+            };
             for (state.labels) |label| if (label.id.len > 256 or label.name.len > 512) return error.CacheLimitExceeded;
             for (state.fixtureDeletedLabels) |id| if (id.len == 0 or id.len > 256) return error.CacheLimitExceeded;
             for (state.operations) |operation| {
@@ -957,6 +976,7 @@ pub const Store = struct {
         if (@import("operation_history.zig").direct(name)) return @import("operation_history.zig").page_bytes;
         if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return 512 * 1024;
         if (std.mem.eql(u8, name, "calendar-state.json")) return 4 * 1024 * 1024;
+        if (std.mem.eql(u8, name, "drive-uploads.json")) return 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-agenda.json")) return 8 * 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-provider-fixture.json") and s.options.fixtures) return 4 * 1024 * 1024;
         return error.InvalidStoreDocument;
@@ -1158,7 +1178,7 @@ pub const Store = struct {
             _ = try s.vaultReady();
             // Count EVERY directory file: current records, retired records,
             // interrupted complete writes, and concurrent ciphertext staging.
-            const sealed_bytes = try vault_types.sealedSize(n);
+            const sealed_bytes = try vault_types.sealedStreamSize(n);
             const used = try s.diskBytes();
             if (sealed_bytes > s.options.disk_limit - @min(used, s.options.disk_limit)) return error.DiskQuotaExceeded;
             return;
@@ -1763,26 +1783,69 @@ pub const Store = struct {
     }
     const DraftImport = struct { sourceId: []const u8, expectedVersion: u64, remoteMessageId: []const u8 };
     pub fn putDraft(s: *Store, input: t.Draft, id: ?[]const u8) !t.Draft {
-        return s.putDraftImpl(input, id, null, null);
+        return s.putDraftImpl(input, id, null, null, null);
+    }
+    /// Recovery identity and its new source publish in the same transaction.
+    pub fn putPreparedDraft(s: *Store, input: t.Draft, operation_id: []const u8, digest: []const u8) !t.Draft {
+        for (s.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) {
+            if (!std.mem.eql(u8, source.hash, digest)) return error.OperationConflict;
+            const current = try s.draft(source.draftId);
+            if (!std.mem.eql(u8, digest, &(try @import("send_outcome.zig").digest(s.allocator, current, s.state.account, null)))) return error.ReviewedDraftChanged;
+            return current;
+        };
+        var retained: std.ArrayList(DriveSource) = .empty;
+        for (s.state.driveSources) |source| {
+            if (try s.findOperation(s.allocator, source.operationId)) |record| if (!std.mem.eql(u8, record.outcome, "unknown")) continue;
+            try retained.append(s.allocator, source);
+        }
+        if (retained.items.len >= 128) return error.DrivePreparationFull;
+        s.state.driveSources = retained.items;
+        return s.putDraftImpl(input, null, null, null, .{ .operationId = operation_id, .hash = digest });
+    }
+    /// Bind a saved source to preparation before progress or provider effects.
+    /// Unlike putDraft this does not edit a queued/claimed source.
+    pub fn recordPreparedDraft(s: *Store, draft_id: []const u8, operation_id: []const u8, digest: []const u8) !void {
+        // A fresh operation must not strand another stopped preparation when
+        // this same source later becomes an immutable sent draft. Retry its
+        // original operation, or explicitly change/discard the source first.
+        for (s.state.driveSources) |source| if (std.mem.eql(u8, source.draftId, draft_id) and !std.mem.eql(u8, source.operationId, operation_id)) {
+            if (try s.findOperation(s.allocator, source.operationId) == null) return error.DrivePreparationActive;
+        };
+        for (s.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id)) {
+            if (!std.mem.eql(u8, source.hash, digest) or !std.mem.eql(u8, source.draftId, draft_id)) return error.OperationConflict;
+            return;
+        };
+        var retained: std.ArrayList(DriveSource) = .empty;
+        for (s.state.driveSources) |source| {
+            if (try s.findOperation(s.allocator, source.operationId)) |record| if (!std.mem.eql(u8, record.outcome, "unknown")) continue;
+            try retained.append(s.allocator, source);
+        }
+        if (retained.items.len >= 128) return error.DrivePreparationFull;
+        try retained.append(s.allocator, .{ .operationId = try s.allocator.dupe(u8, operation_id), .hash = try s.allocator.dupe(u8, digest), .draftId = try s.allocator.dupe(u8, draft_id) });
+        const previous = s.state.driveSources;
+        errdefer s.state.driveSources = previous;
+        s.state.driveSources = retained.items;
+        try s.save();
     }
     /// Preserve a known remote copy warning with local recovery content. This
     /// does not import/upload anything or modify the source link's provenance.
     pub fn putRecoveryCopy(s: *Store, input: t.Draft, source_id: []const u8) !t.Draft {
-        return s.putDraftImpl(input, null, null, source_id);
+        return s.putDraftImpl(input, null, null, source_id, null);
     }
     /// Publish the new local copy and its duplicate-send guard in one index
     /// commit. The original local source and remote draft are retained.
     pub fn putImportedDraft(s: *Store, input: t.Draft, source_id: []const u8, expected_version: u64, remote_message_id: []const u8) !t.Draft {
-        return s.putDraftImpl(input, null, .{ .sourceId = source_id, .expectedVersion = expected_version, .remoteMessageId = remote_message_id }, null);
+        return s.putDraftImpl(input, null, .{ .sourceId = source_id, .expectedVersion = expected_version, .remoteMessageId = remote_message_id }, null, null);
     }
-    fn putDraftImpl(s: *Store, input: t.Draft, id: ?[]const u8, imported: ?DraftImport, recovery_source: ?[]const u8) !t.Draft {
+    fn putDraftImpl(s: *Store, input: t.Draft, id: ?[]const u8, imported: ?DraftImport, recovery_source: ?[]const u8, preparation: ?DriveSource) !t.Draft {
         // Import needs the source link through the same atomic publication.
         // Its settled source may otherwise disappear during capacity cleanup.
         const previous_protected = s.history_protected_draft;
+        if (id) |draft_id| s.history_protected_draft = draft_id;
         if (imported) |selected| s.history_protected_draft = selected.sourceId;
         if (recovery_source) |source_id| s.history_protected_draft = source_id;
         defer s.history_protected_draft = previous_protected;
-        if (id == null) try s.compactHistory();
+        try s.compactHistory();
         var recovery_link: ?@import("draft_link.zig").Link = null;
         if (recovery_source) |source_id| {
             if (try @import("operation_history.zig").gmailLink(s, s.allocator, source_id)) |link| {
@@ -1841,6 +1904,8 @@ pub const Store = struct {
         if (previous) |old| if (!std.mem.eql(u8, old, raw)) {
             if (try @import("operation_history.zig").immutableSource(s, d.id)) return error.ArchivedDraftReadOnly;
             try s.cancelDraftQueue(d.id);
+            const next_digest = try @import("send_outcome.zig").digest(s.allocator, d, s.state.account, null);
+            try @import("drive_retirement.zig").source(s, d.id, &next_digest, null);
             if (@import("draft_link.zig").find(s.state.draftLinks, d.id)) |link_index| {
                 s.state.draftLinks[link_index].sendAcknowledgedDigest = "";
                 try s.state.draftLinks[link_index].bump();
@@ -1866,6 +1931,13 @@ pub const Store = struct {
         @memcpy(previews[0..s.state.drafts.len], s.state.drafts);
         previews[index orelse s.state.drafts.len] = preview;
         s.state.drafts = previews;
+        if (preparation) |source| {
+            var sources: std.ArrayList(DriveSource) = .empty;
+            try sources.appendSlice(s.allocator, s.state.driveSources);
+            try sources.append(s.allocator, .{ .operationId = try s.allocator.dupe(u8, source.operationId), .hash = try s.allocator.dupe(u8, source.hash), .draftId = try s.allocator.dupe(u8, d.id) });
+            s.state.driveSources = sources.items;
+        }
+
         if (imported) |selected| {
             const link_type = @import("draft_link.zig");
             const source_index = link_type.find(s.state.draftLinks, selected.sourceId).?;
@@ -1908,6 +1980,10 @@ pub const Store = struct {
         return d;
     }
     pub fn discardDraft(s: *Store, id: []const u8) !void {
+        const previous_protected = s.history_protected_draft;
+        s.history_protected_draft = id;
+        defer s.history_protected_draft = previous_protected;
+        try s.compactHistory();
         const linked_index = @import("draft_link.zig").find(s.state.draftLinks, id);
         if (linked_index) |index| if (s.state.draftLinks[index].paused) return error.DraftPausedInGmail;
         errdefer if (s.vault != null) {
@@ -1917,6 +1993,8 @@ pub const Store = struct {
         for (s.state.drafts, 0..) |draft_value, i| if (std.mem.eql(u8, draft_value.id, id)) {
             if (try @import("operation_history.zig").immutableSource(s, id)) return error.ArchivedDraftReadOnly;
             try s.cancelDraftQueue(id);
+            try @import("drive_retirement.zig").source(s, id, null, null);
+            try @import("drive_retirement.zig").requireSourceRetired(s, id);
             try s.finishHistoryCleanup();
             s.beginHistory();
             errdefer s.abortHistory();
@@ -1926,6 +2004,7 @@ pub const Store = struct {
             if (s.vault == null) s.dir.deleteFile(s.io, "preview.html") catch |err| if (err != error.FileNotFound) return err;
             std.mem.copyForwards(t.Draft, s.state.drafts[i .. s.state.drafts.len - 1], s.state.drafts[i + 1 ..]);
             s.state.drafts = s.state.drafts[0 .. s.state.drafts.len - 1];
+
             try s.replaceDraftPins(id, null);
             if (linked_index) |index| {
                 const links = s.state.draftLinks;
@@ -1938,7 +2017,7 @@ pub const Store = struct {
         return if (try @import("operation_history.zig").source(s, s.allocator, id) != null) error.ArchivedDraftReadOnly else error.DraftNotFound;
     }
     fn cancelDraftQueue(s: *Store, id: []const u8) !void {
-        for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and (entry.state == .submitting or entry.state == .unknown)) return error.UnknownOutcome;
+        for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and (entry.state == .preparing or entry.state == .submitting or entry.state == .unknown)) return error.UnknownOutcome;
         for (s.state.sendQueue) |*entry| if (std.mem.eql(u8, entry.draftId, id) and entry.state == .queued) {
             entry.state = .canceled;
             entry.errorCode = "DraftChanged";
@@ -3231,4 +3310,31 @@ test "native compose cache: HTML fallback preserves the ordinary MIME body budge
     try std.testing.expect(!Store.exceedsOrdinaryBody(message));
     message.attachments = &.{.{ .id = "synthetic", .filename = "synthetic.bin", .size = t.Limits.request_bytes - t.Limits.body_bytes + 1, .data = "synthetic-loaded-marker" }};
     try std.testing.expect(Store.exceedsOrdinaryBody(message));
+}
+
+test "attachment delivery: direct preparation reuses one atomic recovery source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.fmt.allocPrint(a, "{s}/cache", .{try tmp.dir.realPathFileAlloc(std.testing.io, ".", a)});
+    var store = try Store.open(std.testing.io, a, base, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const draft: t.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Pending file preparation" };
+    const digest = try @import("send_outcome.zig").digest(a, draft, store.state.account, null);
+    const first = try store.putPreparedDraft(draft, "stable-preparation", &digest);
+    const again = try store.putPreparedDraft(draft, "stable-preparation", &digest);
+    try std.testing.expectEqualStrings(first.id, again.id);
+    try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+    try std.testing.expectEqual(@as(usize, 1), store.state.driveSources.len);
+    const different: [64]u8 = @splat('b');
+    try std.testing.expectError(error.OperationConflict, store.putPreparedDraft(draft, "stable-preparation", &different));
+    store.close();
+    store = try Store.open(std.testing.io, a, base, "self@example.test", .{ .fixtures = true });
+    const reopened = try store.putPreparedDraft(draft, "stable-preparation", &digest);
+    try std.testing.expectEqualStrings(first.id, reopened.id);
+    try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+    try store.discardDraft(first.id);
+    try std.testing.expectEqual(@as(usize, 0), store.state.driveSources.len);
 }

@@ -52,7 +52,7 @@ pub fn commandBacking(normal: std.mem.Allocator, name: []const u8) std.mem.Alloc
     return if (command(name)) allocator() else normal;
 }
 pub fn command(name: []const u8) bool {
-    for ([_][]const u8{ "mail.compose-source", "mail.reply", "mail.forward", "draft.create", "draft.update", "draft.read", "draft.clone", "draft.recovery-save", "draft.gmail-info", "draft.gmail-status", "draft.gmail-take-back", "draft.gmail-import", "draft.gmail-open", "draft.preview", "draft.measure", "draft.open-preview", "draft.queue", "queue.process", "queue.send-now", "mail.send", "draft.send", "invitation.reply", "draft.gmail-save", "operation.read" }) |allowed| {
+    for ([_][]const u8{ "mail.compose-source", "mail.reply", "mail.forward", "draft.create", "draft.update", "draft.read", "draft.clone", "draft.recovery-save", "draft.gmail-info", "draft.gmail-status", "draft.gmail-take-back", "draft.gmail-import", "draft.gmail-open", "draft.preview", "draft.delivery-plan", "draft.selection-plan", "draft.measure", "draft.open-preview", "draft.queue", "queue.process", "queue.send-now", "mail.send", "draft.send", "invitation.reply", "draft.gmail-save", "operation.read" }) |allowed| {
         if (std.mem.eql(u8, name, allowed)) return true;
     }
     return false;

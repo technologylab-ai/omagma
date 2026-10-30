@@ -291,6 +291,9 @@ pub const Owner = struct {
         return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
     }
     pub fn execute(self: *Owner, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+        return self.executeWithProgress(out_allocator, raw, null);
+    }
+    pub fn executeWithProgress(self: *Owner, out_allocator: std.mem.Allocator, raw: []const u8, sink: ?@import("types.zig").ProgressSink) ![]const u8 {
         try self.claim();
         defer self.release();
         if (self.migration_only) return error.VaultMigrationOwnerRequired;
@@ -306,6 +309,6 @@ pub const Owner = struct {
         // request without a daemon restart. Grants/tokens are read through the
         // same current provider; no plaintext mtime substitutes for identity.
         try self.identity.?.loadConfig(&session.config);
-        return session.execute(out_allocator, raw);
+        return if (sink) |target| session.executeWithProgress(out_allocator, raw, target) else session.execute(out_allocator, raw);
     }
 };

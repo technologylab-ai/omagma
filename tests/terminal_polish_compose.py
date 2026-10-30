@@ -147,7 +147,7 @@ def compose_case(binary, directory):
             terminal.send(b"\r")
             terminal.until(lambda number=number: f"Attachments {number}" in terminal.text())
             wait_saved_compose(terminal, number)
-        require("B [x]" in terminal.text(), "attachment size/remove controls run together")
+        require("B [Attach       ] [x]" in terminal.text(), "attachment size/delivery/remove controls run together")
         # Save a received file from the preview while the outgoing draft is
         # dirty. It must return to compose and retain body/files/account/id.
         terminal.send(b"B")

@@ -69,7 +69,12 @@ fn measureDraft(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft, ope
     const identity = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ store.state.account, operation_id });
     const hash = storage.Store.hash(identity);
     const message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{hash});
-    const bytes: ?usize = count(a, store, draft, message_id) catch |err| blk: {
+    const delivery_plan: ?@import("attachment_delivery.zig").Plan = @import("native_delivery.zig").previewWithIdentity(a, store, draft, message_id) catch |err| blk: {
+        if (!provenBodyOverflow(err)) return err;
+        admission_error = @errorName(err);
+        break :blk null;
+    };
+    const bytes: ?usize = if (delivery_plan) |plan| plan.mime_bytes else count(a, store, draft, message_id) catch |err| blk: {
         if (!provenBodyOverflow(err)) return err;
         admission_error = @errorName(err);
         break :blk null;
@@ -78,13 +83,17 @@ fn measureDraft(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft, ope
     if (draft.original != null and draft.includeOriginal) {
         var omitted = draft;
         omitted.includeOriginal = false;
-        without_original = count(a, store, omitted, message_id) catch |err| blk: {
+        const omitted_plan: ?@import("attachment_delivery.zig").Plan = @import("native_delivery.zig").previewWithIdentity(a, store, omitted, message_id) catch |err| blk: {
             if (!provenBodyOverflow(err)) return err;
             break :blk null;
         };
+        without_original = if (omitted_plan) |plan| plan.mime_bytes else null;
     }
     const over_limit = if (bytes) |value| value > t.Limits.mime_upload_bytes else true;
     if (over_limit and admission_error == null) admission_error = "FormTooLarge";
+    if (delivery_plan) |plan| if (plan.problem) |problem| if (admission_error == null) {
+        admission_error = @errorName(problem);
+    };
     return j.value(a, .{
         .draftId = draft.id,
         .operationId = operation_id,
@@ -94,7 +103,8 @@ fn measureDraft(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft, ope
         .bytes = if (bytes) |value| j.Value{ .integer = @intCast(value) } else @as(j.Value, .null),
         .maxBytes = t.Limits.mime_upload_bytes,
         .withoutOriginalBytes = if (without_original) |value| j.Value{ .integer = @intCast(value) } else @as(j.Value, .null),
-        .exact = bytes != null,
+        .exact = bytes != null and (if (delivery_plan) |plan| plan.drive_count == 0 and !plan.estimated else false),
+        .attachmentPlan = if (delivery_plan) |plan| try @import("native_delivery.zig").valueWithStore(a, store, draft, plan, operation_id) else @as(?j.Value, null),
         .overLimit = over_limit,
         .admissionError = admission_error,
         .sendable = admission_error == null,

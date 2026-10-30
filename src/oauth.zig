@@ -148,7 +148,7 @@ pub fn parseTokensScoped(status: u16, data: []const u8, out_access: []u8, out_re
     return .{ .access_token = out_access[0..access.len], .expires_in = @intCast(expires) };
 }
 pub fn validateScopeSet(scopes: []const []const u8) !void {
-    if (scopes.len == 0 or scopes.len > 8) return error.UnexpectedScope;
+    if (scopes.len == 0 or scopes.len > 9) return error.UnexpectedScope;
     const allowed = [_][]const u8{
         readonly_scope,
         "https://www.googleapis.com/auth/gmail.send",
@@ -156,6 +156,7 @@ pub fn validateScopeSet(scopes: []const []const u8) !void {
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/contacts.readonly",
         "https://www.googleapis.com/auth/contacts",
+        "https://www.googleapis.com/auth/drive.file",
         "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
         "https://www.googleapis.com/auth/calendar.events.readonly",
         "https://www.googleapis.com/auth/calendar.events.owned",

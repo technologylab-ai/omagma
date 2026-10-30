@@ -191,7 +191,7 @@ pub const Journal = struct {
         defer handles.deinit();
         for (objects) |object| {
             if (!object.mapped and object.kind != .attachment) return error.InvalidVaultMigration;
-            if (object.name.len == 0 or object.name.len > 512 or std.mem.indexOfAny(u8, object.name, "/\\\x00") != null or object.size > vt.max_record_bytes) return error.InvalidVaultMigration;
+            if (object.name.len == 0 or object.name.len > 512 or std.mem.indexOfAny(u8, object.name, "/\\\x00") != null or object.size > vt.recordLimit(object.kind)) return error.InvalidVaultMigration;
             if ((try names.getOrPut(object.name)).found_existing or (try handles.getOrPut(object.handle.bytes)).found_existing) return error.InvalidVaultMigration;
         }
     }

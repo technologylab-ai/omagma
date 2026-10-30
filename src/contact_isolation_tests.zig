@@ -176,6 +176,62 @@ const Peer = struct {
         return parse(a, self.body);
     }
 };
+
+test "contact isolation: bounded provider search reaches beyond the list head and retains omission warnings" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body: std.ArrayList(u8) = .empty;
+    try body.appendSlice(a, "{\"connections\":[");
+    for (0..100) |index| try body.print(a, "{s}{{\"resourceName\":\"people/head{d}\",\"names\":[{{\"displayName\":\"Head {d}\"}}],\"emailAddresses\":[{{\"value\":\"head{d}@example.test\"}}]}}", .{ if (index == 0) "" else ",", index, index, index });
+    try body.appendSlice(a, "],\"nextPageToken\":\"another/contact/page+=\"}");
+    const Oracle = struct {
+        list_body: []const u8,
+        lists: usize = 0,
+        warmups: usize = 0,
+        searches: usize = 0,
+        writes: usize = 0,
+        fn request(context: *anyopaque, allocator: std.mem.Allocator, method: std.http.Method, url: []const u8, request_body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (method != .GET or request_body != null) {
+                self.writes += 1;
+                return error.UnexpectedWrite;
+            }
+            if (std.mem.eql(u8, url, "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,metadata&sources=READ_SOURCE_TYPE_CONTACT&pageSize=100&pageToken=")) {
+                self.lists += 1;
+                return parse(allocator, self.list_body);
+            }
+            if (std.mem.eql(u8, url, "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query=")) {
+                self.warmups += 1;
+                return parse(allocator, "{}");
+            }
+            if (std.mem.eql(u8, url, "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query=Beyond%20first%20page")) {
+                self.searches += 1;
+                return parse(allocator,
+                    \\{"results":[{"person":{"resourceName":"people/beyond","names":[{"displayName":"Beyond first page"}],"emailAddresses":[{"value":"beyond@example.test"}]}},{"person":{"names":[{"displayName":"Missing identity"}],"emailAddresses":[{"value":"omitted@example.test"}]}}]}
+                );
+            }
+            return error.UnexpectedContactUrl;
+        }
+    };
+    var oracle: Oracle = .{ .list_body = body.items };
+    const transport: gmail.Transport = .{ .context = &oracle, .requestFn = Oracle.request, .temporary_allocator = std.testing.allocator };
+    const listed = try gmail.dispatchAuthorized(std.testing.io, a, "calendar-owner@example.test", &.{"contacts-read"}, transport, "contacts.list", try j.value(a, .{}));
+    const head = j.get(listed, "contacts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 100), head.len);
+    try std.testing.expectEqualStrings("another/contact/page+=", j.text(listed, "nextCursor"));
+    for (head) |contact| for (j.get(contact, "emails").?.array.items) |email| try std.testing.expect(!std.mem.eql(u8, j.text(email, "address"), "beyond@example.test"));
+    const searched = try gmail.dispatchAuthorized(std.testing.io, a, "calendar-owner@example.test", &.{"contacts-read"}, transport, "contacts.search", try j.value(a, .{ .query = "Beyond first page" }));
+    const found = j.get(searched, "contacts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqualStrings("beyond@example.test", j.text(j.get(found[0], "emails").?.array.items[0], "address"));
+    try std.testing.expect(try j.boolean(searched, "partial", false));
+    try std.testing.expectEqual(@as(u32, 1), (try warnings(a, searched)).omittedContacts);
+    try std.testing.expectEqual(@as(usize, 1), oracle.lists);
+    try std.testing.expectEqual(@as(usize, 1), oracle.warmups);
+    try std.testing.expectEqual(@as(usize, 1), oracle.searches);
+    try std.testing.expectEqual(@as(usize, 0), oracle.writes);
+}
 var host_body: []const u8 = mixed;
 var host_result: u32 = 0;
 var host_status: u32 = 200;

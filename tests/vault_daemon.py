@@ -26,7 +26,7 @@ import vault_activation_routing
 PASSWORD = b"Synthetic vault acceptance password"
 ACCOUNT = "personal@example.com"
 MAGIC = b"OMAVIPC1"
-EXECUTION_MAGIC = b"OMAVIPC2"
+EXECUTION_MAGIC = b"OMAVIPC3"
 
 
 def require(condition, message):
@@ -328,7 +328,7 @@ def malformed_frames(backend, control):
 
     invalid = (
         ("wrong magic", header(1, 0, magic=b"WRONGIPC")),
-        ("wrong version", header(1, 0, magic=b"OMAVIPC3")),
+        ("wrong version", header(1, 0, magic=b"OMAVIPC4")),
         ("unknown kind", header(127, 0)),
         ("reserved flags", header(1, 0, reserved=b"\1\0\0")),
         ("native execute overflow", header(1, native_execute_limit + 1)),
@@ -490,7 +490,7 @@ def disconnects(binary, directory, env):
                 while len(status) != 16:
                     status += connection.recv(16 - len(status))
                 require(status == MAGIC + bytes([4, 0, 0, 0]) + struct.pack("<I", 0), "missing protocol preflight")
-                payload = b'{"ok":true,"data":{"executionProtocol":2}}'
+                payload = b'{"ok":true,"data":{"executionProtocol":3}}'
                 connection.sendall(MAGIC + bytes([128, 0, 0, 0]) + struct.pack("<I", len(payload)) + payload)
             connection, _ = listener.accept()
             with connection:

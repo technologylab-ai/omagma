@@ -7,6 +7,7 @@ const recipients = @import("recipients.zig");
 const spool = @import("send_spool.zig");
 
 pub fn create(store: *storage.Store, draft: t.Draft, attempt: []const u8) !spool.Spool {
+    if (@import("native_delivery.zig").requested(draft)) return error.UnsupportedAttachmentDelivery;
     try @import("draft_codec.zig").validateDraft(draft, false);
     if (draft.recoveryFields != null) return error.UnfinishedDraft;
     if (!mime.validMessageId(attempt)) return error.InvalidDraftLink;

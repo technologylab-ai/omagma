@@ -7,6 +7,7 @@ const j = @import("json.zig");
 const t = @import("calendar_types.zig");
 const tz = @import("timezone.zig");
 const reader = @import("reader_tools.zig");
+const recipients = @import("recipients.zig");
 
 pub const max_guests = 200;
 pub const guest_bytes = max_guests * 256;
@@ -343,13 +344,15 @@ pub const Model = struct {
     }
 
     /// Invite policy follows actual new mailboxes, never formatting changes
-    /// such as reordering, whitespace, or case in the comma-separated editor.
-    pub fn addedGuestCount(self: *const Model) !usize {
-        var guests: [max_guests][]const u8 = undefined;
-        const count = try parseGuests(self.attendees.slice(), &guests);
-        var originals: [max_guests][]const u8 = undefined;
-        const original_count = try parseGuests(self.original_attendees.slice(), &originals);
-        return newGuestCount(guests[0..count], originals[0..original_count]);
+    /// such as reordering, whitespace, case or display names in the editor.
+    /// Parsed lists are scratch in a local arena over `a`; only the count
+    /// leaves this call, so `a` may be any allocator.
+    pub fn addedGuestCount(self: *const Model, a: std.mem.Allocator) !usize {
+        var scratch: std.heap.ArenaAllocator = .init(a);
+        defer scratch.deinit();
+        const guests = try parseGuests(scratch.allocator(), self.attendees.slice());
+        const originals = try parseGuests(scratch.allocator(), self.original_attendees.slice());
+        return newGuestCount(guests, originals);
     }
 
     /// Actual provider count includes guests omitted from a bounded read.
@@ -399,16 +402,17 @@ pub const Model = struct {
             start = try std.fmt.allocPrint(a, "{s}T{s}", .{ self.start_date.slice(), self.start_time.slice() });
             end = try std.fmt.allocPrint(a, "{s}T{s}", .{ self.end_date.slice(), self.end_time.slice() });
         }
-        var guests: [max_guests][]const u8 = undefined;
-        const count = try parseGuests(self.attendees.slice(), &guests);
-        var originals: [max_guests][]const u8 = undefined;
-        const original_count = try parseGuests(self.original_attendees.slice(), &originals);
-        const changed = !sameGuests(guests[0..count], originals[0..original_count]);
+        // Parsed lists are scratch: j.value below copies the addresses it keeps.
+        var scratch: std.heap.ArenaAllocator = .init(a);
+        defer scratch.deinit();
+        const guests = try parseGuests(scratch.allocator(), self.attendees.slice());
+        const originals = try parseGuests(scratch.allocator(), self.original_attendees.slice());
+        const changed = !sameGuests(guests, originals);
         if (self.editing and changed) {
             if (!self.attendees_complete) return error.CalendarGuestsNeedRefresh;
-            for (originals[0..original_count]) |email| if (!containsGuest(guests[0..count], email)) return error.CalendarExistingGuestsMustBePreserved;
+            for (originals) |email| if (!containsGuest(guests, email)) return error.CalendarExistingGuestsMustBePreserved;
         }
-        if (newGuestCount(guests[0..count], originals[0..original_count]) > 0 and self.send_updates != .all) return error.CalendarGuestsRequireUpdates;
+        if (newGuestCount(guests, originals) > 0 and self.send_updates != .all) return error.CalendarGuestsRequireUpdates;
         if (self.conference != .none and self.existing_join) return error.CalendarExistingConference;
         if (self.conference == .google_meet and !self.supports_meet) return error.CalendarMeetUnavailable;
         if (self.conference == .link and (!std.mem.startsWith(u8, self.join_url.slice(), "https://") or !reader.safeUrl(self.join_url.slice()))) return error.CalendarUnsafeJoinLink;
@@ -430,7 +434,7 @@ pub const Model = struct {
                 .allDay = self.all_day,
                 .description = self.description.slice(),
                 .location = self.location.slice(),
-                .attendees = if (!self.editing or changed) @as(?[]const []const u8, guests[0..count]) else null,
+                .attendees = if (!self.editing or changed) @as(?[]const []const u8, guests) else null,
                 .conference = @tagName(self.conference),
                 .joinUrl = if (self.conference == .link) optional(self.join_url.slice()) else null,
                 .startOffset = start_offset,
@@ -481,23 +485,134 @@ fn operationId(raw: []const u8) !void {
     for (raw) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidOperationId;
 }
 
-fn parseGuests(raw: []const u8, out: *[max_guests][]const u8) !usize {
-    if (std.mem.trim(u8, raw, " \t\r\n").len == 0) return 0;
-    var parts = std.mem.splitScalar(u8, raw, ',');
-    var count: usize = 0;
-    while (parts.next()) |part| {
-        const email = std.mem.trim(u8, part, " \t\r\n");
+/// Guests accept the ordinary Mail address-list grammar (display names,
+/// quoted commas, comments) and become bare addresses. Calendar keeps its own
+/// policy: at most 200 guests, a repeated mailbox is refused rather than
+/// merged, and nothing invalid is dropped. Storage is two allocations bounded
+/// by the field (200 slices and `raw.len` bytes), freed on every error; on
+/// success the result belongs to `a`, which callers make a local arena.
+fn parseGuests(a: std.mem.Allocator, raw: []const u8) ![]const []const u8 {
+    // Mail's header-injection boundary: a line break is never list
+    // whitespace, even in an otherwise blank field.
+    if (std.mem.indexOfAny(u8, raw, "\r\n") != null) return error.CalendarInvalidGuest;
+    if (std.mem.trim(u8, raw, " \t").len == 0) return &.{};
+    const list = try a.alloc([]const u8, max_guests);
+    errdefer a.free(list);
+    const bytes = try a.alloc(u8, raw.len);
+    errdefer a.free(bytes);
+    var sink: GuestSink = .{ .list = list, .bytes = bytes };
+    recipients.scanAddresses(raw, &sink) catch |err| return switch (err) {
+        error.CalendarTooManyGuests, error.CalendarDuplicateGuest => err,
+        else => error.CalendarInvalidGuest,
+    };
+    return list[0..sink.count];
+}
+const GuestSink = struct {
+    list: [][]const u8,
+    bytes: []u8,
+    count: usize = 0,
+    used: usize = 0,
+    /// Public: recipients.scanAddresses calls it from another file.
+    pub fn visit(self: *GuestSink, email: []const u8) !void {
+        // `bounded.address` intentionally serves older mail APIs as well. A
+        // normalized guest is one bare mailbox, never list/display syntax.
         b.address(email) catch return error.CalendarInvalidGuest;
-        // `bounded.address` intentionally serves older mail APIs as well.
-        // Calendar guests are bare mailbox addresses, without list/display
-        // syntax or an accidental semicolon-separated second recipient.
         if (std.mem.indexOfAny(u8, email, "<>(),;:") != null) return error.CalendarInvalidGuest;
-        if (count == max_guests) return error.CalendarTooManyGuests;
-        if (containsGuest(out[0..count], email)) return error.CalendarDuplicateGuest;
-        out[count] = email;
-        count += 1;
+        if (self.count == self.list.len) return error.CalendarTooManyGuests;
+        if (containsGuest(self.list[0..self.count], email)) return error.CalendarDuplicateGuest;
+        // An address never exceeds its own token, so `raw.len` bytes suffice.
+        if (email.len > self.bytes.len - self.used) return error.CalendarInvalidGuest;
+        const copy = self.bytes[self.used..][0..email.len];
+        @memcpy(copy, email);
+        self.used += email.len;
+        self.list[self.count] = copy;
+        self.count += 1;
     }
-    return count;
+};
+
+/// Ordinary end-following policy for the editor. Until the user edits End
+/// date, End time or the end's DST occurrence, a valid Start edit moves the
+/// end by the interval shown just before that edit: wall-clock length for
+/// timed events (so 09:00–10:00 stays one hour on any date, including across
+/// a DST change) and the number of extra included days for all-day events.
+/// A partial or invalid start leaves the end untouched. After an end edit
+/// the end is never moved again in that editor session. Offsets are never
+/// chosen here: a moved end loses its inherited offset (Model.set), and the
+/// review still asks when a wall time is skipped or occurs twice.
+pub const EndFollow = struct {
+    /// Set by an explicit end edit; only a newly opened editor clears it.
+    pinned: bool = false,
+    /// Last valid interval: milliseconds (timed) or days (all-day).
+    span: ?i64 = null,
+    span_all_day: bool = false,
+
+    pub const Fields = struct { start_date: []const u8, start_time: []const u8, end_date: []const u8, end_time: []const u8 };
+    pub const End = struct { date: []const u8, time: []const u8 };
+
+    /// Call before applying a user edit to Start date or Start time.
+    pub fn observe(self: *EndFollow, all_day: bool, fields: Fields) void {
+        if (self.pinned) return;
+        if (shownInterval(all_day, fields)) |value| {
+            self.span = value;
+            self.span_all_day = all_day;
+        } else if (self.span_all_day != all_day) self.span = null;
+    }
+
+    /// The end after a start edit, or null to keep the current end. Both
+    /// strings are allocated in `a` and owned by the caller; an allocation
+    /// failure frees whatever this call already allocated.
+    pub fn follow(self: *const EndFollow, a: std.mem.Allocator, all_day: bool, fields: Fields) !?End {
+        if (self.pinned or self.span_all_day != all_day) return null;
+        const span = self.span orelse return null;
+        const day = dateDay(fields.start_date) catch return null;
+        if (all_day) {
+            const date = (try followedDate(a, day + span)) orelse return null;
+            errdefer a.free(date);
+            return .{ .date = date, .time = try a.dupe(u8, fields.end_time) };
+        }
+        const clock = clockMilliseconds(fields.start_time) catch return null;
+        const end = day * 86400000 + clock + span;
+        const date = (try followedDate(a, @divFloor(end, 86400000))) orelse return null;
+        errdefer a.free(date);
+        return .{ .date = date, .time = try clockText(a, @mod(end, 86400000)) };
+    }
+};
+
+fn shownInterval(all_day: bool, fields: EndFollow.Fields) ?i64 {
+    const first = dateDay(fields.start_date) catch return null;
+    const last = dateDay(fields.end_date) catch return null;
+    if (all_day) return if (last >= first) last - first else null;
+    const first_ms = clockMilliseconds(fields.start_time) catch return null;
+    const last_ms = clockMilliseconds(fields.end_time) catch return null;
+    const value = (last - first) * 86400000 + last_ms - first_ms;
+    return if (value > 0) value else null;
+}
+
+/// Null only for a date outside the editor's range; allocation failure is
+/// an error, never a silent "keep the old end".
+fn followedDate(a: std.mem.Allocator, day: i64) !?[]const u8 {
+    const raw = t.time.format(a, .{ .kind = .date, .value = day }) catch |err| {
+        const failure: anyerror = err;
+        if (failure == error.OutOfMemory) return error.OutOfMemory;
+        return null;
+    };
+    _ = dateDay(raw) catch {
+        a.free(raw);
+        return null;
+    };
+    return raw;
+}
+
+/// Formats the end as HH:MM, HH:MM:SS or HH:MM:SS.mmm without losing its value.
+fn clockText(a: std.mem.Allocator, ms: i64) ![]const u8 {
+    const value: u64 = @intCast(ms);
+    const hour = value / 3600000;
+    const minute = value / 60000 % 60;
+    const second = value / 1000 % 60;
+    const fraction = value % 1000;
+    if (fraction != 0) return std.fmt.allocPrint(a, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ hour, minute, second, fraction });
+    if (second != 0) return std.fmt.allocPrint(a, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second });
+    return std.fmt.allocPrint(a, "{d:0>2}:{d:0>2}", .{ hour, minute });
 }
 
 fn containsGuest(values: []const []const u8, wanted: []const u8) bool {
@@ -530,7 +645,7 @@ pub fn errorMessage(err: anyerror) []const u8 {
         error.CalendarEndBeforeStart => "End must be after start. For overnight events, use the next date.",
         error.InvalidTimezoneName => "Enter an IANA time zone, such as Europe/Vienna.",
         error.CalendarInvalidOffset => "UTC offsets must be +HH:MM or -HH:MM.",
-        error.CalendarInvalidGuest => "Use comma-separated guest email addresses.",
+        error.CalendarInvalidGuest => "Check guests: emails or Name <email>, separated by commas.",
         error.CalendarDuplicateGuest => "A guest email address appears more than once.",
         error.CalendarTooManyGuests => "This event has more than 200 guests.",
         error.CalendarGuestsRequireUpdates => "Choose Notify guests to send invitations to new guests.",
@@ -609,7 +724,9 @@ test "calendar composer: guest validation duplicate detection and invitations ar
     defer arena.deinit();
     const a = arena.allocator();
     var model = try fixture(a);
-    for ([_][]const u8{ "peer@example.test,", "Jane <peer@example.test>", "peer@example.test;second@example.test", "not an email", "" }) |raw| {
+    // Mail list grammar is accepted (see the paste test below); broken lists,
+    // semicolon-joined recipients and invalid entries are still refused.
+    for ([_][]const u8{ "peer@example.test,", "Jane <peer@example.test", "peer@example.test;second@example.test", "not an email", "bad\n@example.test", "peer@example.test\r\nBcc: hidden@example.test", "Name\r\nBcc: hidden@example.test;", "peer@example.test,\nsecond@example.test", "\r\n", " \n ", "" }) |raw| {
         try model.set(.attendees, raw);
         if (raw.len == 0) {
             _ = try model.reviewRequest(a, "operation-3");
@@ -623,6 +740,179 @@ test "calendar composer: guest validation duplicate detection and invitations ar
     const request = try model.reviewRequest(a, "operation-3");
     try std.testing.expectEqual(@as(usize, 2), j.get(j.get(request, "event").?, "attendees").?.array.items.len);
     try std.testing.expectEqualStrings("all", j.text(request, "sendUpdates"));
+}
+
+test "calendar composer: guests accept Mail address-list paste and review only bare emails" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var model = try fixture(a);
+    model.send_updates = .all;
+    try model.set(.attendees, "\"Doe, Jane\" <jane@example.test>, Alex Example <alex@example.test>,\t robin@example.test (Robin)");
+    const request = try model.reviewRequest(a, "operation-15");
+    const guests = j.get(j.get(request, "event").?, "attendees").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), guests.len);
+    for (guests, [_][]const u8{ "jane@example.test", "alex@example.test", "robin@example.test" }) |guest, expected| try std.testing.expectEqualStrings(expected, try j.string(guest));
+    try std.testing.expectEqual(@as(usize, 3), try model.addedGuestCount(a));
+    // A display name never hides a duplicate, and nothing invalid is dropped.
+    try model.set(.attendees, "Jane <jane@example.test>, \"Doe, Jane\" <JANE@example.test>");
+    try std.testing.expectError(error.CalendarDuplicateGuest, model.reviewRequest(a, "operation-15"));
+    try model.set(.attendees, "Jane <jane@example.test>, not an email");
+    try std.testing.expectError(error.CalendarInvalidGuest, model.reviewRequest(a, "operation-15"));
+    // Exactly 200 named guests fit; the 201st is refused without truncation.
+    var list: std.ArrayList(u8) = .empty;
+    for (0..max_guests) |index| try list.print(a, "{s}\"Guest, {d}\" <guest{d}@example.test>", .{ if (index == 0) "" else ", ", index, index });
+    try model.set(.attendees, list.items);
+    const full = j.get(j.get(try model.reviewRequest(a, "operation-15"), "event").?, "attendees").?.array.items;
+    try std.testing.expectEqual(@as(usize, max_guests), full.len);
+    try std.testing.expectEqualStrings("guest199@example.test", try j.string(full[max_guests - 1]));
+    try list.appendSlice(a, ", \"Guest, 200\" <guest200@example.test>");
+    try model.set(.attendees, list.items);
+    try std.testing.expectError(error.CalendarTooManyGuests, model.reviewRequest(a, "operation-15"));
+    try std.testing.expectEqualStrings(list.items, model.get(.attendees));
+    // Existing guests compare by mailbox, whatever name is pasted around them.
+    try model.original_attendees.set("jane@example.test");
+    model.editing = true;
+    try model.event_id.set("existing");
+    try model.expected_etag.set("v1");
+    try model.set(.attendees, "Jane Doe <JANE@example.test>, New <new@example.test>");
+    try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount(a));
+    try model.set(.attendees, "New <new@example.test>");
+    try std.testing.expectError(error.CalendarExistingGuestsMustBePreserved, model.reviewRequest(a, "operation-15"));
+}
+
+test "calendar composer: an untouched end follows start edits and keeps the shown interval" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var follow: EndFollow = .{};
+    var fields: EndFollow.Fields = .{ .start_date = "2026-10-24", .start_time = "09:00", .end_date = "2026-10-24", .end_time = "10:00" };
+    // Only the start date moves; the one-hour end moves with it.
+    follow.observe(false, fields);
+    fields.start_date = "2026-10-28";
+    var end = (try follow.follow(a, false, fields)).?;
+    try std.testing.expectEqualStrings("2026-10-28", end.date);
+    try std.testing.expectEqualStrings("10:00", end.time);
+    fields.end_date = end.date;
+    fields.end_time = end.time;
+    // A late start carries the end over midnight and the year boundary.
+    for ([_][4][]const u8{
+        .{ "2026-10-28", "23:30", "2026-10-29", "00:30" },
+        .{ "2026-12-31", "23:15", "2027-01-01", "00:15" },
+        .{ "2026-12-31", "00:00", "2026-12-31", "01:00" },
+        .{ "2026-10-28", "09:15:30.250", "2026-10-28", "10:15:30.250" },
+    }) |case| {
+        follow.observe(false, fields);
+        fields.start_date = case[0];
+        fields.start_time = case[1];
+        end = (try follow.follow(a, false, fields)).?;
+        try std.testing.expectEqualStrings(case[2], end.date);
+        try std.testing.expectEqualStrings(case[3], end.time);
+        fields.end_date = end.date;
+        fields.end_time = end.time;
+    }
+    // Wall-clock length is kept on the Vienna fold date; offsets stay unchosen.
+    fields = .{ .start_date = "2026-10-24", .start_time = "02:30", .end_date = "2026-10-24", .end_time = "03:30" };
+    follow.observe(false, fields);
+    fields.start_date = "2026-10-25";
+    end = (try follow.follow(a, false, fields)).?;
+    try std.testing.expectEqualStrings("2026-10-25", end.date);
+    try std.testing.expectEqualStrings("03:30", end.time);
+    // Partial or invalid start text leaves the end as it is.
+    for ([_][]const u8{ "2026-10-2", "2026-02-30", "2026/10/25", "" }) |partial| {
+        fields.start_date = partial;
+        try std.testing.expect((try follow.follow(a, false, fields)) == null);
+    }
+    fields.start_date = "2026-10-25";
+    for ([_][]const u8{ "2", "24:00", "09:6" }) |partial| {
+        fields.start_time = partial;
+        try std.testing.expect((try follow.follow(a, false, fields)) == null);
+    }
+    // An overnight multi-day interval keeps its length; out of range stays put.
+    fields = .{ .start_date = "2026-10-24", .start_time = "22:00", .end_date = "2026-10-26", .end_time = "02:00" };
+    follow.observe(false, fields);
+    fields.start_date = "2026-11-01";
+    end = (try follow.follow(a, false, fields)).?;
+    try std.testing.expectEqualStrings("2026-11-03", end.date);
+    try std.testing.expectEqualStrings("02:00", end.time);
+    fields.start_date = "9999-12-31";
+    try std.testing.expect((try follow.follow(a, false, fields)) == null);
+    // All-day keeps its included days across month, leap and year ends.
+    var days: EndFollow = .{};
+    fields = .{ .start_date = "2026-10-24", .start_time = "09:00", .end_date = "2026-10-26", .end_time = "10:00" };
+    days.observe(true, fields);
+    for ([_][2][]const u8{ .{ "2026-12-30", "2027-01-01" }, .{ "2028-02-28", "2028-03-01" } }) |case| {
+        fields.start_date = case[0];
+        try std.testing.expectEqualStrings(case[1], (try days.follow(a, true, fields)).?.date);
+    }
+    // The learned interval is mode-specific and a reversed pair teaches nothing.
+    try std.testing.expect((try days.follow(a, false, fields)) == null);
+    var reversed: EndFollow = .{};
+    reversed.observe(false, .{ .start_date = "2026-10-24", .start_time = "10:00", .end_date = "2026-10-24", .end_time = "09:00" });
+    try std.testing.expect((try reversed.follow(a, false, fields)) == null);
+    // An explicitly edited end is never moved.
+    follow.pinned = true;
+    fields = .{ .start_date = "2026-10-24", .start_time = "09:00", .end_date = "2026-10-24", .end_time = "10:00" };
+    follow.observe(false, fields);
+    fields.start_date = "2026-10-30";
+    try std.testing.expect((try follow.follow(a, false, fields)) == null);
+}
+
+test "calendar composer: guest counting keeps no parsed lists and allocation failure is never a silent fallback" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var model = try fixture(a);
+    try model.original_attendees.set("first@example.test");
+    var many: std.ArrayList(u8) = .empty;
+    for (0..max_guests + 1) |index| try many.print(a, "{s}g{d}@example.test", .{ if (index == 0) "" else ", ", index });
+    // The leak-checking allocator proves nothing parsed is left behind, on
+    // success or on any refusal; line breaks are refused before allocating.
+    for ([_][]const u8{ "First <first@example.test>, second@example.test", "a@example.test, A@example.test", "a@example.test, not an email", "Name\r\nBcc: hidden@example.test;", many.items }, [_]?anyerror{ null, error.CalendarDuplicateGuest, error.CalendarInvalidGuest, error.CalendarInvalidGuest, error.CalendarTooManyGuests }) |raw, expected| {
+        try model.set(.attendees, raw);
+        if (expected) |err| try std.testing.expectError(err, model.addedGuestCount(std.testing.allocator)) else try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount(std.testing.allocator));
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+        try std.testing.expectError(if (std.mem.indexOfAny(u8, raw, "\r\n") != null) error.CalendarInvalidGuest else error.OutOfMemory, model.addedGuestCount(failing.allocator()));
+    }
+    // End following: every allocation may fail. The error propagates (never
+    // "keep the end"), the leak-checking allocator proves nothing partial is
+    // left, and once allocations succeed the caller owns both strings.
+    var follow: EndFollow = .{};
+    var fields: EndFollow.Fields = .{ .start_date = "2026-10-24", .start_time = "09:00", .end_date = "2026-10-24", .end_time = "10:00" };
+    follow.observe(false, fields);
+    fields.start_date = "2026-10-28";
+    var days: EndFollow = .{};
+    days.observe(true, .{ .start_date = "2026-10-24", .start_time = "09:00", .end_date = "2026-10-25", .end_time = "10:00" });
+    for ([_]bool{ false, true }) |all_day| {
+        const source: *const EndFollow = if (all_day) &days else &follow;
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            try std.testing.expect(fail_index < 16);
+            var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+            const end = (source.follow(failing.allocator(), all_day, fields) catch |err| {
+                try std.testing.expectEqual(@as(anyerror, error.OutOfMemory), err);
+                continue;
+            }).?;
+            defer failing.allocator().free(end.date);
+            defer failing.allocator().free(end.time);
+            try std.testing.expect(fail_index >= 2);
+            try std.testing.expectEqualStrings(if (all_day) "2026-10-29" else "2026-10-28", end.date);
+            try std.testing.expectEqualStrings("10:00", end.time);
+            break;
+        }
+    }
+}
+
+test "calendar composer: Model.set used by hydration and review never moves the other endpoint" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var model = try fixture(a);
+    try model.set(.start_date, "2026-10-30");
+    try model.set(.start_time, "11:00");
+    try std.testing.expectEqualStrings("2026-10-24", model.get(.end_date));
+    try std.testing.expectEqualStrings("10:00", model.get(.end_time));
+    try std.testing.expectError(error.CalendarEndBeforeStart, model.reviewRequest(a, "operation-16"));
 }
 
 test "calendar composer: review owns escaped text and pasted meeting links are inert safe HTTPS" {
@@ -666,12 +956,12 @@ test "calendar composer: edit preserves exact provider seconds guests and confer
     try std.testing.expect(j.get(event, "joinUrl") == null);
     try std.testing.expectEqualStrings("2026-10-25T02:30:04.125", j.text(event, "start"));
     try model.set(.attendees, " PEER@example.test ");
-    try std.testing.expectEqual(@as(usize, 0), try model.addedGuestCount());
+    try std.testing.expectEqual(@as(usize, 0), try model.addedGuestCount(a));
     try std.testing.expect(j.get(j.get(try model.reviewRequest(a, "operation-5"), "event").?, "attendees") == null);
     try model.set(.attendees, "new@example.test");
     try std.testing.expectError(error.CalendarExistingGuestsMustBePreserved, model.reviewRequest(a, "operation-5"));
     try model.set(.attendees, "peer@example.test, new@example.test");
-    try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount());
+    try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount(a));
     model.send_updates = .all;
     _ = try model.reviewRequest(a, "operation-5");
     model.conference = .google_meet;
@@ -865,12 +1155,15 @@ test "calendar composer: invitations count added guests rather than list present
     const a = arena.allocator();
     var model = try fixture(a);
     try model.original_attendees.set("first@example.test, second@example.test");
-    for ([_][]const u8{ "second@example.test, first@example.test", " FIRST@example.test , SECOND@example.test ", "first@example.test,\r\nsecond@example.test" }) |raw| {
+    for ([_][]const u8{ "second@example.test, first@example.test", " FIRST@example.test , SECOND@example.test ", "first@example.test,\tsecond@example.test", "First <first@example.test>, \"Second, S\" <second@example.test>" }) |raw| {
         try model.set(.attendees, raw);
-        try std.testing.expectEqual(@as(usize, 0), try model.addedGuestCount());
+        try std.testing.expectEqual(@as(usize, 0), try model.addedGuestCount(a));
     }
+    // The shared grammar never treats a line break as list whitespace.
+    try model.set(.attendees, "first@example.test,\r\nsecond@example.test");
+    try std.testing.expectError(error.CalendarInvalidGuest, model.addedGuestCount(a));
     try model.set(.attendees, "second@example.test, first@example.test, third@example.test");
-    try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount());
+    try std.testing.expectEqual(@as(usize, 1), try model.addedGuestCount(a));
 }
 
 test "calendar composer: pending create restores the saved draft without current write access or zone rules" {
@@ -888,7 +1181,7 @@ test "calendar composer: pending create restores the saved draft without current
     try std.testing.expectEqualStrings("+01:00", restored.get(.start_offset));
     try std.testing.expectEqual(Conference.google_meet, restored.conference);
     try std.testing.expectEqual(SendUpdates.all, restored.send_updates);
-    try std.testing.expectEqual(@as(usize, 1), try restored.addedGuestCount());
+    try std.testing.expectEqual(@as(usize, 1), try restored.addedGuestCount(a));
     try std.testing.expectEqual(@as(usize, 0), restored.existingGuestCount());
     try std.testing.expectError(error.CalendarReadOnly, restored.reviewRequest(a, "new-write-refused"));
 }
@@ -907,7 +1200,7 @@ test "calendar composer: pending edit restores original metadata separately from
     try std.testing.expectEqualStrings("original@example.test", restored.original_attendees.slice());
     try std.testing.expectEqualStrings("original@example.test, added@example.test", restored.get(.attendees));
     try std.testing.expectEqual(@as(usize, 1), restored.existingGuestCount());
-    try std.testing.expectEqual(@as(usize, 1), try restored.addedGuestCount());
+    try std.testing.expectEqual(@as(usize, 1), try restored.addedGuestCount(a));
     try std.testing.expectEqualStrings(notes, restored.get(.description));
     try std.testing.expectEqualStrings("https://meet.example.test/existing", restored.protected_join_url.slice());
     var other = options;

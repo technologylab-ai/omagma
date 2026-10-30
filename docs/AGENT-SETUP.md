@@ -72,6 +72,28 @@ Restart your agent session after installation and ask it to use `$omagma-setup`.
 
 Source builds use the compiler pin declared in `build.zig.zon`; complete release bundles need no compiler.
 
+## Optional usage skill
+
+The separate [omagma](../skills/omagma/SKILL.md) skill guides everyday mail and
+Calendar work in an existing installation. It uses the executable's contextual
+help and schemas, preserves account scope and explains drafts, file delivery,
+queues and mutation receipts. Setup and authorization repair remain in
+`omagma-setup`.
+
+Register it in Codex using the same persistent repository or bundle root:
+
+```sh
+mkdir -p ~/.codex/skills
+ln -s /absolute/path/to/omagma/skills/omagma ~/.codex/skills/omagma
+```
+
+For Homebrew, the source is
+`$(brew --prefix)/opt/omagma/share/doc/omagma/skills/omagma`. Claude Code can link
+the same directory at `~/.claude/skills/omagma`; shared-skill agents can use
+`~/.agents/skills/omagma`. Inspect an existing directory or link before changing
+it. Restart the agent session to discover `$omagma`. Registration grants no
+account permissions or authority to send mail.
+
 ## Terminal client and agents
 
 For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped write setup, read [account permissions](SETUP.md#full-tuicli-permissions), [TERMINAL.md](TERMINAL.md) and [AGENT-CLI.md](AGENT-CLI.md). Full access uses `gmail.modify` and `contacts` with per-account terminal consent. A fresh terminal-only installation needs one registration; if the bar already works, use a different registration and preserve its read-only grant. Existing bar credentials remain read-only. Install and authorize the requested interfaces; sending mail or changing contacts requires the user's separate request or explicit interaction.

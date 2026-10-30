@@ -183,6 +183,15 @@ def run(binary, root, evidence=None):
     draft = legacy('draft.create', draft={'to': 'peer@example.test', 'subject': 'SyntheticMigrationDraft',
                                          'bodyText': 'SyntheticMigrationBody', 'attachments': [attachment]})
     queued = legacy('draft.queue', draftId=draft['id'], operationId='migrated-intent', delaySeconds=0)
+    # An outgoing Drive source crosses the independent 64 MiB metadata ceiling.
+    # It must migrate as an authenticated stream, without widening metadata.
+    large_path = source / 'large-drive.bin'
+    with large_path.open('wb') as output:
+        output.truncate(64 * 1024 * 1024 + 1)
+    large_path.chmod(0o600)
+    large_file = legacy('attachment.import', path=str(large_path), delivery='drive')
+    large_draft = legacy('draft.create', draft={'to': 'peer@example.test', 'subject': 'Large migration Drive fixture',
+                                               'bodyText': 'No upload is requested.', 'attachments': [large_file]})
     baseline = {p.relative_to(source): hashlib.sha256(p.read_bytes()).digest() for p in source.rglob('*') if p.is_file()}
     source_args = ['--source-config', str(config), '--source-grants', str(grants), '--source-cache', str(cache), '--source-ui', str(preferences)]
     result = subprocess.run([str(binary), 'vault', 'inventory', '--fixtures', *source_args], env=env,
@@ -409,6 +418,10 @@ def run(binary, root, evidence=None):
         require(not control('status')['unlocked'], 'detached service retained local migration key')
         unlock()
         require(remote('draft.read', draftId=draft['id'])['bodyText'] == 'SyntheticMigrationBody', 'draft ID/body did not survive')
+        migrated_large = remote('draft.read', draftId=large_draft['id'])
+        require(migrated_large['attachments'] == large_draft['attachments']
+                and migrated_large['attachments'][0]['size'] == 64 * 1024 * 1024 + 1,
+                'large Drive source or its delivery policy did not survive migration')
         require(remote('auth.status')['configured'], 'sealed grant/client binding did not survive')
         require(remote('preferences.get')['preferences']['searchHistory'][0]['query'] == 'subject:SyntheticMigrationSearch',
                 'global preferences did not migrate')

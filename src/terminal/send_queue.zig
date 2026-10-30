@@ -37,6 +37,8 @@ pub fn stage(store: *storage.Store, draft_id: []const u8, operation_id: []const 
     try bounded.identifier(draft_id);
     if (operation_id.len == 0 or operation_id.len > 256) return error.InvalidOperationId;
     try @import("recipients.zig").validateHeader(operation_id);
+    for (store.state.driveSources) |source| if (std.mem.eql(u8, source.operationId, operation_id) and
+        (!std.mem.eql(u8, source.hash, digest) or !std.mem.eql(u8, source.draftId, draft_id))) return error.OperationConflict;
     for (store.state.sendQueue) |*entry| if (std.mem.eql(u8, entry.operationId, operation_id)) {
         if (!std.mem.eql(u8, entry.draftId, draft_id) or !std.mem.eql(u8, entry.hash, digest)) return error.OperationConflict;
         return entry;
@@ -54,7 +56,7 @@ pub fn stage(store: *storage.Store, draft_id: []const u8, operation_id: []const 
     }
     var active: usize = 0;
     for (store.state.sendQueue) |entry| {
-        if (entry.state == .queued or entry.state == .submitting or entry.state == .unknown) {
+        if (entry.state == .queued or entry.state == .preparing or entry.state == .submitting or entry.state == .unknown) {
             active += 1;
             if (std.mem.eql(u8, entry.draftId, draft_id) or std.mem.eql(u8, entry.hash, digest)) return if (entry.state == .queued) error.DraftQueued else error.UnknownOutcome;
         }
@@ -81,6 +83,7 @@ pub fn cancel(store: *storage.Store, id: []const u8) !*storage.QueuedSend {
     if (entry.state == .canceled) return entry;
     if (entry.state != .queued) return error.SendAlreadySubmitted;
     entry.state = .canceled;
+    entry.preparationId = null;
     try store.save();
     return entry;
 }
@@ -88,6 +91,7 @@ pub fn resumeEntry(store: *storage.Store, id: []const u8, now_ms: i64, delay_ms:
     const entry = try find(store, id);
     if (entry.state != .queued) return error.SendAlreadySubmitted;
     entry.resumeRequired = false;
+    entry.preparationId = null;
     entry.createdAtMs = now_ms;
     entry.dueAtMs = std.math.add(i64, now_ms, delay_ms) catch return error.InvalidSendDelay;
     try store.save();

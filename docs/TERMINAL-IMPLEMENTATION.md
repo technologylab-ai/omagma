@@ -65,6 +65,43 @@ before submission. Native ordinary files and included original resources share
 retained. The browser demo keeps 16 ordinary outgoing files. Formatted
 captures save resources as immutable blobs from the first image, so further
 replies exchange handles instead of copying base64 screenshots through JSON.
+Outgoing local imports may stage up to 1 GiB per file, subject to the account's
+configured disk quota and storage overhead. Only native ordinary files may
+choose `attach`, `auto` or `drive`; preserved original resources retain their
+existing attachment policy. Auto moves the largest eligible files first when
+the decoded or encoded message limit would be exceeded. At most 16 files may
+resolve to Drive. The 25 MiB decoded and 35 MiB MIME limits continue to govern
+the materialized email. Incoming files retain their independent 50 MiB limit;
+metadata and whole-record vault APIs retain their 64 MiB limit. Only attachment
+stream records have the larger ceiling.
+
+Drive preparation uses the optional `drive.file` terminal grant and a separate
+HTTP destination policy. A private bounded ledger persists reserved file IDs,
+resumable session state and uncertain grants before mutations. Explicit retries
+reconcile those identities; unconfirmed permission creation is never repeated
+without observing its result. All selected uploads finish before grants are
+created. Complete owner/reader ACLs and content checksums are verified before
+Gmail submission. Restricted links are rendered separately from authored
+Markdown and placed before the footer and original. Bcc with Drive is refused.
+
+The exact MIME spool and quota checks precede upload/sharing. Preparation
+receipts identify files and confirmed/unconfirmed viewers, while private
+session URLs stay in local encrypted or owner-only storage. Source bindings
+make interrupted preparation recoverable without creating duplicate drafts.
+The final Drive receipts are frozen with the same durable transaction that
+publishes the Gmail unknown/submitting fence, and remain part of settled
+history after the preparation ledger compacts.
+
+Protected vault execution uses `OMAVIPC3`; old generations are boundedly drained
+and refused before dispatch. V1 status/lock/stop controls remain available.
+Progress is an opt-in sequence of small scalar frames under one request
+deadline. A coalesced mailbox feeds an independent writer with a per-frame
+deadline. Completion joins the writer at a frame boundary; failed or canceled
+partial writes close the connection without a final frame. Opted-in send
+connections cancel and join their exact operation on disconnect. A subsequent
+durable read establishes whether preparation stopped or Gmail is uncertain;
+connection closure alone is never a retry authorization.
+
 Native blob metadata uses paged immutable records under the account disk quota;
 the legacy 4,096-entry flat map remains readable. Larger
 source fetches grow from received bytes, and large native draft/IPC records
@@ -245,3 +282,20 @@ preserves the original release evidence. [Cache-first 0.2.2](evidence/terminal-0
 and [the published 0.2.3 mouse/HTML checkpoint](evidence/terminal-0.2.3-mouse.md)
 retain their exact compiler, source, artifact and platform identities. New local
 interface checks do not replace those release or memory measurements.
+Drive preparation has one absolute 30-minute deadline, including authentication,
+uploads and sharing. Each resumable request has at most 120 seconds and cannot
+renew that deadline. An authoritative phase transition reserves a fresh 180 seconds
+for Gmail plus 30 seconds for local journal/receipt work. The daemon uses its
+existing timer task and serializes expiry against phase transitions. The client
+transport has a finite ceiling covering these phases; ordinary daemon and Gmail
+request budgets are unchanged. Before actual Gmail dispatch, a spent commit
+reserve produces a durable local rejection with `DriveSubmissionBudgetExpired`.
+
+Editing/discarding a stopped source or explicitly cancelling its queue retires
+its preparation only when no related active queue or unknown Gmail receipt is
+protected. Retirement first publishes a permanent, quota-bounded history receipt
+(`kind: drivePreparationRetired`, `errorCode: DrivePreparationRetired`) with its
+frozen file IDs and confirmed/unconfirmed access, then removes active mappings
+and resumable records. Replaying the retired operation cannot upload or send.
+Remote files and permissions remain unchanged. History and account disk quotas
+continue to apply; active unknown outcomes are never evicted to free capacity.

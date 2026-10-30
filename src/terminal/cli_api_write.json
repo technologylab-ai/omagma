@@ -47,7 +47,8 @@
         "Streams complete MIME, including Bcc and files. Unfinished empty recipient lists are allowed; invalid recovery fields are refused. Durable unknown state is recorded before upload.",
         "Native terminal only. Requires this account’s mail-drafts or mail-modify grant for provider access. Never set auto, cacheOnly, or barGrantOnly.",
         "No Gmail draft is updated or deleted. Remote writes are never automatically retried; an unknown upload remains paused.",
-        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version."
+        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version.",
+        "Drafts containing Auto/Drive delivery are refused before remote draft creation; change those files to Attach before Gmail handoff."
       ],
       "examples": []
     },
@@ -370,7 +371,8 @@
         "Supply draft or draftId. If both are present, draft takes precedence; an invalid provided draft does not fall back to the saved draft.",
         "Result contains bodyFormat, exact bodyText source (or recoveryFields[4]), generated plainText and optional bodyHtml. Raw HTML in Markdown is escaped; external images/resources are never fetched.",
         "Recipient emptiness and unfinished recovery are allowed for preview. Native source and rendered alternatives are bounded to 35 MiB; portable/browser bodies remain 2 MiB. Final MIME and disk limits are checked separately.",
-        "There is no JSONL browser boolean: use draft.open-preview with a saved draftId to launch the browser."
+        "There is no JSONL browser boolean: use draft.open-preview with a saved draftId to launch the browser.",
+        "Includes attachmentPlan: per-file requested/resolved delivery, attachedBytes, mimeBytes/mimeEstimate, Drive count/limit and blockers. Drive link identities are reserved only after confirmed sending; a local estimate performs no upload or sharing."
       ],
       "examples": [
         {
@@ -493,7 +495,8 @@
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
         "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
-        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
+        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it.",
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
       ],
       "examples": [
         {
@@ -553,7 +556,8 @@
         "An identical repeated stage returns the existing intent. Changed content or a reused operation identity conflicts. A queued matching draft is refused as DraftQueued; unknown/submitting matching content remains fenced.",
         "At most 32 active queued/submitting/unknown intents and 128 retained queue entries. Only terminal history can be evicted; uncertain entries stay protected.",
         "No countdown is automatically processed after a process restart. Use queue.list/read, then explicitly resume/process/cancel after review.",
-        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
+        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it.",
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
       ],
       "examples": [
         {
@@ -893,7 +897,8 @@
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
         "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
-        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
+        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
       ],
       "examples": [
         {
@@ -1305,6 +1310,16 @@
           ],
           "default": "application/octet-stream",
           "description": "Explicit MIME type/subtype without parameters. Omitted or empty uses application/octet-stream; no content/extension sniffing."
+        },
+        "delivery": {
+          "type": "string",
+          "enum": [
+            "attach",
+            "auto",
+            "drive"
+          ],
+          "default": "attach",
+          "description": "Native per-file delivery choice retained in the returned descriptor. Importing never uploads or shares a file."
         }
       },
       "required": [
@@ -1312,9 +1327,9 @@
       ],
       "notes": [
         "Local operation; no provider call or send. Opens a regular file without following its leaf symlink, verifies unchanged identity/size/timestamps and hashes content while copying to a 0600 account blob.",
-        "Maximum file size is 25 MiB. At most 128 stored blobs and the account's disk quota apply. Identical content can reuse a validated existing blob.",
+        "Native local imports may stage files up to 1 GiB, subject to the configured account disk quota and staging/encryption overhead. Outgoing attachments still share 25 MiB decoded and 35 MiB complete MIME limits; Drive delivery is resolved separately. Identical bytes can reuse verified private storage.",
         "Returns a complete Attachment descriptor (id/filename/mimeType/size/blobId). Put that descriptor in Draft.attachments; never invent a blob ID or pass a filesystem path as an attachment.",
-        "The import basename may be up to 512 bytes, but Draft validation requires a safe filename at most 256 UTF-8 bytes before sending. Change only the descriptor's filename to a suitable basename when needed.",
+        "The safe basename is limited to 512 UTF-8 bytes. Controls, path separators and invalid MIME metadata are rejected.",
         "There is no mail-read/mail-send capability check for local importing; sending still checks mail-send and all outgoing limits."
       ],
       "examples": [
@@ -1903,7 +1918,8 @@
         "Local native operation. Reserve this operationId for the measured revision and use it for draft.queue or draft.send; boundary and branding CID widths then match the eventual MIME.",
         "Returns contentDigest to pass as expectedContentDigest during staging/sending, plus revision and operationId for stale-result rejection.",
         "An exact receipt reports bytes/maxBytes, includeOriginal, overLimit and sendable; withoutOriginalBytes is present when omission can be measured. Provably oversized rendered content reports exact:false and overLimit:true without inventing an exact byte count.",
-        "Independent recipient, decoded-file, part-count and encoded-MIME admission checks remain enforced. Measuring does not save or send."
+        "Independent recipient, decoded-file, part-count and encoded-MIME admission checks remain enforced. Measuring does not save or send.",
+        "Includes attachmentPlan: per-file requested/resolved delivery, attachedBytes, mimeBytes/mimeEstimate, Drive count/limit and blockers. Drive link identities are reserved only after confirmed sending; a local estimate performs no upload or sharing."
       ],
       "examples": [
         {
@@ -2064,6 +2080,81 @@
           "limit": 30
         }
       ]
+    },
+    {
+      "cmd": "draft.delivery-plan",
+      "summary": "Plan native attachment delivery without uploading or sharing.",
+      "capabilities": [],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        },
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [],
+      "notes": [
+        "Local only: no network, upload, share or send. Preserves delivery settings and reports blockers; Drive may be selected while disconnected but sending remains blocked.",
+        "Result contains files(index/filename/size/requestedDelivery/delivery/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers.",
+        "Supply draft or draftId; provided source takes precedence.",
+        "Optional operationId supplies that send's recorded Drive receipts so files are planned locally as reuse or newCopy; it does not authorize, start or retry a send.",
+        "blockers are {code,message} records for attachment delivery only. An empty list does not mean the whole send will proceed: sender identity, recipients and provider checks still run when sending."
+      ],
+      "examples": [
+        {
+          "id": "plan",
+          "cmd": "draft.delivery-plan",
+          "account": "personal@example.com",
+          "draftId": "RETURNED_DRAFT_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.selection-plan",
+      "summary": "Estimate selected local files before import.",
+      "capabilities": [],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        },
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1040,
+          "items": {
+            "$ref": "#/$defs/WriteFilePath"
+          }
+        },
+        "delivery": {
+          "type": "string",
+          "enum": [
+            "attach",
+            "auto",
+            "drive"
+          ]
+        }
+      },
+      "required": [
+        "draft",
+        "paths",
+        "delivery"
+      ],
+      "notes": [
+        "Local only: no network, upload, share or send. Preserves delivery settings and reports blockers; Drive may be selected while disconnected but sending remains blocked.",
+        "Result contains files(index/filename/size/requestedDelivery/delivery/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers.",
+        "Selection also reports selectedStart, selectedAttachedCount/Bytes, selectedDriveCount/Bytes and selectionOverLimit. Supplied recoveryFields are retained without treating incomplete fields as a send envelope. No blobs are imported."
+      ],
+      "examples": []
     }
   ],
   "$defs": {
@@ -2172,7 +2263,7 @@
     },
     "Attachment": {
       "type": "object",
-      "description": "Outgoing attachment descriptor. Supply the full descriptor returned by attachment.import for a file handle, or id:\"\" plus filename/size/data for inline bytes. No arbitrary filesystem path is accepted here. At most 1,040 ordinary files; decoded inline bytes across ordinary attachments and original resources total at most 2 MiB. All attachments total at most 25 MiB; larger received handles cannot be sent unchanged.",
+      "description": "Outgoing native file descriptor. Use the full immutable account descriptor returned by attachment.import, or bounded inline bytes. delivery selects attach, auto or drive; only confirmed sending uploads and grants viewer access to To/Cc. Drive with Bcc is refused. No filesystem paths are accepted as handles.",
       "properties": {
         "id": {
           "type": "string",
@@ -2182,7 +2273,7 @@
           "type": "string",
           "description": "Safe nonempty basename, excluding '/' and '\\\\'; '.' and '..' are invalid. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
           "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
-          "maxLength": 256,
+          "maxLength": 512,
           "minLength": 1,
           "allOf": [
             {
@@ -2205,9 +2296,9 @@
         "size": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 26214400,
+          "maximum": 1073741824,
           "default": 0,
-          "description": "Exact decoded content byte count. It must match data or the stored blob. Combined ordinary files plus preserved resources must stay within the outgoing 25 MiB limit."
+          "description": "Exact decoded content size. Local staging is bounded by the account quota and 1 GiB file ceiling. Files resolved to regular attachments plus included original resources share 25 MiB decoded; complete encoded MIME is limited to 35 MiB."
         },
         "data": {
           "$ref": "#/$defs/WriteBase64Url"
@@ -2259,6 +2350,20 @@
               "type": "null"
             }
           ]
+        },
+        "delivery": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "attach",
+            "auto",
+            "drive",
+            null
+          ],
+          "default": null,
+          "description": "Omitted/null and attach force a regular attachment. auto may move this file to Drive to fit the combined decoded/MIME budget; drive always uses a restricted Drive link. Auto/Drive require immutable native blob handles; preserved original resources cannot set delivery."
         }
       },
       "required": [
@@ -2358,6 +2463,10 @@
               "not": {
                 "pattern": "^[mM][eE][sS][sS][aA][gG][eE]/"
               }
+            },
+            "delivery": {
+              "type": "null",
+              "description": "Retained original resources cannot choose a delivery policy."
             }
           },
           "anyOf": [

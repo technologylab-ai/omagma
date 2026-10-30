@@ -58,6 +58,49 @@ pub fn parseOutgoing(a: std.mem.Allocator, raw: []const u8) ![]IncomingMailbox {
     return sink.list.toOwnedSlice(a);
 }
 
+/// The same ordinary address-list grammar (display names, quoted commas,
+/// comments, groups) for callers with their own recipient policy, such as
+/// Calendar guests. `sink.visit(address)` receives each bare address in input
+/// order; the slice is valid only during that call. Nothing is deduplicated,
+/// counted or allocated here, and header-injection bytes are refused as Mail.
+pub fn scanAddresses(raw: []const u8, sink: anytype) !void {
+    const Sink = @TypeOf(sink);
+    const Adapter = struct {
+        inner: Sink,
+        fn appendToken(self: *@This(), token: []const u8) !void {
+            const parsed = try mailbox(token);
+            try self.inner.visit(parsed.address.slice());
+        }
+    };
+    var adapter: Adapter = .{ .inner = sink };
+    try scan(raw, &adapter);
+}
+
+test "recipients: address scan exposes ordinary list grammar as bare addresses for another policy" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Collect = struct {
+        a: std.mem.Allocator,
+        seen: std.ArrayList([]const u8) = .empty,
+        // Cross-file sinks need `pub`; Calendar's sinks are, and so is this.
+        pub fn visit(self: *@This(), value: []const u8) !void {
+            try self.seen.append(self.a, try self.a.dupe(u8, value));
+        }
+    };
+    var sink: Collect = .{ .a = arena.allocator() };
+    try scanAddresses("\"Doe, Jane\" <jane@example.test>, Alex Example <alex@example.test>, plain@example.test (Plain), JANE@example.test", &sink);
+    // Order and repeated mailboxes reach the caller; its policy decides.
+    try std.testing.expectEqual(@as(usize, 4), sink.seen.items.len);
+    try std.testing.expectEqualStrings("jane@example.test", sink.seen.items[0]);
+    try std.testing.expectEqualStrings("alex@example.test", sink.seen.items[1]);
+    try std.testing.expectEqualStrings("plain@example.test", sink.seen.items[2]);
+    try std.testing.expectEqualStrings("JANE@example.test", sink.seen.items[3]);
+    for ([_][]const u8{ "a@example.test\r\nBcc: b@example.test", "a@example.test;b@example.test", "a@example.test,", "\"open <a@example.test>", "Name <not an address>" }) |raw| {
+        sink.seen.clearRetainingCapacity();
+        if (scanAddresses(raw, &sink)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+}
+
 pub const OwnedEnvelope = struct {
     to: []const IncomingMailbox = &.{},
     cc: []const IncomingMailbox = &.{},

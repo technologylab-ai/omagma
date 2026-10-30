@@ -31,6 +31,14 @@ fn digestFile(io: std.Io, file: std.Io.File, expected: usize) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []const u8) !t.Attachment {
+    return importBounded(store, path, requested_mime, t.Limits.attachment_bytes);
+}
+pub fn importDelivery(store: *storage.Store, path: []const u8, requested_mime: []const u8, delivery: ?t.AttachmentDelivery) !t.Attachment {
+    var result = try importBounded(store, path, requested_mime, t.Limits.disk_hard);
+    result.delivery = delivery;
+    return result;
+}
+fn importBounded(store: *storage.Store, path: []const u8, requested_mime: []const u8, max_bytes: usize) !t.Attachment {
     if (path.len == 0 or path.len > 4096 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
     const name = std.fs.path.basename(path);
     const mime_type = if (requested_mime.len != 0) requested_mime else "application/octet-stream";
@@ -39,7 +47,7 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
     defer input.close(store.io);
     const before = try input.stat(store.io);
     if (before.kind != .file) return error.InvalidAttachmentFile;
-    if (before.size > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+    if (before.size > max_bytes) return error.AttachmentsTooLarge;
     const size: usize = @intCast(before.size);
     const digest = try digestFile(store.io, input, size);
     if (!unchanged(before, try input.stat(store.io))) return error.AttachmentChanged;
@@ -115,7 +123,7 @@ pub fn open(store: *storage.Store, id: []const u8, size: usize) !std.Io.File {
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
     // Incoming and outgoing handles share storage. Import and MIME validation
     // independently retain the smaller outgoing-file limit.
-    if (stat.size != size or stat.size > t.Limits.incoming_attachment_bytes) return error.AttachmentChanged;
+    if (stat.size != size or stat.size > t.Limits.disk_hard) return error.AttachmentChanged;
     return file;
 }
 pub fn discard(store: *storage.Store, id: []const u8) !void {
@@ -144,7 +152,7 @@ pub const Stream = struct {
         const id = attachment.blobId orelse return error.InvalidAttachmentHandle;
         if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
         try validateId(id);
-        if (attachment.size > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
+        if (attachment.size > t.Limits.disk_hard) return error.AttachmentsTooLarge;
         if (store.vault != null) {
             var sealed = try store.openVaultStream(try filename(store.allocator, id));
             errdefer sealed.close();
