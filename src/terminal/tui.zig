@@ -1133,6 +1133,8 @@ const Job = struct {
     requested_at: i64 = 0,
     preferences_revision: u64 = 0,
     saved_attachment_open: bool = false,
+    /// A link-chooser destination; fixture runs echo the validated target.
+    reader_link_open: bool = false,
     protected_preview: bool = false,
     recovery_fork: bool = false,
     recovery_return_to_mail: bool = false,
@@ -4466,9 +4468,15 @@ const App = struct {
         self.closeReaderOverlay();
         if (self.reader_overlay_arena == null) self.reader_overlay_arena = .init(self.allocator);
         const allocator = self.reader_overlay_arena.?.allocator();
+        // A semantic parse can approach the HTML limits. Parse each message in
+        // scratch released before the next; the overlay arena receives only
+        // retained destinations and bounded titles.
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
         for (self.thread) |message| {
-            const found = try reader_tools.links(text(get(message, "bodyText")), text(get(message, "bodyHtml")), allocator);
-            for (found.values[0..found.count]) |url| self.reader_links.add(try allocator.dupe(u8, url));
+            _ = scratch.reset(.free_all);
+            const found = try reader_tools.links(text(get(message, "bodyText")), text(get(message, "bodyHtml")), scratch.allocator());
+            for (found.values[0..found.count], found.titles[0..found.count]) |url, title| try self.reader_links.addCopy(allocator, url, title);
             self.reader_links.truncated = self.reader_links.truncated or found.truncated;
         }
         self.reader_overlay = .links;
@@ -4587,6 +4595,7 @@ const App = struct {
             self.preemptReaderAction();
             if (self.job.future != null) return error.OperationPending;
             try self.start(.open, .{ .cmd = "browser.open", .account = self.account(), .url = url });
+            if (self.job.future != null and self.job.kind == .open) self.job.reader_link_open = true;
             self.closeReaderOverlay();
         } else if (!links and key.matches(Key.enter, .{})) try self.readerAttachmentPrompt(self.dialog_focus.index == 2) else if (!links and key.matches('s', .{})) try self.readerAttachmentPrompt(false) else if (!links and key.matches('o', .{})) try self.readerAttachmentPrompt(true);
         return true;
@@ -4737,25 +4746,24 @@ const App = struct {
         const count = if (links) self.reader_links.count else self.readerAttachmentCount();
         const scope_hint = subset and inner.height >= 5;
         const button_rows: u16 = if (!links and inner.width < 28) 2 else 1;
-        const stride: usize = if (links) 1 else 2;
-        const visible = @max((inner.height -| (button_rows + 2 + @as(u16, @intFromBool(scope_hint)))) / stride, 1);
+        const list_rows = inner.height -| (button_rows + 2 + @as(u16, @intFromBool(scope_hint)));
         self.reader_choice = @min(self.reader_choice, count -| 1);
         if (count == 0 and self.dialog_focus.index == 1) self.dialog_focus.index = 0;
         if (count == 0 and !links and self.dialog_focus.index == 2) self.dialog_focus.index = 0;
-        const top = self.reader_choice -| (visible - 1);
         if (count == 0) try self.line(inner, 1, if (links) "No safe HTTP(S) URLs found in loaded messages" else if (subset) "No attachments in loaded messages" else "No received attachments in this view", .muted);
-        var index = top;
-        while (index < count and index - top < visible) : (index += 1) {
-            const label = if (links) self.reader_links.values[index] else blk: {
+        if (links) try self.drawReaderLinks(inner, list_rows) else {
+            const stride: usize = 2;
+            const visible = @max(list_rows / stride, 1);
+            const top = self.reader_choice -| (visible - 1);
+            var index = top;
+            while (index < count and index - top < visible) : (index += 1) {
                 const attachment = self.readerAttachment(index).?.attachment;
                 const value = get(attachment, "size");
                 const size: u64 = if (value == .integer and value.integer >= 0) @intCast(value.integer) else 0;
-                break :blk try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s} · {s}", .{ index + 1, text(get(attachment, "filename")), try attachmentSizeLabel(self.frame.allocator(), size) });
-            };
-            const row = (index - top) * stride;
-            const selected = index == self.reader_choice;
-            try self.line(inner, row, try self.fitLine(inner, label, inner.width), if (selected) (if (self.dialog_focus.index == 0) .selected else .subject) else .text);
-            if (!links) {
+                const label = try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s} · {s}", .{ index + 1, text(get(attachment, "filename")), try attachmentSizeLabel(self.frame.allocator(), size) });
+                const row = (index - top) * stride;
+                const selected = index == self.reader_choice;
+                try self.line(inner, row, try self.fitLine(inner, label, inner.width), if (selected) (if (self.dialog_focus.index == 0) .selected else .subject) else .text);
                 const message = self.readerAttachment(index).?.message;
                 const sender = get(message, "from");
                 const name = if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
@@ -4765,8 +4773,8 @@ const App = struct {
                 const owner_width = inner.width -| date_width -| 3;
                 try self.line(inner.child(.{ .width = owner_width }), row + 1, try self.fitLine(inner, if (name.len > 0) name else "Unknown sender", owner_width), if (selected) .accent else .muted);
                 try self.line(inner.child(.{ .x_off = inner.width - date_width, .width = date_width }), row + 1, date, if (selected) .accent else .muted);
+                self.mouseRows(inner, row, @intCast(stride), .reader_picker, index);
             }
-            self.mouseRows(inner, row, @intCast(stride), .reader_picker, index);
         }
         if (scope_hint) try self.line(inner, inner.height -| (button_rows + 2), "Loaded messages only · open other cards or [/] windows to find more", .muted);
         const action_row = inner.height -| (button_rows + 1);
@@ -4779,7 +4787,52 @@ const App = struct {
         }
         if (button_rows > 1) x = 0;
         _ = try self.actionButton(inner, inner.height - 2, x, "[q Back]", self.dialog_focus.index == (if (links) @as(usize, 2) else 3), true, .reader_picker_back, 0);
-        try self.line(inner, inner.height - 1, if (links and self.reader_links.truncated) "First 128 safe destinations · Tab Controls · Esc/q Back" else "Tab Controls · Enter Activate · j/k Choose · Esc/q Back", if (links and self.reader_links.truncated) .warning else .muted);
+        const truncated = links and self.reader_links.truncated;
+        try self.line(inner, inner.height - 1, if (truncated) "First 128 safe destinations · Tab Controls · Esc/q Back" else "Tab Controls · Enter Activate · j/k Choose · Esc/q Back", if (truncated) .warning else .muted);
+    }
+    /// A titled link takes two rows: its visible anchor text in the sender
+    /// colour, then the exact destination Enter opens, indented under "->".
+    /// Bare URLs keep one flush "->" row, so "->" always marks what opens.
+    /// Entries never split at the list edge; the selected one stays whole and
+    /// with a single list row titles yield to destinations. One hit area
+    /// covers both rows, so either selects the same entry.
+    fn drawReaderLinks(self: *App, inner: vaxis.Window, rows: u16) !void {
+        const found = &self.reader_links;
+        const titled_rows = rows >= 2;
+        var top = self.reader_choice;
+        var used = readerLinkHeight(found, top, titled_rows);
+        while (top > 0 and used + readerLinkHeight(found, top - 1, titled_rows) <= rows) {
+            top -= 1;
+            used += readerLinkHeight(found, top, titled_rows);
+        }
+        var row: u16 = 0;
+        var index = top;
+        while (index < found.count) : (index += 1) {
+            const height = readerLinkHeight(found, index, titled_rows);
+            if (row + height > rows) break;
+            const url = found.values[index];
+            const title = if (height == 2) found.titles[index] else "";
+            const selected = index == self.reader_choice;
+            const focused = selected and self.dialog_focus.index == 0;
+            const entry = inner.child(.{ .y_off = @intCast(row), .height = height });
+            if (focused) entry.fill(.{ .style = self.listStyle(.text, true) });
+            if (title.len > 0) {
+                var title_style = self.listStyle(.sender, focused);
+                title_style.bold = selected;
+                _ = entry.child(.{ .height = 1 }).printSegment(.{ .text = try self.fitLine(entry, title, entry.width), .style = title_style }, .{ .wrap = .none });
+            }
+            const prefix: []const u8 = if (title.len > 0) "    -> " else "-> ";
+            const destination = entry.child(.{ .y_off = @intCast(height - 1), .height = 1 });
+            const columns = destination.width -| @as(u16, @intCast(prefix.len));
+            const shown = try self.fitLine(destination, url, columns);
+            const destination_style = if (focused) self.style(.selected) else self.style(if (selected) .subject else .text);
+            _ = destination.printSegment(.{ .text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ prefix, shown }), .style = destination_style }, .{ .wrap = .none });
+            self.mouseRows(inner, row, height, .reader_picker, index);
+            row += height;
+        }
+    }
+    fn readerLinkHeight(found: *const reader_tools.Links, index: usize, titled_rows: bool) u16 {
+        return if (titled_rows and found.titles[index].len > 0) 2 else 1;
     }
     fn syncFailed(self: *App, index: usize, code: []const u8) void {
         if (index >= self.sync.len) return;
@@ -6984,6 +7037,13 @@ const App = struct {
                     try self.calendar.notice.set(message);
                     self.calendar.error_code = .{};
                     self.sayAction(false, "{s}", .{message});
+                    return;
+                }
+                if (self.job.reader_link_open and self.options.fixtures) {
+                    // Fixtures never launch a browser. Echo the validated literal
+                    // target so owned-PTY tests observe exactly what was chosen.
+                    const result = try self.data(self.job_arena.allocator(), response);
+                    self.sayAction(false, "Mock browser target validated · {s}", .{text(get(result, "url"))});
                     return;
                 }
                 if (self.job.saved_attachment_open) self.sayAction(false, "{s}", .{if (self.options.fixtures) "Attachment saved · mock file-open validated" else "Attachment saved and opened"}) else self.sayAction(false, "{s}", .{if (self.options.fixtures) "Mock browser target validated" else "Opened in the configured browser profile"});
@@ -24640,6 +24700,246 @@ test "dialog UX: link and received-file pickers expose action focus independentl
     _ = try app.onReaderOverlayKey(.{ .codepoint = Key.enter });
     try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+const reader_links_test_thread =
+    \\[{"id":"links","bodyText":"Plain https://example.test/first and https://example.test/bare",
+    \\"bodyHtml":"<p><a href='https://example.test/first'>Review <b>API</b> Keys</a> <a href='https://example.test/bare'>https://example.test/bare</a></p><p><a href='https://evil.test/signin'>https://bank.example/login</a></p><p><a href='https://example.test/q?a=1&amp;b=(2)!'>Tom &amp; Jerry <i>Season</i> Two with a deliberately long visible label that must ellipsize</a></p>"}]
+;
+const ReaderLinkCell = struct { x: u16, y: u16 };
+fn readerLinkRow(allocator: Allocator, screen: *vaxis.Screen, y: usize) ![]const u8 {
+    var line: std.ArrayList(u8) = .empty;
+    for (0..screen.width) |x| try line.appendSlice(allocator, screen.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+    return line.items;
+}
+fn readerLinkCell(allocator: Allocator, screen: *vaxis.Screen, needle: []const u8) !?ReaderLinkCell {
+    for (0..screen.height) |y| {
+        var line: std.ArrayList(u8) = .empty;
+        var starts: std.ArrayList(usize) = .empty;
+        for (0..screen.width) |x| {
+            try starts.append(allocator, line.items.len);
+            try line.appendSlice(allocator, screen.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+        }
+        const offset = std.mem.indexOf(u8, line.items, needle) orelse continue;
+        for (starts.items, 0..) |start, x| if (start == offset) return .{ .x = @intCast(x), .y = @intCast(y) };
+    }
+    return null;
+}
+fn readerLinkHit(app: *App, cell: ReaderLinkCell) ?layout.Hit {
+    return app.mouse_hits.at(@intCast(cell.x), @intCast(cell.y));
+}
+
+test "reader links: titles sit above indented exact destinations at 132 and 48 columns, colour and mono" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const s = scratch.allocator();
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), reader_links_test_thread, .{}));
+    try app.openReaderLinks();
+    try std.testing.expectEqual(@as(usize, 4), app.reader_links.count);
+    try std.testing.expectEqualStrings("https://example.test/first", app.reader_links.values[0]);
+    try std.testing.expectEqualStrings("Review API Keys", app.reader_links.titles[0]);
+    try std.testing.expectEqualStrings("", app.reader_links.titles[1]);
+    try std.testing.expectEqualStrings("https://example.test/q?a=1&b=(2)!", app.reader_links.values[3]);
+    for ([_]u16{ 132, 48 }) |columns| {
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(a, .{ .cols = columns, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(a);
+        app.vx = &vx;
+        const screen = &vx.screen;
+        for ([_]bool{ false, true }) |mono| {
+            app.mono = mono;
+            app.reader_choice = 0;
+            app.dialog_focus.index = 0;
+            try app.drawReaderOverlay(vx.window());
+            const title = (try readerLinkCell(s, screen, "Review API Keys")).?;
+            const first = (try readerLinkCell(s, screen, "-> https://example.test/first")).?;
+            try std.testing.expect(first.y == title.y + 1 and first.x == title.x + 4);
+            const bare = (try readerLinkCell(s, screen, "-> https://example.test/bare")).?;
+            try std.testing.expect(bare.y == title.y + 2 and bare.x == title.x);
+            const misleading = (try readerLinkCell(s, screen, "https://bank.example/login")).?;
+            try std.testing.expect(misleading.y == title.y + 3 and misleading.x == title.x);
+            // A URL-shaped title stays above its actual destination.
+            const actual = (try readerLinkCell(s, screen, "evil.test")).?;
+            try std.testing.expectEqual(title.y + 4, actual.y);
+            try std.testing.expectEqualStrings("-", screen.readCell(title.x + 4, title.y + 4).?.char.grapheme);
+            const long_title = (try readerLinkCell(s, screen, "Tom & Jerry Season Two")).?;
+            try std.testing.expect(long_title.y == title.y + 5 and long_title.x == title.x);
+            try std.testing.expectEqual(columns == 48, std.mem.indexOf(u8, try readerLinkRow(s, screen, long_title.y), "…") != null);
+            const q = (try readerLinkCell(s, screen, "    -> https://example.test/q?a=1&b=(2)!")).?;
+            try std.testing.expect(q.y == title.y + 6 and q.x == title.x);
+            const open = (try readerLinkCell(s, screen, "[Enter Open]")).?;
+            try std.testing.expect(open.y > q.y);
+            const title_cell = screen.readCell(title.x, title.y).?;
+            const indent_cell = screen.readCell(title.x, first.y).?;
+            const long_cell = screen.readCell(long_title.x, long_title.y).?;
+            const q_cell = screen.readCell(q.x + 7, q.y).?;
+            if (mono) {
+                try std.testing.expect(title_cell.style.reverse and indent_cell.style.reverse);
+                try std.testing.expect(!long_cell.style.reverse and !q_cell.style.reverse);
+            } else {
+                try std.testing.expect(std.meta.eql(title_cell.style.bg, app.style(.selected).bg) and std.meta.eql(indent_cell.style.bg, app.style(.selected).bg));
+                try std.testing.expect(std.meta.eql(title_cell.style.fg, app.style(.sender).fg));
+                try std.testing.expect(std.meta.eql(long_cell.style.fg, app.style(.sender).fg) and std.meta.eql(long_cell.style.bg, app.style(.text).bg));
+                try std.testing.expect(std.meta.eql(q_cell.style.fg, app.style(.text).fg) and !std.meta.eql(app.style(.sender).fg, app.style(.text).fg));
+            }
+            // Both rows of an entry hit the same item; the footer hits nothing.
+            for ([_]ReaderLinkCell{ title, .{ .x = first.x + 6, .y = first.y } }) |cell| {
+                const hit = readerLinkHit(&app, cell).?;
+                try std.testing.expect(hit.kind == .reader_picker and hit.index == 0);
+            }
+            for ([_]ReaderLinkCell{ long_title, .{ .x = q.x + 8, .y = q.y } }) |cell| {
+                const hit = readerLinkHit(&app, cell).?;
+                try std.testing.expect(hit.kind == .reader_picker and hit.index == 3);
+                app.reader_choice = 0;
+                try std.testing.expect(try app.onReaderHit(hit));
+                try std.testing.expectEqual(@as(usize, 3), app.reader_choice);
+            }
+            const footer = (try readerLinkCell(s, screen, "Tab Controls")).?;
+            try std.testing.expect(readerLinkHit(&app, footer) == null);
+            try std.testing.expectEqual(layout.HitKind.reader_picker_activate, readerLinkHit(&app, open).?.kind);
+        }
+    }
+    app.closeReaderOverlay();
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "reader links: short overlays keep the whole selected entry while keys page and Tab moves focus" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const s = scratch.allocator();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), reader_links_test_thread, .{}));
+    try app.openReaderLinks();
+    // Five list rows: Review (2) + bare (1) + misleading (2); Tom (2) waits.
+    try app.drawReaderOverlay(vx.window());
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "Review API Keys")) != null);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "Tom & Jerry")) == null);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.end });
+    try std.testing.expectEqual(@as(usize, 3), app.reader_choice);
+    try app.drawReaderOverlay(vx.window());
+    const tom = (try readerLinkCell(s, &vx.screen, "Tom & Jerry")).?;
+    const q = (try readerLinkCell(s, &vx.screen, "-> https://example.test/q?a=1&b=(2)!")).?;
+    try std.testing.expectEqual(tom.y + 1, q.y);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "Review API Keys")) == null);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "-> https://example.test/bare")) != null);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "[Enter Open]")).?.y > q.y);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "[q Back]")).?.y > q.y);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = 'k' });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = 'k' });
+    try std.testing.expectEqual(@as(usize, 1), app.reader_choice);
+    try app.drawReaderOverlay(vx.window());
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "Review API Keys")) != null);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 3), app.reader_choice);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = 'u', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 0), app.reader_choice);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqual(@as(usize, 1), app.reader_choice);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    try app.drawReaderOverlay(vx.window());
+    const bare = (try readerLinkCell(s, &vx.screen, "-> https://example.test/bare")).?;
+    const bare_cell = vx.screen.readCell(bare.x, bare.y).?;
+    try std.testing.expect(!std.meta.eql(bare_cell.style.bg, app.style(.selected).bg) and bare_cell.style.bold);
+    const open = (try readerLinkCell(s, &vx.screen, "[Enter Open]")).?;
+    try std.testing.expect(std.meta.eql(vx.screen.readCell(open.x, open.y).?.style.bg, app.style(.selected).bg));
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+    try app.drawReaderOverlay(vx.window());
+    try std.testing.expect(std.meta.eql(vx.screen.readCell(bare.x, bare.y).?.style.bg, app.style(.selected).bg));
+    // One list row: titles yield; the selected destination stays whole.
+    vx.screen.deinit(a);
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 8, .x_pixel = 0, .y_pixel = 0 });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.end });
+    try app.drawReaderOverlay(vx.window());
+    const only = (try readerLinkCell(s, &vx.screen, "-> https://example.test/q?a=1&b=(2)!")).?;
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "Tom & Jerry")) == null);
+    try std.testing.expect((try readerLinkCell(s, &vx.screen, "[Enter Open]")).?.y > only.y);
+    const hit = readerLinkHit(&app, only).?;
+    try std.testing.expect(hit.kind == .reader_picker and hit.index == 3);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "reader links: overlay keeps only bounded copies, not per-message parse scratch, and frees them on close" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var filler: std.ArrayList(u8) = .empty;
+    defer filler.deinit(a);
+    for (0..30_000) |_| try filler.appendSlice(a, "filler ");
+    const source = try std.fmt.allocPrint(app.account_arena.allocator(), "[{{\"id\":\"big\",\"bodyHtml\":\"<p>{s}</p><p><a href='https://example.test/kept?x=1&amp;y=2'>Kept <b>title</b></a></p>\"}},{{\"id\":\"plain\",\"bodyText\":\"Later https://example.test/kept?x=1&y=2 and https://example.test/other\"}}]", .{filler.items});
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), source, .{}));
+    try app.openReaderLinks();
+    try std.testing.expectEqual(@as(usize, 2), app.reader_links.count);
+    try std.testing.expectEqualStrings("https://example.test/kept?x=1&y=2", app.reader_links.values[0]);
+    try std.testing.expectEqualStrings("Kept title", app.reader_links.titles[0]);
+    try std.testing.expectEqualStrings("https://example.test/other", app.reader_links.values[1]);
+    try std.testing.expectEqualStrings("", app.reader_links.titles[1]);
+    try std.testing.expect(app.reader_overlay_arena.?.queryCapacity() < 16 * 1024);
+    app.closeReaderOverlay();
+    try std.testing.expectEqual(@as(usize, 0), app.reader_links.count);
+    try std.testing.expectEqual(@as(usize, 0), app.reader_overlay_arena.?.queryCapacity());
+}
+
+test "reader links: Enter submits the owned exact destination for the current account, then closes" {
+    const Capture = struct {
+        request: [8192]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        fn call(context: *anyopaque, a: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.request[0..request.len], request);
+            self.len = request.len;
+            self.calls += 1;
+            const parsed = try std.json.parseFromSlice(Value, a, request, .{});
+            defer parsed.deinit();
+            return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .fixture = true, .opened = false, .url = text(get(parsed.value, "url")), .profile = "--profile-directory=Fixture" } }, .{});
+        }
+    };
+    const a = std.testing.allocator;
+    var capture: Capture = .{};
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &capture, .callFn = Capture.call };
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), reader_links_test_thread, .{}));
+    try app.openReaderLinks();
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.end });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.enter });
+    // The request owns its URL before the overlay arena is released.
+    try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
+    try std.testing.expectEqual(@as(usize, 0), app.reader_links.count);
+    app.job.future.?.await(app.io);
+    try app.finish();
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    const request = try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), capture.request[0..capture.len], .{});
+    try std.testing.expectEqualStrings("browser.open", text(get(request, "cmd")));
+    try std.testing.expectEqualStrings("personal@example.test", text(get(request, "account")));
+    try std.testing.expectEqualStrings("https://example.test/q?a=1&b=(2)!", text(get(request, "url")));
+    try std.testing.expectEqualStrings("Mock browser target validated · https://example.test/q?a=1&b=(2)!", app.status[0..app.status_len]);
 }
 
 test "label manager: custom-only collection focus, literal names and selection survive metadata refresh" {

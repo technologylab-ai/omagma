@@ -450,7 +450,15 @@ saved count and failed file; successful saves remain in place. Fix the cause
 and explicitly choose the remaining files to retry. Failed saves are never
 retried automatically. Saving files never sends mail.
 
-`L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. `o` opens the selected mail in Gmail; with a thread message focused, it opens that exact message. In normal reply/forward mode it opens the original context. Each action uses the current account's configured Chrome profile. Rendering mail never launches anything automatically.
+`L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. Each destination is listed once, in first-seen order (plain-text URLs, then HTML links, message by message). When a link's visible text differs from its URL, that text appears on its own row in the sender colour and the destination sits indented beneath it:
+
+```
+Review API Keys
+    -> https://example.test/keys?id=7
+-> https://example.test/plain
+```
+
+The `->` row shows the destination that opens. Long rows are shortened to fit the terminal; opening uses the full original URL. The title is the link's visible text only: bold or italic parts, entities, table cells and line breaks are joined as written. It never comes from a `title` attribute, a fetched page or an unwrapped redirect. Titles are capped at 256 UTF-8 bytes and terminal/bidi controls are removed. Bare URLs, and labels that only repeat the URL, get no title row. A URL first seen without a label takes the first later descriptive label. A label that is only an image (`[Image: …]`) gives way to later text. Otherwise the first label stays. Clicking either row selects that entry. j/k move by one entry, Ctrl+D/U by ten, and Home/End jump to the ends. Entries stay together; on very short terminals only the destination row is shown. `o` opens the selected mail in Gmail; with a thread message focused, it opens that exact message. In normal reply/forward mode it opens the original context. Each action uses the current account's configured Chrome profile. Rendering mail never launches anything automatically.
 
 ## Labels, bulk actions and contacts
 

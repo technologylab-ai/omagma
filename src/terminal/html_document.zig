@@ -309,7 +309,9 @@ const Context = struct {
         try self.blocks.append(self.a, block);
     }
     fn sameLink(a: ?[]const u8, b: ?[]const u8) bool {
-        return if (a) |v| if (b) |w| std.mem.eql(u8, v, w) else false else b == null;
+        // One decoded href allocation identifies one anchor. Equal destinations
+        // on adjacent anchors must retain their individual visible labels.
+        return if (a) |v| if (b) |w| v.ptr == w.ptr and v.len == w.len else false else b == null;
     }
     fn flushSpan(self: *Context) !void {
         if (self.text_buffer.items.len == 0) return;

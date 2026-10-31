@@ -36,6 +36,7 @@ SUITES = {
     "terminal_invitation_notices": (),
     "terminal_invitation_reconcile": (),
     "terminal_reader_next_ux": (),
+    "terminal_reader_links": (),
     "terminal_follow_ups": (),
     "terminal_foreground_priority": (),
     "terminal_gmail_drafts": ("--pty",),
