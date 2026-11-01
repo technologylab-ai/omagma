@@ -27,6 +27,7 @@ SUITES = {
     "terminal_message_isolation": (),
     "terminal_calendar": (),
     "terminal_calendar_tui": (),
+    "terminal_calendar_booking": (),
     "terminal_calendar_compose": (),
     "terminal_calendar_slots": (),
     "terminal_calendar_join_profile": (),

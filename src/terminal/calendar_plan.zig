@@ -126,6 +126,8 @@ pub const Decision = union(enum) {
 };
 
 pub const Input = struct {
+    /// Fresh primary-calendar ownership evidence; never inferred from its ID.
+    personal_copy_owner: ?[]const u8 = null,
     invitation: t.Invitation,
     target: t.Target,
     lookup: Lookup,
@@ -148,7 +150,11 @@ pub fn plan(input: Input) !Decision {
         // Deleted events may have only an ID. They cannot establish absence
         // or be imported over unless the host can bind their stored identity.
         if (!std.mem.eql(u8, event.uid, invitation.uid)) return .identity_conflict;
-        if (event.organizer.len != 0 and !std.ascii.eqlIgnoreCase(event.organizer, invitation.organizer)) return .identity_conflict;
+        if (event.organizer.len != 0 and !std.ascii.eqlIgnoreCase(event.organizer, invitation.organizer)) {
+            const owner = input.personal_copy_owner orelse return .identity_conflict;
+            const source_hash = std.fmt.bytesToHex(invitation.source_hash, .lower);
+            if (invitation.attendee.len != 0 or !std.ascii.eqlIgnoreCase(owner, input.target.account) or !std.ascii.eqlIgnoreCase(event.organizer, owner) or event.operation_marker.len == 0 or !std.mem.eql(u8, event.source_marker, &source_hash)) return .identity_conflict;
+        }
         if (match != null) return .ambiguous;
         match = event;
     }

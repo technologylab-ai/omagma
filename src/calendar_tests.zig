@@ -328,3 +328,65 @@ test "calendar: journal permits one durable dispatch and rejects changed receipt
     var corrupt: MemoryJournal = .{ .corrupt_receipt = true };
     try std.testing.expectError(error.OperationConflict, corrupt.adapter().claim(bound));
 }
+
+test "calendar booking: attendee-free import keeps exact source without authorizing RSVP" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n" ++
+        "UID:booking@example.test\r\nDTSTAMP:20261101T090000Z\r\nORGANIZER:mailto:bookings@example.test\r\n" ++
+        "DTSTART:20261110T091500Z\r\nDTEND:20261110T100500Z\r\nSUMMARY:Haircut booking\r\n" ++
+        "LOCATION:12 Example Street\r\nURL:https://bookings.example.test/manage\r\nDESCRIPTION:Booked service\\nPlease arrive on time.\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    try std.testing.expectError(error.NotAnAttendee, invitation.parse(a, raw, target.account, &.{}));
+    const booking = try invitation.parseForCalendar(a, raw, target.account, &.{});
+    try std.testing.expectEqualStrings("", booking.attendee);
+    try std.testing.expectEqualStrings("Booked service\nPlease arrive on time.", booking.description);
+    const request = try provider.prepareImport(a, booking, intent(booking), null, null);
+    const body = try std.json.parseFromSliceLeaky(j.Value, a, request.body.?, .{});
+    try std.testing.expectEqualStrings("https://www.googleapis.com/calendar/v3/calendars/primary/events/import", request.url);
+    try std.testing.expectEqualStrings("booking@example.test", j.text(body, "iCalUID"));
+    try std.testing.expectEqualStrings(target.account, j.text(j.get(body, "organizer").?, "email"));
+    try std.testing.expectEqualStrings("bookings@example.test", j.text(j.get(j.get(body, "extendedProperties").?, "private").?, "omagmaOriginalOrganizer"));
+    try std.testing.expectEqualStrings("Booked service\nPlease arrive on time.\n\nJoin: https://bookings.example.test/manage", j.text(body, "description"));
+    try std.testing.expectEqualStrings(try provider.importDescription(a, booking.description, booking.join_url), j.text(body, "description"));
+    try std.testing.expect(j.get(body, "attendees") == null);
+    try std.testing.expect(j.get(body, "sendUpdates") == null);
+    try std.testing.expectEqualStrings("2026-11-10T09:15:00.000Z", j.text(j.get(body, "start").?, "dateTime"));
+    try std.testing.expectEqualStrings("2026-11-10T10:05:00.000Z", j.text(j.get(body, "end").?, "dateTime"));
+    const foreign = try std.mem.replaceOwned(u8, a, raw, "SUMMARY:", "ATTENDEE:mailto:someone@example.test\r\nSUMMARY:");
+    try std.testing.expectError(error.NotAnAttendee, invitation.parseForCalendar(a, foreign, target.account, &.{}));
+    const canceled = try std.mem.replaceOwned(u8, a, raw, "SUMMARY:", "STATUS:CANCELLED\r\nSUMMARY:");
+    const canceled_booking = try invitation.parseForCalendar(a, canceled, target.account, &.{});
+    try std.testing.expectError(error.CalendarCancelled, provider.prepareImport(a, canceled_booking, intent(canceled_booking), null, null));
+}
+
+test "calendar provider diagnostics: bounded structured rejection details survive without terminal controls" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const detail = try provider.errorDetail(arena.allocator(), 400,
+        \\{"error":{"message":"Invalid value for start.timeZone\u001b[2J\n","errors":[{"reason":"invalid","location":"start.timeZone"}]}}
+    );
+    try std.testing.expectEqual(@as(u16, 400), detail.status);
+    try std.testing.expectEqualStrings("invalid", detail.reason);
+    try std.testing.expectEqualStrings("start.timeZone", detail.location);
+    try std.testing.expectEqualStrings("Invalid value for start.timeZone[2J", detail.message);
+    const bad = try provider.errorDetail(arena.allocator(), 400, "not JSON");
+    try std.testing.expectEqualStrings("", bad.message);
+    const long = try j.encodeAlloc(arena.allocator(), .{ .@"error" = .{ .message = @as([1000]u8, @splat('x'))[0..] } }, .{});
+    const bounded = try provider.errorDetail(arena.allocator(), 400, long);
+    try std.testing.expectEqual(@as(usize, 512), bounded.message.len);
+}
+
+test "calendar import: frozen organizer retains the invitation mailbox grammar" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tests/fixtures/terminal/calendar/single-utc.ics", a, .limited(t.Limits.source_bytes));
+    var value = try invitation.parse(a, raw, target.account, &.{});
+    for ([_][]const u8{ "organizer+tag?x@example.test", "\"quoted.local\"@example.test" }) |organizer| {
+        value.organizer = organizer;
+        const request = try provider.prepareImport(a, value, intent(value), null, null);
+        try std.testing.expectEqualStrings(organizer, try provider.importedOrganizer(a, request));
+    }
+}

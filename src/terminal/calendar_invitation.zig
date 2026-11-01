@@ -5,7 +5,19 @@ const t = @import("calendar_types.zig");
 const time = t.time;
 const recipients = @import("recipients.zig");
 
+/// RSVP parsing always requires the selected account or a verified alias.
 pub fn parse(a: std.mem.Allocator, raw: []const u8, account: []const u8, verified_aliases: []const []const u8) !t.Invitation {
+    return parseWithPolicy(a, raw, account, verified_aliases, false);
+}
+
+/// An explicitly reviewed Calendar import may also copy a booking that lists
+/// no attendees at all. Listed-but-unmatched attendees remain an error; this
+/// does not authorize a reply or alter the strict RSVP parser.
+pub fn parseForCalendar(a: std.mem.Allocator, raw: []const u8, account: []const u8, verified_aliases: []const []const u8) !t.Invitation {
+    return parseWithPolicy(a, raw, account, verified_aliases, true);
+}
+
+fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, verified_aliases: []const []const u8, allow_unaddressed: bool) !t.Invitation {
     if (raw.len == 0 or raw.len > t.Limits.source_bytes) return error.CalendarTooLarge;
     try recipients.validateAddress(account);
     if (verified_aliases.len > recipients.max_recipients) return error.TooManyAliases;
@@ -141,7 +153,7 @@ pub fn parse(a: std.mem.Allocator, raw: []const u8, account: []const u8, verifie
         }
     }
     if (!ended or depth != 0 or events != 1 or seen & 0x1f != 0x1f) return error.InvalidCalendar;
-    if ((result.method == .request or attendees != 0) and result.attendee.len == 0) return error.NotAnAttendee;
+    if (result.attendee.len == 0 and (attendees != 0 or (result.method == .request and !allow_unaddressed))) return error.NotAnAttendee;
     if (result.method == .request and result.start == null) return error.CalendarStartRequired;
     if (result.start) |start| {
         if (result.end) |end| if ((start.kind == .date) != (end.kind == .date)) return error.InvalidCalendarTime;

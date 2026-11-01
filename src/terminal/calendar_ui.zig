@@ -93,6 +93,16 @@ pub const State = struct {
     calendar_name: b.Text(1024) = .{},
     zone_name: b.Text(512) = .{},
     source_message: b.Text(1024) = .{},
+    booking_copy: bool = false,
+    booking_details: bool = false,
+    booking_lines: usize = 0,
+    booking_height: usize = 0,
+    provider_error: Document = .{},
+    mail_primary_pending: bool = false,
+    destination_primary: bool = false,
+    primary_issue: b.Text(2048) = .{},
+    primary_reason_rows: usize = 0,
+    primary_reason_lines: usize = 0,
     operation: b.Text(128) = .{},
     hash: b.Text(64) = .{},
     error_code: b.Text(128) = .{},
@@ -154,6 +164,7 @@ pub const State = struct {
         self.agenda.deinit();
         self.card.deinit();
         self.review.deinit();
+        self.provider_error.deinit();
         self.zone.deinit(a);
         self.card_zone.deinit(a);
         self.* = .{};

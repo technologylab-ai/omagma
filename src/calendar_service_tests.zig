@@ -444,3 +444,62 @@ test "calendar service: recurring source can locate an existing master without r
     try std.testing.expectEqual(@as(usize, 3), existing.source.recurrence.len);
     try std.testing.expectEqual(@as(usize, 0), host.writes);
 }
+
+test "calendar service: provider rejection preserves detailed response and settles once even if diagnostics run out of memory" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rejected = "{\"error\":{\"message\":\"Bad Request\",\"errors\":[{\"reason\":\"invalid\",\"message\":\"Invalid event field\",\"location\":\"start.timeZone\"}]}}";
+    var host: Host = .{ .steps = &.{ .{ .kind = .event_lookup }, .{ .kind = .event_lookup }, .{ .kind = .import_event, .status = 400, .body = rejected } } };
+    const review = try prepare(&host, a);
+    const result = try host.service(a).apply(review, review.confirmation());
+    try std.testing.expectEqual(.rejected, result.operation.state);
+    try std.testing.expectEqual(.rejected, host.state.operation.?.state);
+    try std.testing.expectEqualStrings("Invalid event field", result.provider_error.?.message);
+    try std.testing.expectEqualStrings("invalid", result.provider_error.?.reason);
+    try std.testing.expectEqualStrings("start.timeZone", result.provider_error.?.location);
+    try std.testing.expectEqual(@as(u16, 400), result.provider_error.?.status);
+    _ = try host.service(a).apply(review, review.confirmation());
+    try std.testing.expectEqual(@as(usize, 1), host.writes);
+    var saw_diagnostic_oom = false;
+    for (0..256) |failure_index| {
+        var current: Host = .{ .steps = &.{ .{ .kind = .event_lookup }, .{ .kind = .event_lookup }, .{ .kind = .import_event, .status = 400, .body = rejected } } };
+        const saved = try prepare(&current, a);
+        var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = failure_index });
+        const applied = current.service(failing.allocator()).apply(saved, saved.confirmation()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), current.writes);
+            continue;
+        };
+        if (current.writes == 1 and failing.has_induced_failure) {
+            try std.testing.expectEqual(.rejected, applied.operation.state);
+            try std.testing.expectEqual(.rejected, current.state.operation.?.state);
+            saw_diagnostic_oom = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_diagnostic_oom);
+}
+
+test "calendar booking: a wrong UID cannot settle a personal-copy success or reconciliation" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |lost| {
+        var host: Host = .{ .steps = &.{.{ .kind = .event_lookup }} };
+        const raw = try fixture(a, "booking-no-attendees.ics");
+        const zone = try @import("terminal/timezone.zig").Zone.fromPosix("CET-1CEST,M3.5.0/2,M10.5.0/3");
+        const binding: t.time.Binding = .{ .id = "Europe/Vienna", .zone = &zone, .embedded_rules_verified = true };
+        const planned = try host.service(a).invitationPlan(calendar, raw, &.{}, .{ .start = binding, .end = binding });
+        try std.testing.expectError(error.NotAnAttendee, host.service(a).prepareRsvpReview(planned, "no-booking-rsvp", .accepted));
+        const review = try host.service(a).prepareReview(planned, "wrong-uid-copy");
+        try std.testing.expectError(error.NotAnAttendee, provider.withRsvpResponse(a, review.request, "", .accepted, null));
+        const hash = std.fmt.bytesToHex(review.intent.source_hash, .lower);
+        const returned = try j.encodeAlloc(a, .{ .id = "wrong-uid-event", .iCalUID = "another-source@example.test", .etag = "etag1", .organizer = .{ .email = target.account }, .summary = "Wrong source", .start = .{ .dateTime = "2026-11-10T09:15:00Z" }, .end = .{ .dateTime = "2026-11-10T10:05:00Z" }, .sequence = review.intent.version.sequence, .privateCopy = true, .extendedProperties = .{ .private = .{ .omagmaOperation = review.intent.operation_id, .omagmaSource = hash[0..] } } }, .{});
+        host.steps = &.{ .{ .kind = .event_lookup }, .{ .kind = .event_lookup }, .{ .kind = .import_event, .lost = lost, .body = returned }, .{ .kind = .event_lookup, .body = try page(a, returned) } };
+        const result = try host.service(a).apply(review, review.confirmation());
+        try std.testing.expectEqual(.unknown, result.operation.state);
+        try std.testing.expectEqual(.unknown, (try host.service(a).reconcile(review)).operation.state);
+        try std.testing.expectEqual(@as(usize, 1), host.writes);
+    }
+}

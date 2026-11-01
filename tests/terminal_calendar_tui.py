@@ -671,8 +671,6 @@ def wait_destination(terminal):
 def plan(terminal, version, action):
     search_mail(terminal, version)
     terminal.send(b"A")
-    wait_destination(terminal)
-    terminal.send(b"\r")
     terminal.until(lambda: "Action: " + {"import_missing": "Add to Calendar", "review_update": "Apply organizer's update", "review_cancel": "Apply organizer's cancellation"}.get(action, action) in terminal.text() and "[Enter Review]" in terminal.text())
 
 
@@ -719,8 +717,6 @@ def lifecycle(binary, directory, captures, lost=False):
                 terminal = start(binary, client_dir, fixture, scenario=scenario)
                 search_mail(terminal, version)
                 terminal.send(b"A")
-                wait_destination(terminal)
-                terminal.send(b"\r")
                 terminal.until(lambda: "[r Check Calendar]" in terminal.text())
                 terminal.send(b"r")
                 terminal.until(lambda: "Calendar action reconciled" in terminal.text())

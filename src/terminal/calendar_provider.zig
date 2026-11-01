@@ -93,6 +93,11 @@ pub fn prepareImport(a: std.mem.Allocator, source: t.Invitation, intent: plan.In
     return prepareResolvedImport(a, source, intent, try invitation.resolveSpan(source, start_binding, end_binding));
 }
 
+/// Shared by the mail review and import so displayed notes match submitted bytes.
+pub fn importDescription(a: std.mem.Allocator, description: []const u8, join_url: []const u8) ![]const u8 {
+    return if (join_url.len != 0 and std.mem.indexOf(u8, description, join_url) == null) try std.fmt.allocPrint(a, "{s}\n\nJoin: {s}", .{ description, join_url }) else description;
+}
+
 /// The service resolves and reviews these exact values before binding a write.
 pub fn prepareResolvedImport(a: std.mem.Allocator, source: t.Invitation, intent: plan.Intent, span: invitation.Span) !Request {
     try intent.validate();
@@ -100,27 +105,43 @@ pub fn prepareResolvedImport(a: std.mem.Allocator, source: t.Invitation, intent:
     if (source.method == .cancel or source.cancelled) return error.CalendarCancelled;
     if (source.isRecurring()) return error.UnsupportedCalendarRecurrence;
     try validSpan(span);
-    const description = if (source.join_url.len != 0 and std.mem.indexOf(u8, source.description, source.join_url) == null) try std.fmt.allocPrint(a, "{s}\n\nJoin: {s}", .{ source.description, source.join_url }) else source.description;
+    const description = try importDescription(a, source.description, source.join_url);
     try validateInvitationText(source, description);
     const source_hex = std.fmt.bytesToHex(source.source_hash, .lower);
+    const Attendee = struct { email: []const u8, responseStatus: []const u8 };
+    const attendees: ?[]const Attendee = if (source.attendee.len == 0) null else &.{.{ .email = source.attendee, .responseStatus = "needsAction" }};
     const body = try std.json.Stringify.valueAlloc(a, .{
         .iCalUID = source.uid,
-        .organizer = .{ .email = source.organizer },
+        .organizer = .{ .email = if (source.attendee.len == 0) source.account else source.organizer },
         .summary = source.summary,
         .description = description,
         .location = source.location,
         .start = try googleTime(a, span.start),
         .end = try googleTime(a, span.end),
         .sequence = source.version.sequence,
-        .attendees = [_]struct { email: []const u8, responseStatus: []const u8 }{.{ .email = source.attendee, .responseStatus = "needsAction" }},
+        // No guest is invented for an attendee-free booking. A Calendar copy
+        // and a verified-attendee RSVP are deliberately separate operations.
+        .attendees = attendees,
         .transparency = if (source.transparent) @as([]const u8, "transparent") else "opaque",
         .visibility = if (source.private) @as([]const u8, "private") else "default",
-        .extendedProperties = .{ .private = .{ .omagmaOperation = intent.operation_id, .omagmaSource = source_hex[0..] } },
+        .extendedProperties = .{ .private = .{ .omagmaOperation = intent.operation_id, .omagmaSource = source_hex[0..], .omagmaOriginalOrganizer = if (source.attendee.len == 0) @as(?[]const u8, source.organizer) else null, .omagmaPersonalCopy = if (source.attendee.len == 0) @as(?[]const u8, "1") else null } },
     }, .{ .emit_null_optional_fields = false });
     if (body.len > t.Limits.source_bytes * 2) return error.CalendarTooLarge;
-    // No event ID, sendUpdates, conference creation, or organizer replacement.
-    // import is the documented attendee-copy path that sends no invitation.
+    // Personal bookings use the verified primary owner as organizer: Google
+    // refuses imports unless the owner is organizer or attendee. Source
+    // provenance and UID stay intact; no guest or email is introduced.
     return .{ .target = intent.identity.target, .kind = .import_event, .method = .POST, .url = try std.fmt.allocPrint(a, "{s}/events/import", .{try calendarPath(a, intent.identity.target)}), .body = body };
+}
+
+/// Receipt proof uses the organizer frozen in these exact reviewed bytes.
+pub fn importedOrganizer(a: std.mem.Allocator, request: Request) ![]const u8 {
+    if (request.kind != .import_event) return error.InvalidCalendarMutation;
+    const body = try parseJson(a, request.body orelse return error.InvalidCalendarRequest);
+    const organizer = j.get(body, "organizer") orelse return error.InvalidCalendarRequest;
+    const email = try j.required(organizer, "email");
+    try t.text(email, 512, false);
+    try @import("recipients.zig").validateAddress(email);
+    return email;
 }
 
 pub fn prepareCancel(a: std.mem.Allocator, intent: plan.Intent) !Request {
@@ -177,6 +198,49 @@ pub fn preparePatch(a: std.mem.Allocator, intent: plan.Intent, changes: j.Value)
     const body = try std.json.Stringify.valueAlloc(a, changes, .{});
     if (body.len > t.Limits.source_bytes * 2) return error.CalendarTooLarge;
     return .{ .target = intent.identity.target, .kind = .update_event, .method = .PATCH, .url = try std.fmt.allocPrint(a, "{s}?sendUpdates=none", .{try eventPath(a, intent.identity.target, intent.event_id)}), .body = body, .if_match = intent.expected_etag };
+}
+
+/// Bounded provider diagnostics returned to the initiating CLI/TUI, never logs.
+/// Kept outside durable operation records to preserve existing store readers.
+pub const ErrorDetail = struct {
+    status: u16,
+    reason: []const u8 = "",
+    message: []const u8 = "",
+    location: []const u8 = "",
+};
+pub fn errorDetail(a: std.mem.Allocator, status: u16, body: []const u8) !ErrorDetail {
+    var detail: ErrorDetail = .{ .status = status };
+    if (body.len == 0 or body.len > 16 * 1024) return detail;
+    b.preflight(body) catch return detail;
+    const value = std.json.parseFromSliceLeaky(j.Value, a, body, .{ .duplicate_field_behavior = .@"error", .max_value_len = 16 * 1024 }) catch return detail;
+    const error_value = j.get(value, "error") orelse return detail;
+    detail.message = try diagnosticText(a, j.text(error_value, "message"), 512);
+    if (j.get(error_value, "errors")) |errors| if (errors == .array and errors.array.items.len > 0) {
+        const specific = j.text(errors.array.items[0], "message");
+        if (specific.len > 0) detail.message = try diagnosticText(a, specific, 512);
+        detail.reason = try diagnosticText(a, j.text(errors.array.items[0], "reason"), 128);
+        detail.location = try diagnosticText(a, j.text(errors.array.items[0], "location"), 128);
+    };
+    return detail;
+}
+fn diagnosticText(a: std.mem.Allocator, raw: []const u8, limit: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var index: usize = 0;
+    while (index < raw.len and out.items.len < limit) {
+        const count = std.unicode.utf8ByteSequenceLength(raw[index]) catch {
+            index += 1;
+            continue;
+        };
+        if (count > raw.len - index or count > limit - out.items.len) break;
+        const cp = std.unicode.utf8Decode(raw[index..][0..count]) catch {
+            index += 1;
+            continue;
+        };
+        if (cp >= 0x20 and !(cp >= 0x7f and cp <= 0x9f) and !(cp >= 0x202a and cp <= 0x202e) and !(cp >= 0x2066 and cp <= 0x2069)) try out.appendSlice(a, raw[index..][0..count]);
+        index += count;
+    }
+    return out.toOwnedSlice(a);
 }
 
 pub const Failure = enum { unauthorized, forbidden, not_found, duplicate, version_conflict, full_refresh_required, rate_limited, rejected, transient, unknown };
@@ -252,6 +316,7 @@ pub const RsvpResponse = enum { accepted, tentative };
 /// Google explicitly supports attendeesOmitted when updating only a
 /// participant's response. Never replace the complete attendee list.
 pub fn withRsvpResponse(a: std.mem.Allocator, request: Request, attendee: []const u8, response: RsvpResponse, document: ?EventDocument) !Request {
+    if (attendee.len == 0) return error.NotAnAttendee;
     if (request.kind != .import_event and request.kind != .update_event) return error.InvalidCalendarMutation;
     if (document) |current| if (!hasAttendee(current, attendee)) return error.CalendarAttendeeMismatch;
     var body = try parseJson(a, request.body orelse return error.InvalidCalendarMutation);

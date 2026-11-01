@@ -3,6 +3,8 @@
 import argparse
 import http.server
 import json
+import hashlib
+from pathlib import Path
 import subprocess
 import threading
 import urllib.parse
@@ -15,6 +17,7 @@ def main():
     parser.add_argument("--probe", required=True)
     args = parser.parse_args()
     received = []
+    booking_status = [200]
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *unused):
@@ -24,11 +27,12 @@ def main():
             size = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(size)
             received.append((self.command, self.path, dict(self.headers), body))
-            status = int(urllib.parse.urlsplit(self.path).path.rsplit("/", 1)[-1])
+            status = booking_status[0] if "/calendar/v3/calendars/" in self.path else int(urllib.parse.urlsplit(self.path).path.rsplit("/", 1)[-1])
             if status == 299:  # Interrupted response after accepting request bytes.
                 self.close_connection = True
                 return
-            response = b"" if status == 204 else b'{"provider":"calendar"}'
+            response = (json.dumps({"error": {"code": 400, "message": "Bad Request", "errors": [{"reason": "participantIsNeitherOrganizerNorAttendee", "message": "The owner of the calendar must either be the organizer or an attendee of an event that is imported.", "location": "organizer.email"}]}}).encode()
+                        if status == 400 else b"" if status == 204 else b'{"provider":"calendar"}')
             self.send_response(status)
             if status == 302:
                 self.send_header("Location", "http://127.0.0.1:1/never-follow")
@@ -46,6 +50,7 @@ def main():
 
     def run(mode, status, expected):
         before = len(received)
+        booking_status[0] = status
         process = subprocess.run([args.probe, base + str(status), mode], capture_output=True, text=True, timeout=20, check=True)
         result = json.loads(process.stdout)
         assert result["zigVersion"] == "0.17.0", result
@@ -56,11 +61,29 @@ def main():
         assert len(received) == before + 1, "Calendar request was replayed"
         method, path, headers, body = received[-1]
         headers = {key.lower(): value for key, value in headers.items()}
-        assert urllib.parse.urlsplit(path).path == "/calendar/" + str(status)
+        assert urllib.parse.urlsplit(path).path == ("/calendar/v3/calendars/opaque-booking-calendar/events/import" if mode == "booking-import" else "/calendar/" + str(status))
         assert headers["authorization"] == "Bearer synthetic-omagma-calendar-bearer"
-        assert method == {"get": "GET", "import": "POST", "freebusy": "POST", "patch": "PATCH", "delete": "DELETE", "create-meet": "POST"}[mode]
+        assert method == {"get": "GET", "import": "POST", "booking-import": "POST", "freebusy": "POST", "patch": "PATCH", "delete": "DELETE", "create-meet": "POST"}[mode]
         assert headers.get("if-match") == ('"wire-etag-4"' if mode in ("patch", "delete") else None), headers
-        if mode == "create-meet":
+        if mode == "booking-import":
+            assert urllib.parse.urlsplit(path).query == "", path
+            event = json.loads(body)
+            assert set(event) == {"iCalUID", "organizer", "summary", "description", "location", "start", "end", "sequence", "transparency", "visibility", "extendedProperties"}, event
+            assert event["iCalUID"] == "12345678-1234-4234-9234-123456789abc"
+            assert event["organizer"] == {"email": "self@example.test"}, "personal copy must satisfy Google's primary-owner participant rule"
+            assert event["summary"] == "Fictional haircut booking"
+            assert event["description"] == "Booked service. Please arrive on time.\n\nJoin: https://bookings.example.test/manage"
+            assert event["location"] == "12 Example Street"
+            assert event["start"] == {"dateTime": "2026-11-10T09:15:00.000Z", "timeZone": "Europe/Vienna"}
+            assert event["end"] == {"dateTime": "2026-11-10T10:05:00.000Z", "timeZone": "Europe/Vienna"}
+            assert type(event["sequence"]) is int and event["sequence"] == 1
+            assert event["transparency"] == "opaque" and event["visibility"] == "default"
+            raw = (Path(__file__).parent / "fixtures/terminal/calendar/booking-no-attendees.ics").read_bytes()
+            assert event["extendedProperties"]["private"] == {"omagmaOperation": "wire-booking", "omagmaSource": hashlib.sha256(raw).hexdigest(), "omagmaOriginalOrganizer": "host@example.test", "omagmaPersonalCopy": "1"}
+            assert int(headers["content-length"]) == len(body)
+            if status == 400:
+                assert result["providerError"] == {"status": 400, "reason": "participantIsNeitherOrganizerNorAttendee", "message": "The owner of the calendar must either be the organizer or an attendee of an event that is imported.", "location": "organizer.email"}
+        elif mode == "create-meet":
             assert urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) == {"sendUpdates": ["all"], "conferenceDataVersion": ["1"]}, path
             event = json.loads(body)
             assert event["id"] == "omagma012345" and "iCalUID" not in event
@@ -91,7 +114,9 @@ def main():
         run("bad-etag", 200, "InvalidCalendarEtag")
         run("create-meet", 200, "")
         run("create-meet", 503, "UnknownOutcome")
-        print(json.dumps({"ok": True, "wireRequests": len(received), "checks": 16, "compiler": deleted["zigVersion"], "mode": deleted["optimizeMode"]}))
+        run("booking-import", 200, "")
+        run("booking-import", 400, "CalendarRequestRejected")
+        print(json.dumps({"ok": True, "wireRequests": len(received), "checks": 18, "compiler": deleted["zigVersion"], "mode": deleted["optimizeMode"]}))
     finally:
         server.shutdown()
         server.server_close()

@@ -24,6 +24,8 @@ pub const Invitation = struct {
     method: Method = .request,
     cancelled: bool = false,
     additional_events: usize = 0,
+    /// Null only for legacy presentation DTOs; parsing records the exact count.
+    attendee_count: ?usize = null,
     response_blocked: bool = false,
     stamp: b.Text(16) = .{},
     uid: b.Text(1024) = .{},
@@ -269,6 +271,7 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
         }
     }
     if (calendar or event or nested != 0 or !ended or events == 0 or (!method and expected_method != null) or !version or !uid or (!organizer and out.method != .publish)) return error.InvalidCalendar;
+    out.attendee_count = attendees;
     if (expected_method != null and !attendee) return error.NotAnAttendee;
     if (out.method == .reply and (!stamp or attendees != 1)) return error.InvalidCalendar;
     out.cancelled = out.cancelled or out.method == .cancel;

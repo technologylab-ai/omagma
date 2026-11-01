@@ -93,6 +93,17 @@ pub const Provider = struct {
             .free_busy => return response(out, self.config.account, 200, try freeBusy(a, state, request)),
             .import_event, .insert_event => {
                 const body = try parse(a, request.body.?);
+                if (request.kind == .import_event and std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-booking-rejected")) return failure(out, self.config.account, 400, "participantIsNeitherOrganizerNorAttendee");
+                if (request.kind == .import_event) {
+                    const organizer = j.text(j.get(body, "organizer") orelse .null, "email");
+                    var owner_participates = std.ascii.eqlIgnoreCase(organizer, self.config.account);
+                    if (j.get(body, "attendees")) |attendees| if (attendees == .array) {
+                        for (attendees.array.items) |attendee| if (std.ascii.eqlIgnoreCase(j.text(attendee, "email"), self.config.account)) {
+                            owner_participates = true;
+                        };
+                    };
+                    if (!owner_participates) return failure(out, self.config.account, 400, "participantIsNeitherOrganizerNorAttendee");
+                }
                 const uid = if (request.kind == .import_event) try j.required(body, "iCalUID") else try std.fmt.allocPrint(a, "{s}@google.com", .{try j.required(body, "id")});
                 for (state.events) |event| if (std.mem.eql(u8, event.calendar_id, request.target.calendar_id) and std.mem.eql(u8, j.text(event.value, "iCalUID"), uid)) return failure(out, self.config.account, 409, "duplicate");
                 if (state.events.len >= 128) return failure(out, self.config.account, 403, "quotaExceeded");
@@ -104,7 +115,6 @@ pub const Provider = struct {
                 try event.object.put(a, "id", .{ .string = id });
                 try event.object.put(a, "etag", .{ .string = try etag(a, state.generation) });
                 try event.object.put(a, "status", .{ .string = "confirmed" });
-                if (request.kind == .import_event) try event.object.put(a, "privateCopy", .{ .bool = true });
                 if (j.get(body, "conferenceData") != null) try fixtureConference(a, &event, self.config.options.fixture_scenario);
                 try event.object.put(a, "htmlLink", .{ .string = try std.fmt.allocPrint(a, "https://calendar.google.com/calendar/event?eid={s}", .{id}) });
                 _ = try provider.decodeDocument(a, request.target, try std.json.Stringify.valueAlloc(a, event, .{}));
@@ -239,7 +249,8 @@ fn response(a: std.mem.Allocator, account: []const u8, status: u16, value: j.Val
     return .{ .account = try a.dupe(u8, account), .status = status, .body = body };
 }
 fn failure(a: std.mem.Allocator, account: []const u8, status: u16, reason: []const u8) !service.Response {
-    return response(a, account, status, try j.value(a, .{ .@"error" = .{ .code = status, .errors = [_]struct { reason: []const u8 }{.{ .reason = reason }} } }));
+    const message = if (std.mem.eql(u8, reason, "participantIsNeitherOrganizerNorAttendee")) "The owner of the calendar must either be the organizer or an attendee of an event that is imported." else reason;
+    return response(a, account, status, try j.value(a, .{ .@"error" = .{ .code = status, .message = message, .errors = .{.{ .reason = reason, .message = message }} } }));
 }
 fn pickerAccessScenario(scenario: []const u8) bool {
     return std.mem.eql(u8, scenario, "calendar-picker-owned-only") or std.mem.eql(u8, scenario, "calendar-picker-restored");

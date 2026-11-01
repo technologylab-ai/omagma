@@ -116,6 +116,7 @@ pub const Applied = struct {
     event: ?t.Event = null,
     reconciled: bool = false,
     failure: ?p.Failure = null,
+    provider_error: ?p.ErrorDetail = null,
     retry_possible: bool = false,
     recovery_reason: []const u8 = "",
 };
@@ -295,7 +296,7 @@ pub const Service = struct {
 
     pub fn invitationPlan(self: Service, calendar: t.Calendar, raw: []const u8, verified_aliases: []const []const u8, bindings: Bindings) !InvitationPlan {
         try self.requireRead(calendar);
-        const source = try invitation.parse(self.a, raw, self.grants.account, verified_aliases);
+        const source = try invitation.parseForCalendar(self.a, raw, self.grants.account, verified_aliases);
         const identity: planner.Identity = .{ .target = calendar.target, .uid = source.uid };
         const state = if (self.persistence) |store| try store.load(self.a, identity) else State{};
         var time_error: []const u8 = "";
@@ -304,7 +305,7 @@ pub const Service = struct {
             break :blk null;
         };
         const found = try self.lookup(calendar, source.uid);
-        return .{ .calendar = calendar, .source = source, .span = span, .time_error = time_error, .lookup = found, .state = state, .decision = try planner.plan(.{ .invitation = source, .target = calendar.target, .lookup = found, .tracked = state.tracked, .operation = state.operation, .times_resolved = span != null }), .writable = self.grants.canWrite(calendar) };
+        return .{ .calendar = calendar, .source = source, .span = span, .time_error = time_error, .lookup = found, .state = state, .decision = try planner.plan(.{ .invitation = source, .target = calendar.target, .lookup = found, .tracked = state.tracked, .operation = state.operation, .times_resolved = span != null, .personal_copy_owner = if (calendar.primary and source.method == .request and source.attendee.len == 0) self.grants.account else null }), .writable = self.grants.canWrite(calendar) and (source.method == .cancel or source.attendee.len != 0 or calendar.primary) };
     }
 
     /// Prepare exact bytes for review; no Calendar mutation or journal claim.
@@ -316,7 +317,10 @@ pub const Service = struct {
         var prior_event: ?t.Event = null;
         var intent: planner.Intent = .{ .operation_id = operation_id, .identity = .{ .target = planned.calendar.target, .uid = source.uid }, .version = source.version, .kind = .import_event, .source_hash = source.source_hash, .payload_hash = @splat(0) };
         const request = switch (planned.decision) {
-            .import_missing => try p.prepareResolvedImport(self.a, source, intent, planned.span orelse return error.CalendarTimeReviewRequired),
+            .import_missing => blk: {
+                if (source.attendee.len == 0 and !planned.calendar.primary) return error.CalendarBookingPrimaryRequired;
+                break :blk try p.prepareResolvedImport(self.a, source, intent, planned.span orelse return error.CalendarTimeReviewRequired);
+            },
             .review_update, .review_cancel => |previous| blk: {
                 const current = try self.document(planned.calendar, previous.id);
                 if (!sameEventIdentity(current.event, source) or current.event.cancelled or current.event.locked or !std.mem.eql(u8, current.event.etag, previous.etag) or current.event.sequence > source.version.sequence) return error.CalendarReviewStale;
@@ -338,6 +342,7 @@ pub const Service = struct {
     /// response. Organizer updates keep the existing source/version guards.
     pub fn prepareRsvpReview(self: Service, planned: InvitationPlan, operation_id: []const u8, response: p.RsvpResponse) !Review {
         try self.requireWrite(planned.calendar);
+        if (planned.source.attendee.len == 0) return error.NotAnAttendee;
         if (planned.source.isRecurring()) return error.UnsupportedCalendarRecurrence;
         if (!planned.lookup.complete) return error.CalendarLookupIncomplete;
         var review: Review = switch (planned.decision) {
@@ -379,6 +384,9 @@ pub const Service = struct {
                 return operation;
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
+        }
+        if (review.ordinary_event == null and review.source.method == .request and review.source.attendee.len == 0) {
+            if (!review.calendar.primary or review.intent.kind != .import_event or !std.ascii.eqlIgnoreCase(try p.importedOrganizer(self.a, review.request), self.grants.account)) return error.CalendarReviewStale;
         }
         if (review.ordinary_event == null) {
             if (state.tracked) |tracked| {
@@ -456,20 +464,22 @@ pub const Service = struct {
         var operation = claimed;
         const response = self.send(review.request) catch |err| return .{ .operation = operation, .recovery_reason = @errorName(err) };
         if (response.status < 200 or response.status >= 300) {
-            const failure = p.classifyFailure(review.request.kind, response.status, reason(self.a, response.body));
+            const detail = p.errorDetail(self.a, response.status, response.body) catch p.ErrorDetail{ .status = response.status };
+            const failure = p.classifyFailure(review.request.kind, response.status, detail.reason);
             if (retrying and (failure == .duplicate or failure == .version_conflict)) return self.reconcileOperation(review, operation);
-            if (failure == .unknown or retrying) return .{ .operation = operation, .failure = failure, .recovery_reason = "ProviderOutcomeUnknown" };
+            if (failure == .unknown or retrying) return .{ .operation = operation, .failure = failure, .provider_error = detail, .recovery_reason = "ProviderOutcomeUnknown" };
             operation.state = .rejected;
             operation.error_code = @tagName(failure);
             try store.journal.record(operation);
-            return .{ .operation = operation, .failure = failure };
+            return .{ .operation = operation, .failure = failure, .provider_error = detail };
         }
         var result_event: ?t.Event = null;
         if (review.intent.kind == .cancel_event) {
             operation.provider_id = review.intent.event_id;
         } else {
             const document_value = p.decodeDocument(self.a, review.calendar.target, response.body) catch return .{ .operation = operation };
-            if (!(if (review.ordinary_event != null) ordinary.receiptProof(document_value.event, review.intent) else provesWrite(document_value.event, review)) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
+            const expected_organizer = if (review.intent.kind == .import_event and review.source.attendee.len == 0) try p.importedOrganizer(self.a, review.request) else review.source.organizer;
+            if (!(if (review.ordinary_event != null) ordinary.receiptProof(document_value.event, review.intent) else provesWrite(document_value.event, review, expected_organizer)) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
             result_event = document_value.event;
             operation.provider_id = document_value.event.id;
         }
@@ -510,13 +520,14 @@ pub const Service = struct {
             if (!current.cancelled or (current.uid.len != 0 and !std.mem.eql(u8, current.uid, pending.intent.identity.uid))) return .{ .operation = pending };
             match = current;
         } else {
+            const expected_organizer = if (review.intent.kind == .import_event and review.source.attendee.len == 0) try p.importedOrganizer(self.a, review.request) else review.source.organizer;
             const found = self.lookup(review.calendar, pending.intent.identity.uid) catch return .{ .operation = pending };
             if (!found.complete) return .{ .operation = pending };
             for (found.events) |current| {
-                if (!provesWrite(current, review)) continue;
+                if (!provesWrite(current, review, expected_organizer)) continue;
                 if (review.rsvp_response) |response_status| {
                     const full = self.document(review.calendar, current.id) catch return .{ .operation = pending };
-                    if (!provesWrite(full.event, review) or !p.responseMatches(full, review.source.attendee, response_status)) continue;
+                    if (!provesWrite(full.event, review, expected_organizer) or !p.responseMatches(full, review.source.attendee, response_status)) continue;
                 }
                 if (match != null) return .{ .operation = pending };
                 match = current;
@@ -618,9 +629,10 @@ fn legacyReviewHash(a: std.mem.Allocator, review: Review) ![32]u8 {
 fn sameEventIdentity(event: t.Event, source: t.Invitation) bool {
     return std.mem.eql(u8, event.uid, source.uid) and std.ascii.eqlIgnoreCase(event.organizer, source.organizer);
 }
-fn provesWrite(event: t.Event, review: Review) bool {
+fn provesWrite(event: t.Event, review: Review, expected_organizer: []const u8) bool {
+    const organizer_matches = std.ascii.eqlIgnoreCase(event.organizer, expected_organizer);
     const hash = std.fmt.bytesToHex(review.intent.source_hash, .lower);
-    return event.target.eql(review.intent.identity.target) and sameEventIdentity(event, review.source) and !event.cancelled and
+    return event.target.eql(review.intent.identity.target) and std.mem.eql(u8, event.uid, review.intent.identity.uid) and organizer_matches and !event.cancelled and
         (review.intent.kind == .import_event or std.mem.eql(u8, event.id, review.intent.event_id)) and
         event.sequence == review.intent.version.sequence and std.mem.eql(u8, event.operation_marker, review.intent.operation_id) and std.mem.eql(u8, event.source_marker, &hash);
 }

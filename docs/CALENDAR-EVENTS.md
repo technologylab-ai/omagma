@@ -83,6 +83,30 @@ alternatives absent from the displayed titles; **Show all** retains the full
 candidate count. These choices change presentation and leave Calendar data,
 reminders and the Mail account untouched.
 
+## Booked appointments received by email
+
+A booking confirmation may contain a Calendar attachment with no guest list.
+Press `A` **Calendar** to open a compact confirmation for the receiving email
+account's primary calendar. Omagma checks for an existing copy and saves the
+exact review before enabling **Add appointment**. There is one confirmation;
+press `y`, or focus the button and press Enter. Long notes must be read first.
+`v` **Details** reveals protocol identifiers and complete provider errors.
+
+The copy is your own appointment: Google requires the calendar owner to be its
+organizer or an attendee. No guest is invented. The original booking organizer
+and source UID remain recorded, along with the title, exact times, time zone,
+location and notes. No email or RSVP is sent. This route requires the account's
+verified writable primary calendar; secondary/shared destinations are refused.
+Missing or read-only primary access is explained in the same card.
+Normal Mail invitations retain their own attendee/organizer semantics.
+Personal copies do not automatically apply later booking updates or cancellations;
+when the source differs from the saved copy, check Calendar rather than adding a
+second appointment.
+
+This is separate from accepting a meeting invitation. Messages listing another
+attendee still require a matching account or verified alias. Existing recurrence,
+ambiguous-event, cancellation and timezone review limits remain in effect.
+
 ## Permissions
 
 Calendar creation and editing use the existing optional

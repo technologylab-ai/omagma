@@ -238,7 +238,7 @@ pub fn requestPlan(service: svc.Service, request: j.Value, host: HostInputs, cal
     if (!service.grants.canRead(calendar)) return error.CalendarReadPermissionRequired;
     const load = host.loadInvitationFn orelse return error.CalendarInvitationSourceRequired;
     const input = try load(host.context, service.a, service.grants.account, request);
-    const source = try invitation.parse(service.a, input.source, service.grants.account, input.verified_aliases);
+    const source = try invitation.parseForCalendar(service.a, input.source, service.grants.account, input.verified_aliases);
     var start_name = try sourceZone(request, "startTimeZone", source.start);
     var end_name = try sourceZone(request, "endTimeZone", source.end);
     var time_error: []const u8 = "";
@@ -314,7 +314,7 @@ fn loadZone(a: std.mem.Allocator, host: HostInputs, name: []const u8) !timezone.
     return timezone.loadNamed(host.io, a, host.env, name);
 }
 
-const Recovery = struct { account: []const u8, calendarId: []const u8, operationId: []const u8, reviewHash: []const u8, action: []const u8 };
+const Recovery = struct { account: []const u8, calendarId: []const u8, operationId: []const u8, reviewHash: []const u8, action: []const u8, calendarOrganizer: []const u8 };
 fn recovery(a: std.mem.Allocator, planned: svc.InvitationPlan, host: HostInputs) !?Recovery {
     const operation = planned.state.operation orelse return null;
     if (operation.state != .unknown) return null;
@@ -322,7 +322,7 @@ fn recovery(a: std.mem.Allocator, planned: svc.InvitationPlan, host: HostInputs)
     const review = try load(host.context, a, planned.calendar.target, operation.intent.operation_id);
     if (!review.intent.eql(operation.intent) or !review.calendar.target.eql(planned.calendar.target)) return error.CalendarReviewMismatch;
     const hash = std.fmt.bytesToHex(review.review_hash, .lower);
-    return .{ .account = planned.calendar.target.account, .calendarId = planned.calendar.target.calendar_id, .operationId = operation.intent.operation_id, .reviewHash = try a.dupe(u8, &hash), .action = @tagName(review.intent.kind) };
+    return .{ .account = planned.calendar.target.account, .calendarId = planned.calendar.target.calendar_id, .operationId = operation.intent.operation_id, .reviewHash = try a.dupe(u8, &hash), .action = @tagName(review.intent.kind), .calendarOrganizer = if (review.intent.kind == .import_event) try @import("calendar_provider.zig").importedOrganizer(a, review.request) else review.source.organizer };
 }
 fn planValue(a: std.mem.Allocator, planned: svc.InvitationPlan, pending: ?Recovery) !j.Value {
     const existing: ?t.Event = switch (planned.decision) {
@@ -333,7 +333,7 @@ fn planValue(a: std.mem.Allocator, planned: svc.InvitationPlan, pending: ?Recove
 }
 fn reviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
     const hash = std.fmt.bytesToHex(review.review_hash, .lower);
-    return j.value(a, .{ .account = review.intent.identity.target.account, .calendarId = review.intent.identity.target.calendar_id, .calendarName = review.calendar.summary, .operationId = review.intent.operation_id, .reviewHash = hash[0..], .action = @tagName(review.intent.kind), .uid = review.intent.identity.uid, .version = review.intent.version, .eventId = review.intent.event_id, .expectedEtag = review.intent.expected_etag, .invitation = review.source, .resolved = review.span, .previous = review.previous });
+    return j.value(a, .{ .account = review.intent.identity.target.account, .calendarId = review.intent.identity.target.calendar_id, .calendarName = review.calendar.summary, .operationId = review.intent.operation_id, .reviewHash = hash[0..], .action = @tagName(review.intent.kind), .calendarOrganizer = if (review.intent.kind == .import_event) try @import("calendar_provider.zig").importedOrganizer(a, review.request) else review.source.organizer, .uid = review.intent.identity.uid, .version = review.intent.version, .eventId = review.intent.event_id, .expectedEtag = review.intent.expected_etag, .invitation = review.source, .resolved = review.span, .previous = review.previous });
 }
 
 fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
@@ -345,7 +345,7 @@ fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
 fn appliedValue(a: std.mem.Allocator, target: t.Target, result: svc.Applied) !j.Value {
     // The operation may already be applied or durably uncertain. Losing its
     // command DTO must retain that ambiguity before Core encodes the envelope.
-    return j.value(a, .{ .account = target.account, .calendarId = target.calendar_id, .operationId = result.operation.intent.operation_id, .uid = result.operation.intent.identity.uid, .state = @tagName(result.operation.state), .providerId = result.operation.provider_id, .reconciled = result.reconciled, .errorCode = if (result.failure) |failure| @errorName(svc.failureError(failure)) else result.operation.error_code, .event = result.event, .attempt = result.operation.attempt, .nextAttempt = result.operation.attempt +| 1, .retryPossible = result.retry_possible, .recoveryReason = result.recovery_reason }) catch return error.UnknownOutcome;
+    return j.value(a, .{ .account = target.account, .calendarId = target.calendar_id, .operationId = result.operation.intent.operation_id, .uid = result.operation.intent.identity.uid, .state = @tagName(result.operation.state), .providerId = result.operation.provider_id, .reconciled = result.reconciled, .errorCode = if (result.failure) |failure| @errorName(svc.failureError(failure)) else result.operation.error_code, .event = result.event, .attempt = result.operation.attempt, .nextAttempt = result.operation.attempt +| 1, .retryPossible = result.retry_possible, .recoveryReason = result.recovery_reason, .providerError = result.provider_error }) catch return error.UnknownOutcome;
 }
 
 fn present(value: j.Value, field: []const u8) bool {
