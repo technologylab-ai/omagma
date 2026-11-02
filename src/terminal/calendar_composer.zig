@@ -71,6 +71,7 @@ pub const Conference = enum {
     }
 };
 pub const SendUpdates = enum { none, all };
+pub const MeetNotes = enum { keep, on };
 const Notes = struct {
     bytes: [65536]u8 = @splat(0),
     len: u32 = 0,
@@ -93,6 +94,7 @@ pub const Init = struct {
     zone: *const tz.Zone,
     writable: bool = true,
     supports_meet: bool = false,
+    primary: bool = true,
 };
 
 pub const Model = struct {
@@ -127,11 +129,13 @@ pub const Model = struct {
     attendees_complete: bool = true,
     notes_read_only: bool = false,
     original_guest_count: usize = 0,
+    meet_notes: MeetNotes = .keep,
+    meet_notes_available: bool = true,
 
     pub fn init(a: std.mem.Allocator, options: Init) !Model {
         try options.target.validate();
         try t.time.validateZoneName(options.zone_name);
-        var out: Model = .{ .writable = options.writable, .supports_meet = options.supports_meet };
+        var out: Model = .{ .writable = options.writable, .supports_meet = options.supports_meet, .meet_notes_available = options.primary };
         try out.account.set(options.target.account);
         try out.calendar_id.set(options.target.calendar_id);
         try out.time_zone.set(options.zone_name);
@@ -208,6 +212,10 @@ pub const Model = struct {
         out.original_guest_count = @intCast(provider_count);
         if (displayed_guests == .array and out.original_guest_count < displayed_guests.array.items.len) return error.InvalidCalendarResponse;
         return out;
+    }
+
+    pub fn meetRowVisible(self: *const Model) bool {
+        return !self.editing and self.meet_notes_available and self.conference == .google_meet;
     }
 
     /// Restore the exact locally saved review for read-only unknown-outcome

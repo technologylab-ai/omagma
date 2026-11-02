@@ -78,12 +78,7 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
         return j.value(service.a, .{ .calendar = calendar, .event = document.event, .canEdit = reason.len == 0 and draft != null, .canEditReason = reason, .draftError = draft_error, .htmlNotesReadOnly = ordinary.htmlDescription(document.event.description), .eventDraft = draft });
     }
     if (std.mem.eql(u8, command, "calendar.event-review")) {
-        const event = j.get(request, "event") orelse return error.InvalidCalendarEvent;
-        const zone_name = try j.required(event, "timeZone");
-        var zone = try loadZone(service.a, host, zone_name);
-        defer zone.deinit(service.a);
-        const prepared = try ordinary.parse(service.a, request, &zone);
-        const review = try service.prepareEventReviewFields(calendar, prepared, try j.required(request, "operationId"), j.text(request, "eventId"), j.text(request, "expectedEtag"), .{ .description_present = present(event, "description"), .location_present = present(event, "location") });
+        const review = try prepareOrdinaryReview(service, request, host, calendar);
         const store = service.persistence orelse return error.CalendarPersistenceRequired;
         try store.preserveFn(store.context, review);
         return eventReviewValue(service.a, review);
@@ -103,6 +98,18 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
     const store = service.persistence orelse return error.CalendarPersistenceRequired;
     try store.preserveFn(store.context, review);
     return reviewValue(service.a, review);
+}
+
+/// Shared preparation keeps the legacy byte contract exact. Compound Meet
+/// consent retains this returned value directly rather than racing a later
+/// lookup of an unclaimed Calendar review that another editor could replace.
+pub fn prepareOrdinaryReview(service: svc.Service, request: j.Value, host: HostInputs, selected: t.Calendar) !svc.Review {
+    const event = j.get(request, "event") orelse return error.InvalidCalendarEvent;
+    const zone_name = try j.required(event, "timeZone");
+    var zone = try loadZone(service.a, host, zone_name);
+    defer zone.deinit(service.a);
+    const prepared = try ordinary.parse(service.a, request, &zone);
+    return service.prepareEventReviewFields(selected, prepared, try j.required(request, "operationId"), j.text(request, "eventId"), j.text(request, "expectedEtag"), .{ .description_present = present(event, "description"), .location_present = present(event, "location") });
 }
 
 /// Core can run this without a session, allocator, credentials, files or
@@ -336,7 +343,7 @@ fn reviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
     return j.value(a, .{ .account = review.intent.identity.target.account, .calendarId = review.intent.identity.target.calendar_id, .calendarName = review.calendar.summary, .operationId = review.intent.operation_id, .reviewHash = hash[0..], .action = @tagName(review.intent.kind), .calendarOrganizer = if (review.intent.kind == .import_event) try @import("calendar_provider.zig").importedOrganizer(a, review.request) else review.source.organizer, .uid = review.intent.identity.uid, .version = review.intent.version, .eventId = review.intent.event_id, .expectedEtag = review.intent.expected_etag, .invitation = review.source, .resolved = review.span, .previous = review.previous });
 }
 
-fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
+pub fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
     const hash = std.fmt.bytesToHex(review.review_hash, .lower);
     const prepared = review.ordinary_event orelse return error.CalendarReviewMismatch;
     return j.value(a, .{ .account = review.intent.identity.target.account, .calendarId = review.intent.identity.target.calendar_id, .calendarName = review.calendar.summary, .operationId = review.intent.operation_id, .reviewHash = hash[0..], .action = if (review.intent.kind == .insert_event) @as([]const u8, "create_event") else "update_event", .eventId = review.intent.event_id, .expectedEtag = review.intent.expected_etag, .event = prepared.draft, .resolved = prepared.span, .sendUpdates = @tagName(prepared.send_updates), .previous = review.previous, .conference = @tagName(prepared.draft.conference) });

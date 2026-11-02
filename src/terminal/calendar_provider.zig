@@ -10,7 +10,7 @@ const time = t.time;
 const tools = @import("reader_tools.zig");
 const meeting_link = @import("meeting_link.zig");
 pub const base_url = "https://www.googleapis.com/calendar/v3";
-pub const event_fields = "id,iCalUID,etag,organizer(email),summary,description,location,hangoutLink,htmlLink,eventType,start,end,originalStartTime,recurringEventId,sequence,status,transparency,locked,privateCopy,attendees(self,email,responseStatus),attendeesOmitted,extendedProperties(private),conferenceData(createRequest(status(statusCode)),entryPoints(entryPointType,uri))";
+pub const event_fields = "id,iCalUID,etag,organizer(email),summary,description,location,hangoutLink,htmlLink,eventType,start,end,originalStartTime,recurringEventId,recurrence,sequence,status,transparency,locked,privateCopy,attendees(self,email,responseStatus),attendeesOmitted,extendedProperties(private),conferenceData(conferenceId,conferenceSolution(key(type)),createRequest(requestId,status(statusCode)),entryPoints(entryPointType,uri))";
 pub const OperationKind = enum {
     calendar_list,
     event_lookup,

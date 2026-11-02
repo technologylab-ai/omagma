@@ -64,11 +64,11 @@ fn bucket(kind: Kind, key: []const u8) usize {
     return h.finalResult()[0] % bucket_count;
 }
 pub fn direct(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "history-page-") or std.mem.startsWith(u8, name, "history-index-") or std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-") or std.mem.startsWith(u8, name, "history-pins-") or std.mem.startsWith(u8, name, "history-calendar-");
+    return std.mem.startsWith(u8, name, "history-page-") or std.mem.startsWith(u8, name, "history-index-") or std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-") or std.mem.startsWith(u8, name, "history-pins-") or std.mem.startsWith(u8, name, "history-calendar-") or std.mem.startsWith(u8, name, "history-meet-");
 }
 pub fn handleOf(name: []const u8) !@import("vault_storage.zig").Handle {
     if (!direct(name) or !std.mem.endsWith(u8, name, ".json")) return error.InvalidHistory;
-    const prefix: usize = if (std.mem.startsWith(u8, name, "history-calendar-")) 17 else if (std.mem.startsWith(u8, name, "history-active-")) 15 else if (std.mem.startsWith(u8, name, "history-page-") or std.mem.startsWith(u8, name, "history-pins-")) 13 else 14;
+    const prefix: usize = if (std.mem.startsWith(u8, name, "history-calendar-")) 17 else if (std.mem.startsWith(u8, name, "history-active-")) 15 else if (std.mem.startsWith(u8, name, "history-page-") or std.mem.startsWith(u8, name, "history-pins-") or std.mem.startsWith(u8, name, "history-meet-")) 13 else 14;
     if (name.len != prefix + 64 + 5) return error.InvalidHistory;
     return @import("vault_storage.zig").Handle.parse(name[prefix..][0..64]);
 }

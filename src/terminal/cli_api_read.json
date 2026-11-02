@@ -965,7 +965,8 @@
         "For fresh terminal-only setup, one registration and clientFile is enough with config.oauthClientFile omitted. Alongside a read-only/bar setup, broader terminal authorization requires a different Desktop Client ID in the same project; copying/renaming its JSON does not create another registration.",
         "Stores the verified refresh token in the selected keyring/file backend, then persists the terminal grant registry. The file backend is private owner-only unencrypted storage. Does not send mail or modify contacts; later writes still require the user's task authorization.",
         "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow.",
-        "Optional drive-upload adds Google drive.file for app-created attachment uploads and viewer sharing at confirmed send. Request the complete existing capability set plus drive-upload; no broad Drive scope is required."
+        "Optional drive-upload adds Google drive.file for app-created attachment uploads and viewer sharing at confirmed send. Request the complete existing capability set plus drive-upload; no broad Drive scope is required.",
+        "Optional meet-settings selects https://www.googleapis.com/auth/meetings.space.settings for automatic Meet AI notes and transcription settings. Request the complete existing capability set plus meet-settings. The Google Meet REST API must be enabled for the current Cloud project."
       ],
       "examples": [
         {
@@ -1060,7 +1061,7 @@
     "ReadCapabilities": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 12,
+      "maxItems": 13,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -1076,7 +1077,8 @@
           "calendar-write-shared",
           "calendar-freebusy",
           "mail-drafts",
-          "drive-upload"
+          "drive-upload",
+          "meet-settings"
         ]
       },
       "contains": {

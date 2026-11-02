@@ -501,6 +501,7 @@ fn calendarField(arg: []const u8) ?[]const u8 {
         .{ .flag = "--end-time-zone", .key = "endTimeZone" },
         .{ .flag = "--review-hash", .key = "reviewHash" },
         .{ .flag = "--send-updates", .key = "sendUpdates" },
+        .{ .flag = "--meet-ai-notes", .key = "meetAiNotes" },
     };
     for (fields) |field| if (eq(arg, field.flag)) return field.key;
     return null;

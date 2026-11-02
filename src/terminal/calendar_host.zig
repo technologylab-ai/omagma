@@ -65,6 +65,10 @@ pub const Host = struct {
     }
 
     pub fn run(self: Host, request: j.Value) !j.Value {
+        if (@import("meet_notes_commands.zig").supported(j.text(request, "cmd"))) {
+            if (!mail.Limits.native) return error.NativeOnly;
+            return self.runMeet(request);
+        }
         try commands.preflight(request);
         const account = try j.required(request, "account");
         const command = try j.required(request, "cmd");
@@ -94,6 +98,54 @@ pub const Host = struct {
         return commands.dispatch(instance, request, callbacks) catch |err| {
             return self.offlineFallback(request, local_grants.?, &store, callbacks, err);
         };
+    }
+
+    const MeetGrant = struct { allowed: bool = false, capabilities: []const []const u8 = &.{} };
+    fn meetSettingsGrant(self: Host, request: j.Value, account: []const u8) !MeetGrant {
+        if (self.options.fixtures) return .{ .allowed = @import("meet_notes_fixture.zig").enabled(self.options.fixture_scenario), .capabilities = if (@import("meet_notes_fixture.zig").enabled(self.options.fixture_scenario)) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy", "meet-settings" } else &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy" } };
+        const registry = try auth.loadConfigured(self.io, self.allocator, self.config, if (self.config.credential_store == .vault) "" else try j.required(request, "grantFile"));
+        const grant = auth.find(&registry, account) orelse return .{};
+        var allowed = false;
+        if (grant.permits("meet-settings")) for (grant.scopes) |scope| {
+            if (std.mem.eql(u8, scope, @import("meet_notes_provider.zig").scope)) allowed = true;
+        };
+        return .{ .allowed = allowed, .capabilities = grant.capabilities };
+    }
+    fn runMeet(self: Host, request: j.Value) !j.Value {
+        const meet_commands = @import("meet_notes_commands.zig");
+        const meet_service = @import("meet_notes_service.zig");
+        try meet_commands.preflight(request);
+        const account = try j.required(request, "account");
+        const command = try j.required(request, "cmd");
+        const settings_grant = try self.meetSettingsGrant(request, account);
+        const settings_access = settings_grant.allowed;
+        if (std.mem.eql(u8, command, "calendar.meet-event-review") and !settings_access) return error.MeetSettingsPermissionRequired;
+        const parent_command: []const u8 = if (std.mem.eql(u8, command, "calendar.meet-event-review") and j.get(request, "event") != null) "calendar.event-review" else "calendar.event";
+        const local_grants: service.Grants = if (self.options.fixtures) .{ .account = account } else try self.checkGrant(request, parent_command, account);
+        var store: persistence.Host = .{ .io = self.io, .allocator = self.backing_allocator, .result_allocator = self.allocator, .root = self.cache_root, .account = account, .options = self.options, .access = self.access };
+        var inputs: Inputs = .{ .store = &store, .source = null };
+        const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadReviewFn = Inputs.reviewInput, .loadReceiptFn = Inputs.receiptInput, .loadPendingFn = Inputs.pendingInput };
+        const continuation: @import("meet_notes_store.zig").Host = .{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = account, .options = self.options, .access = self.access };
+        const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
+        const receipts: meet_service.Receipts = .{ .context = &inputs, .loadFn = Inputs.receiptInput };
+        if (meet_commands.local(command)) {
+            const calendar_service: service.Service = .{ .a = self.allocator, .grants = local_grants, .transport = .{ .context = &inputs, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+            return meet_commands.dispatch(.{ .a = self.allocator, .calendar = calendar_service, .book = continuation, .transport = .{ .context = &inputs, .sendFn = Inputs.localMeetOnly }, .settings_access = settings_access, .capabilities = settings_grant.capabilities, .now_ms = now, .receipts = receipts }, request, callbacks);
+        }
+        if (self.options.fixtures) {
+            const fixture_config: @import("calendar_fixture.zig").Config = .{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = account, .options = self.options, .now_ms = now, .access = self.access };
+            var calendar_provider = try @import("calendar_fixture.zig").Provider.init(fixture_config);
+            var meet_provider: @import("meet_notes_fixture.zig").Provider = .{ .config = fixture_config };
+            const calendar_service: service.Service = .{ .a = self.allocator, .grants = calendar_provider.grants(), .transport = calendar_provider.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+            return meet_commands.dispatch(.{ .a = self.allocator, .calendar = calendar_service, .book = continuation, .transport = meet_provider.transport(), .settings_access = settings_access, .capabilities = settings_grant.capabilities, .now_ms = now, .receipts = receipts }, request, callbacks);
+        }
+        const transport = try self.backing_allocator.create(native.Native);
+        defer self.backing_allocator.destroy(transport);
+        transport.* = .{};
+        try transport.init(self.io, self.allocator, self.backing_allocator, self.config, account, parent_command, request);
+        defer transport.close();
+        const calendar_service: service.Service = .{ .a = self.allocator, .grants = transport.grants, .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+        return meet_commands.dispatch(.{ .a = self.allocator, .calendar = calendar_service, .book = continuation, .transport = transport.meetTransport(), .settings_access = transport.meetSettingsAccess(), .capabilities = settings_grant.capabilities, .now_ms = now, .receipts = receipts }, request, callbacks);
     }
 
     fn checkGrant(self: Host, request: j.Value, command: []const u8, account: []const u8) !service.Grants {
@@ -127,6 +179,9 @@ const Inputs = struct {
     source: ?commands.InvitationInput,
 
     fn localOnly(_: *anyopaque, _: std.mem.Allocator, _: @import("calendar_provider.zig").Request) anyerror!service.Response {
+        return error.CalendarLocalReadOnly;
+    }
+    fn localMeetOnly(_: *anyopaque, _: std.mem.Allocator, _: @import("meet_notes_provider.zig").Request) anyerror!service.Response {
         return error.CalendarLocalReadOnly;
     }
 

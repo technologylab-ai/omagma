@@ -20,7 +20,7 @@ fn vaultKind(name: []const u8) !vault_types.RecordKind {
         return if (std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-")) .draft else .operation_ledger;
     }
     if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return .preferences;
-    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json") or std.mem.eql(u8, name, "drive-uploads.json")) return .operation_ledger;
+    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json") or std.mem.eql(u8, name, "drive-uploads.json") or std.mem.eql(u8, name, "meet-notes.json") or std.mem.eql(u8, name, "meet-provider-fixture.json")) return .operation_ledger;
     if (std.mem.eql(u8, name, "calendar-agenda.json")) return .cache_index;
     const kind: vault_types.RecordKind = if (std.mem.startsWith(u8, name, "mail-")) .mail_body else if (std.mem.startsWith(u8, name, "draft-")) .draft else if (std.mem.startsWith(u8, name, "outbox-")) .outbox else if (std.mem.startsWith(u8, name, "blob-")) .attachment else return error.VaultOperationUnsupported;
     const prefix: usize = switch (kind) {
@@ -475,7 +475,7 @@ pub const Store = struct {
         return vaultKind(name);
     }
     pub fn migrationRecordLimit(s: *const Store, name: []const u8) !usize {
-        if (std.mem.startsWith(u8, name, "history-calendar-")) return 256 * 1024;
+        if (std.mem.startsWith(u8, name, "history-calendar-") or std.mem.startsWith(u8, name, "history-meet-")) return 256 * 1024;
         return switch (try vaultKind(name)) {
             .mail_body, .draft, .outbox => mail_record_bytes,
             .attachment => t.Limits.disk_hard,
@@ -976,9 +976,11 @@ pub const Store = struct {
         if (@import("operation_history.zig").direct(name)) return @import("operation_history.zig").page_bytes;
         if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return 512 * 1024;
         if (std.mem.eql(u8, name, "calendar-state.json")) return 4 * 1024 * 1024;
+        if (std.mem.eql(u8, name, "meet-notes.json")) return 4 * 1024 * 1024;
         if (std.mem.eql(u8, name, "drive-uploads.json")) return 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-agenda.json")) return 8 * 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-provider-fixture.json") and s.options.fixtures) return 4 * 1024 * 1024;
+        if (std.mem.eql(u8, name, "meet-provider-fixture.json") and s.options.fixtures) return 512 * 1024;
         return error.InvalidStoreDocument;
     }
     /// Internal account documents share the same private-file and quota policy.
@@ -1697,7 +1699,7 @@ pub const Store = struct {
         if (s.history_publication_uncertain) return error.HistoryTransactionUncertain;
         if (s.migration_source) return error.MigrationSourceReadOnly;
         const handle = try @import("operation_history.zig").handleOf(name);
-        const bound = if (std.mem.startsWith(u8, name, "history-calendar-")) 256 * 1024 else if (std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-")) mail_record_bytes else @import("operation_history.zig").page_bytes;
+        const bound = if (std.mem.startsWith(u8, name, "history-calendar-") or std.mem.startsWith(u8, name, "history-meet-")) 256 * 1024 else if (std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-")) mail_record_bytes else @import("operation_history.zig").page_bytes;
         if (bytes.len > bound) return error.HistoryPageTooLarge;
         // History publication cannot evict or mutate the index it is planning
         // to replace. Reserve the overlap without destructive cache pruning.

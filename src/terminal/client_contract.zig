@@ -9,7 +9,7 @@ pub fn readOnlyCommand(command: []const u8) bool {
     // The command name alone cannot prove whether inspection will continue a
     // previously authorized Calendar write. Callers with flags use the helper.
     if (std.mem.eql(u8, command, "invitation.inspect")) return false;
-    if (std.mem.eql(u8, command, "calendar.event-pending")) return true;
+    if (std.mem.eql(u8, command, "calendar.event-pending") or std.mem.eql(u8, command, "calendar.meet-event-pending") or std.mem.eql(u8, command, "calendar.meet-event-reconcile")) return true;
     if (cachedCommand(command)) return true;
     for ([_][]const u8{ "accounts.list", "auth.status", "preferences.get", "labels.palette", "mail.label-state", "mail.triage-scope", "mail.compose-source", "draft.list", "draft.read", "queue.list", "queue.status", "updates.check" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
     return false;
@@ -50,4 +50,12 @@ test "client contract: invitation reconciliation is a mutation and cannot enter 
     try std.testing.expect(cachedCommand("invitation.inspect"));
     try std.testing.expect(readOnlyRequest(try j.value(a, .{ .cmd = "invitation.inspect" })));
     try std.testing.expect(!cachedRequest(try j.value(a, .{ .cmd = "invitation.inspect", .reconcile = "true" })));
+}
+
+test "meet notes: checks are provider reads and cannot enter cache adapters" {
+    for ([_][]const u8{ "calendar.meet-event-pending", "calendar.meet-event-reconcile" }) |command| {
+        try std.testing.expect(readOnlyCommand(command));
+        try std.testing.expect(!cachedCommand(command));
+    }
+    try std.testing.expect(!readOnlyCommand("calendar.meet-event-apply"));
 }

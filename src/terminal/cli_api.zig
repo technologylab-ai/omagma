@@ -230,3 +230,19 @@ pub fn sourceSchema(io: std.Io, a: std.mem.Allocator, name: []const u8, field: [
     try writeSchema(&writer.interface, schema);
     try writer.interface.flush();
 }
+
+test "meet notes: public authorization capabilities match the runtime grant set" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const catalogue = try load(arena.allocator());
+    const definition = j.get(catalogue.definitions, "ReadCapabilities") orelse return error.MissingCapabilities;
+    const runtime = @import("auth.zig").capabilities;
+    try std.testing.expectEqual(@as(i64, @intCast(runtime.len)), try j.integer(definition, "maxItems", 0));
+    const values = j.get(j.get(definition, "items") orelse .null, "enum") orelse return error.MissingCapabilities;
+    try std.testing.expectEqual(runtime.len, values.array.items.len);
+    for (runtime) |capability| {
+        var found = false;
+        for (values.array.items) |value| found = found or std.mem.eql(u8, try j.string(value), capability);
+        try std.testing.expect(found);
+    }
+}

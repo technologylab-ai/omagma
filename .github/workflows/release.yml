@@ -163,6 +163,7 @@ jobs:
           .verification-safe/bin/transport_probe
           python3 tests/terminal_attachment_streams.py --probe .verification-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-safe/bin/calendar_http_probe
+          python3 tests/meet_native_http.py --probe .verification-safe/bin/meet_http_probe
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -393,6 +394,7 @@ jobs:
           .verification-macos-safe/bin/callback_budget
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-macos-safe/bin/calendar_http_probe
+          python3 tests/meet_native_http.py --probe .verification-macos-safe/bin/meet_http_probe
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}

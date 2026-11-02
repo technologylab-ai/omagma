@@ -6,6 +6,8 @@ pub const terminal_upload_bytes = 36 * limits.MiB;
 pub const terminal_download_bytes = @import("attachment_limits.zig").download_json_bytes;
 pub const calendar_response_bytes = 1024 * 1024;
 pub const calendar_body_bytes = 256 * 1024;
+pub const meet_response_bytes = 64 * 1024;
+const JsonPolicy = enum { standard, calendar, meet };
 var slab: [limits.http_workspace]u8 align(16) = undefined;
 var reserved = std.atomic.Value(bool).init(false);
 
@@ -194,12 +196,20 @@ pub const Client = struct {
     /// Calendar has its own authority/path policy and conditional-write header.
     /// Raw statuses remain available to the Calendar service. No request retry.
     pub fn requestCalendar(self: *Client, url: []const u8, method: std.http.Method, token: []const u8, json_body: ?[]const u8, if_match: ?[]const u8, out: []u8) !Response {
-        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, token), json_body, out, false, true, if_match, true });
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, token), json_body, out, false, true, if_match, JsonPolicy.calendar });
     }
     /// Synthetic wire acceptance only: a fixed bearer and plain loopback.
     /// This entrypoint cannot accept a credential or contact a production host.
     pub fn requestLoopbackCalendarProbe(self: *Client, url: []const u8, method: std.http.Method, json_body: ?[]const u8, if_match: ?[]const u8, out: []u8) !Response {
-        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-calendar-bearer"), json_body, out, true, true, if_match, true });
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-calendar-bearer"), json_body, out, true, true, if_match, JsonPolicy.calendar });
+    }
+    /// Meet settings use their own exact authority/path/method policy. This
+    /// does not admit Meet through either the bar or generic terminal policy.
+    pub fn requestMeet(self: *Client, url: []const u8, method: std.http.Method, token: []const u8, json_body: ?[]const u8, out: []u8) !Response {
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, token), json_body, out, false, true, @as(?[]const u8, null), JsonPolicy.meet });
+    }
+    pub fn requestLoopbackMeetProbe(self: *Client, url: []const u8, method: std.http.Method, json_body: ?[]const u8, out: []u8) !Response {
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-meet-bearer"), json_body, out, true, true, @as(?[]const u8, null), JsonPolicy.meet });
     }
     fn calendarDuration(self: *Client) !std.Io.Clock.Duration {
         const remaining = self.job_deadline.durationFromNow(self.io);
@@ -277,17 +287,21 @@ pub const Client = struct {
         return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-bearer"), body, out, true, true });
     }
     fn requestInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool) anyerror!Response {
-        return requestWithHeadersInner(self, url, method, token, form, out, loopback, terminal, null, false);
+        return requestWithHeadersInner(self, url, method, token, form, out, loopback, terminal, null, .standard);
     }
-    fn requestWithHeadersInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool, if_match: ?[]const u8, calendar: bool) anyerror!Response {
+    fn requestWithHeadersInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool, if_match: ?[]const u8, policy: JsonPolicy) anyerror!Response {
         if (out.len > (if (terminal) @as(usize, 3 * limits.MiB) else limits.response)) return error.ResponseBufferTooLarge;
         if (url.len > 4096) return error.UrlTooLarge;
         const uri = try std.Uri.parse(url);
-        if (calendar) {
+        if (policy == .calendar) {
             try validateCalendarDestination(uri, loopback);
             try validateCalendarHeaders(method, form, if_match);
             if (out.len > calendar_response_bytes) return error.ResponseBufferTooLarge;
             if (form) |body| if (body.len > calendar_body_bytes) return error.FormTooLarge;
+        } else if (policy == .meet) {
+            try validateMeetRequest(uri, loopback, method, form, if_match);
+            if (out.len > meet_response_bytes) return error.ResponseBufferTooLarge;
+            if (form) |body| if (body.len > 4096) return error.FormTooLarge;
         } else try validateDestination(uri, loopback, terminal);
         // Refuse oversized payloads before client.request can acquire a TCP
         // connection. This applies equally to the existing bar form wrapper.
@@ -469,6 +483,31 @@ fn validateCalendarDestination(uri: std.Uri, loopback: bool) !void {
     var segments = std.mem.splitScalar(u8, uri.path.percent_encoded, '/');
     while (segments.next()) |segment| if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidCalendarPath;
 }
+fn validateMeetRequest(uri: std.Uri, loopback: bool, method: std.http.Method, body: ?[]const u8, if_match: ?[]const u8) !void {
+    if (loopback) {
+        try validateDestination(uri, true, true);
+    } else {
+        if (!std.mem.eql(u8, uri.scheme, "https")) return error.InsecureUrl;
+        if (uri.host == null or !std.mem.eql(u8, uri.host.?.percent_encoded, "meet.googleapis.com")) return error.InvalidHost;
+    }
+    if (uri.user != null or uri.password != null or uri.fragment != null or (!loopback and uri.port != null and uri.port.? != 443)) return error.InvalidUrl;
+    const prefix = "/v2/spaces/";
+    const path = uri.path.percent_encoded;
+    if (!std.mem.startsWith(u8, path, prefix) or path.len <= prefix.len or path.len > prefix.len + 249) return error.InvalidMeetPath;
+    for (path[prefix.len..]) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return error.InvalidMeetPath;
+    if (if_match != null) return error.InvalidMeetRequest;
+    switch (method) {
+        .GET => if (body != null or uri.query != null) return error.InvalidMeetRequest,
+        .PATCH => {
+            if (body == null or uri.query == null) return error.InvalidMeetRequest;
+            const notes = "updateMask=config.artifactConfig.smartNotesConfig.autoSmartNotesGeneration";
+            const both = notes ++ ",config.artifactConfig.transcriptionConfig.autoTranscriptionGeneration";
+            const query = uri.query.?.percent_encoded;
+            if (!std.mem.eql(u8, query, notes) and !std.mem.eql(u8, query, both)) return error.InvalidMeetRequest;
+        },
+        else => return error.InvalidMeetRequest,
+    }
+}
 fn validateCalendarHeaders(method: std.http.Method, body: ?[]const u8, if_match: ?[]const u8) !void {
     switch (method) {
         .GET => if (body != null or if_match != null) return error.InvalidCalendarRequest,
@@ -481,6 +520,25 @@ fn validateCalendarHeaders(method: std.http.Method, body: ?[]const u8, if_match:
         if (etag.len < 2 or etag.len > 1024 or etag[0] != '"' or etag[etag.len - 1] != '"') return error.InvalidCalendarEtag;
         for (etag[1 .. etag.len - 1]) |byte| if (byte < 33 or byte >= 127 or byte == '"') return error.InvalidCalendarEtag;
     }
+}
+
+test "meet notes: dedicated HTTP policy refuses other hosts methods paths and masks" {
+    const url = "https://meet.googleapis.com/v2/spaces/canonical_A2";
+    const notes = "?updateMask=config.artifactConfig.smartNotesConfig.autoSmartNotesGeneration";
+    const both = notes ++ ",config.artifactConfig.transcriptionConfig.autoTranscriptionGeneration";
+    try validateMeetRequest(try std.Uri.parse(url), false, .GET, null, null);
+    try validateMeetRequest(try std.Uri.parse(url ++ both), false, .PATCH, "{}", null);
+    try validateMeetRequest(try std.Uri.parse(url ++ notes), false, .PATCH, "{}", null);
+    try std.testing.expectError(error.InvalidHost, validateDestination(try std.Uri.parse(url), false, true));
+    try std.testing.expectError(error.InvalidHost, validateDestination(try std.Uri.parse(url), false, false));
+    try std.testing.expectError(error.InvalidHost, validateMeetRequest(try std.Uri.parse("https://meet.googleapis.com.evil.example.test/v2/spaces/id"), false, .GET, null, null));
+    try std.testing.expectError(error.InvalidUrl, validateMeetRequest(try std.Uri.parse("https://meet.googleapis.com:444/v2/spaces/id"), false, .GET, null, null));
+    try std.testing.expectError(error.InvalidMeetPath, validateMeetRequest(try std.Uri.parse("https://meet.googleapis.com/v2/spaces/id/extra"), false, .GET, null, null));
+    try std.testing.expectError(error.InvalidMeetPath, validateMeetRequest(try std.Uri.parse("https://meet.googleapis.com/v2/spaces/%2e%2e"), false, .GET, null, null));
+    try std.testing.expectError(error.InvalidMeetRequest, validateMeetRequest(try std.Uri.parse(url), false, .PATCH, "{}", null));
+    try std.testing.expectError(error.InvalidMeetRequest, validateMeetRequest(try std.Uri.parse(url ++ "?updateMask=*"), false, .PATCH, "{}", null));
+    try std.testing.expectError(error.InvalidMeetRequest, validateMeetRequest(try std.Uri.parse(url), false, .GET, "{}", null));
+    try std.testing.expectError(error.InvalidMeetRequest, validateMeetRequest(try std.Uri.parse(url), false, .DELETE, null, null));
 }
 fn validateDestination(uri: std.Uri, loopback: bool, terminal: bool) !void {
     if (loopback) {

@@ -39,7 +39,7 @@ pub const Provider = struct {
         return .{ .config = config };
     }
     pub fn grants(self: *const Provider) service.Grants {
-        const readonly = std.mem.eql(u8, self.config.options.fixture_scenario, "readonly") or std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-readonly");
+        const readonly = std.mem.eql(u8, self.config.options.fixture_scenario, "readonly") or std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-readonly") or std.mem.eql(u8, self.config.options.fixture_scenario, "meet-calendar-readonly");
         if (std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-picker-owned-only")) return .{ .account = self.config.account, .calendar_list = true, .write_owned = true };
         return .{ .account = self.config.account, .calendar_list = true, .read_events = true, .write_owned = !readonly, .write_shared = !readonly, .free_busy = true };
     }
@@ -86,7 +86,21 @@ pub const Provider = struct {
             },
             .agenda => return response(out, self.config.account, 200, try pageItems(a, request.url, try agendaItems(a, state, request.target, try requestedWindow(a, request.url)))),
             .event_get => {
-                if (findEvent(state, request.target.calendar_id, event_id)) |index| return response(out, self.config.account, 200, state.events[index].value);
+                if (findEvent(state, request.target.calendar_id, event_id)) |index| {
+                    if (std.mem.eql(u8, self.config.options.fixture_scenario, "meet-finish-ready")) {
+                        const conference = j.get(state.events[index].value, "conferenceData") orelse .null;
+                        const create = j.get(conference, "createRequest") orelse .null;
+                        if (std.mem.eql(u8, j.text(j.get(create, "status") orelse .null, "statusCode"), "pending")) {
+                            var ready = try j.copyObject(a, state.events[index].value);
+                            try fixtureConference(a, &ready, "meet-ready");
+                            state.events[index].value = ready;
+                            // This simulates Google's asynchronous completion,
+                            // not another Calendar client mutation.
+                            try save(&store, a, state);
+                        }
+                    }
+                    return response(out, self.config.account, 200, state.events[index].value);
+                }
                 if (try findInstance(a, state, request.target, event_id)) |value| return response(out, self.config.account, 200, value);
                 return failure(out, self.config.account, 404, "notFound");
             },
@@ -212,7 +226,7 @@ pub const Provider = struct {
         try save(store, a, state.*);
     }
     fn lostResponse(self: *const Provider) bool {
-        return std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-lost-response");
+        return std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-lost-response") or std.mem.eql(u8, self.config.options.fixture_scenario, "meet-calendar-lost");
     }
 };
 
@@ -465,7 +479,7 @@ fn fixtureConference(a: std.mem.Allocator, event: *j.Value, scenario: []const u8
     var conference = j.get(event.*, "conferenceData") orelse return;
     const create = j.get(conference, "createRequest") orelse return;
     var updated = try j.copyObject(a, create);
-    const status: []const u8 = if (std.mem.eql(u8, scenario, "calendar-meet-pending")) "pending" else if (std.mem.eql(u8, scenario, "calendar-meet-failure")) "failure" else "success";
+    const status: []const u8 = if (std.mem.eql(u8, scenario, "calendar-meet-pending") or std.mem.eql(u8, scenario, "meet-conference-pending")) "pending" else if (std.mem.eql(u8, scenario, "calendar-meet-failure") or std.mem.eql(u8, scenario, "meet-conference-failed")) "failure" else "success";
     try updated.object.put(a, "status", try j.value(a, .{ .statusCode = status }));
     conference = try j.copyObject(a, conference);
     try conference.object.put(a, "createRequest", updated);
@@ -473,7 +487,17 @@ fn fixtureConference(a: std.mem.Allocator, event: *j.Value, scenario: []const u8
         try event.object.put(a, "conferenceData", conference);
         return;
     }
-    const link = "https://meet.google.com/abc-defg-hij";
+    var code = "abc-defg-hij".*;
+    if (std.mem.startsWith(u8, scenario, "meet-") and !std.mem.eql(u8, scenario, "meet-reuse-space")) {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(j.text(event.*, "id"), &hash, .{});
+        for (&code, 0..) |*byte, index| if (index != 3 and index != 8) {
+            byte.* = 'a' + hash[index] % 26;
+        };
+    }
+    const link = try std.fmt.allocPrint(a, "https://meet.google.com/{s}", .{code});
+    try conference.object.put(a, "conferenceId", .{ .string = try a.dupe(u8, &code) });
+    try conference.object.put(a, "conferenceSolution", try j.value(a, .{ .key = .{ .type = "hangoutsMeet" } }));
     try conference.object.put(a, "entryPoints", try j.value(a, [_]struct { entryPointType: []const u8, uri: []const u8 }{.{ .entryPointType = "video", .uri = link }}));
     try event.object.put(a, "conferenceData", conference);
     try event.object.put(a, "hangoutLink", .{ .string = link });

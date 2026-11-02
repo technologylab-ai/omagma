@@ -80,7 +80,8 @@ const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
-const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const meet_ui = @import("calendar_meet_ui.zig");
+const JobKind = enum { calendar_meet_pending, calendar_meet_review, calendar_meet_apply, calendar_meet_reconcile, calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -1119,6 +1120,7 @@ const Job = struct {
     calendar_compose_generation: u64 = 0,
     update_snapshot: updates.Snapshot = .{},
     kind: JobKind = .list,
+    calendar_meet_scope_check: bool = false,
     request: []const u8 = "",
     response: ?[]const u8 = null,
     failure: ?anyerror = null,
@@ -1208,6 +1210,14 @@ const App = struct {
     calendar_form_top: usize = 0,
     calendar_form_error: @import("../bounded.zig").Text(256) = .{},
     calendar_form_review: calendar_ui.Document = .{},
+    calendar_meet_result: calendar_ui.Document = .{},
+    calendar_meet_grant: calendar_ui.Document = .{},
+    calendar_meet_scope: bool = false,
+    calendar_meet_last_check: bool = false,
+    calendar_meet_apply_failed: bool = false,
+    calendar_meet_scope_focus: usize = 27,
+    calendar_meet_scope_scroll: usize = 0,
+    calendar_meet_access: ?bool = null,
     calendar_form_review_ready: bool = false,
     calendar_form_unknown: bool = false,
     calendar_form_retry_possible: bool = false,
@@ -1828,6 +1838,8 @@ const App = struct {
         self.calendar_date.deinit(self.allocator);
         for (&self.calendar_form_fields) |*field| field.deinit(self.allocator);
         self.calendar_form_review.deinit();
+        self.calendar_meet_result.deinit();
+        self.calendar_meet_grant.deinit();
         self.calendar_guests_contacts.deinit();
         self.calendar_guests_recent.deinit();
         self.calendar_guests_search.deinit();
@@ -6432,7 +6444,7 @@ const App = struct {
                 self.say(false, "{s} · Gmail is unchanged", .{if (completed) @as([]const u8, "Follow-up done · local reminder removed") else "Local follow-up saved"});
             },
             .preferences_save => return error.InvalidPreferencesResponse,
-            .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon, .calendar_guest_contacts => return error.InvalidCalendarResponse,
+            .calendar_meet_pending, .calendar_meet_review, .calendar_meet_apply, .calendar_meet_reconcile, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon, .calendar_guest_contacts => return error.InvalidCalendarResponse,
             .updates_load, .updates_check, .meeting_calendars, .meeting_agenda, .meeting_open => return error.InvalidUpdateResponse,
             .labels_list => {
                 try self.replaceLabels(response);
@@ -10555,7 +10567,7 @@ const App = struct {
     }
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
-            .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
+            .calendar_meet_pending, .calendar_meet_review, .calendar_meet_reconcile, .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
             .draft_measure, .composer_plan, .selection_plan, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
@@ -15160,15 +15172,246 @@ const App = struct {
     }
     fn calendarComposeJob(kind: JobKind) bool {
         return switch (kind) {
-            .calendar_guest_contacts, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon => true,
+            .calendar_meet_pending, .calendar_meet_review, .calendar_meet_apply, .calendar_meet_reconcile, .calendar_guest_contacts, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon => true,
             else => false,
         };
     }
+    fn calendarMeetJob(kind: JobKind) bool {
+        return switch (kind) {
+            .calendar_meet_pending, .calendar_meet_review, .calendar_meet_apply, .calendar_meet_reconcile => true,
+            else => false,
+        };
+    }
+    fn calendarMeetReview(self: *const App) bool {
+        return same(text(get(self.calendar_form_review.value, "contract")), "meet-event-v1");
+    }
+    fn calendarMeetCompact(self: *const App) bool {
+        if (!self.calendarMeetReview()) return false;
+        const result = self.calendar_meet_result.value;
+        if (result == .null) return self.calendar_form_unknown;
+        const state = text(get(get(result, "calendar"), "state"));
+        return same(state, "applied") or same(state, "rejected") or same(state, "unknown");
+    }
+    fn calendarMeetCanConfirm(self: *const App) bool {
+        if (!self.calendarMeetReview() or self.calendar_form_unknown) return false;
+        const result = self.calendar_meet_result.value;
+        if (result == .null) return true;
+        const notes = get(result, "meetAiNotes");
+        if (same(text(get(get(result, "calendar"), "state")), "not_sent") and integer(get(notes, "attempt")) == 0 and !same(text(get(notes, "phase")), "refused")) return true;
+        return same(text(get(notes, "phase")), "ready") and integer(get(notes, "attempt")) == 0 and same(text(get(get(result, "calendar"), "state")), "applied");
+    }
+    fn calendarMeetRequest(self: *App, check: bool) !void {
+        if (self.job.future != null or !self.calendarMeetReview()) return;
+        if (check and self.calendar_meet_result.value == .null and !self.calendar_form_unknown) return;
+        if (!check and (!self.calendarMeetCanConfirm() or !self.calendar_form_review_ready)) return;
+        try self.start(if (check) .calendar_meet_reconcile else .calendar_meet_apply, .{
+            .cmd = if (check) @as([]const u8, "calendar.meet-event-reconcile") else "calendar.meet-event-apply",
+            .account = self.calendar_form.account.slice(),
+            .calendarId = self.calendar_form.calendar_id.slice(),
+            .operationId = self.calendar_form_operation.slice(),
+            .reviewHash = self.calendar_form_hash.slice(),
+        });
+        self.calendar_form_review_ready = false;
+    }
+    fn calendarMeetPending(self: *App) !void {
+        if (self.job.future != null) return;
+        self.calendar_meet_grant.deinit();
+        const scope_check = self.calendar_meet_scope;
+        try self.start(.calendar_meet_pending, .{ .cmd = "calendar.meet-event-pending", .account = self.calendar_form.account.slice(), .calendarId = self.calendar_form.calendar_id.slice() });
+        self.job.calendar_meet_scope_check = scope_check;
+    }
+    fn calendarMeetGrantCommand(self: *App) !?[]const u8 {
+        const a = self.frame.allocator();
+        if (!same(text(get(self.calendar_meet_grant.value, "account")), self.calendar_form.account.slice())) return null;
+        const existing = get(self.calendar_meet_grant.value, "capabilities");
+        if (existing != .array or existing.array.items.len == 0) return null;
+        var caps: std.ArrayList(u8) = .empty;
+        var has_meet = false;
+        for (existing.array.items, 0..) |cap, index| {
+            if (cap != .string or !calendarGrantCapability(cap.string)) return null;
+            for (existing.array.items[0..index]) |previous| if (same(text(previous), cap.string)) return null;
+            if (caps.items.len > 0) try caps.append(a, ',');
+            try caps.appendSlice(a, cap.string);
+            has_meet = has_meet or same(cap.string, "meet-settings");
+        }
+        if (!has_meet) try caps.appendSlice(a, ",meet-settings");
+        return try std.fmt.allocPrint(a, "omagma terminal-auth authorize --account {s}{s} --capabilities {s}", .{ try calendar_ui.shellQuoted(a, self.calendar_form.account.slice()), try self.authRouting(), caps.items });
+    }
+    fn calendarMeetScopeControl(self: *App, control: usize) !void {
+        if (control == 27) {
+            if (try self.calendarMeetGrantCommand()) |command| try self.emitReaderCopy(command);
+        } else if (control == 28) {
+            try self.calendarMeetPending();
+        } else if (control == 29) {
+            if (self.job.future != null and self.job.kind == .calendar_meet_pending and self.job.calendar_meet_scope_check) self.preemptReadOnly();
+            self.calendar_meet_scope = false;
+            self.calendar_form_error = .{};
+        }
+    }
+    fn calendarMeetScopeKey(self: *App, key: Key) !void {
+        if (self.paste) return;
+        if (key.matches(Key.escape, .{})) return self.calendarMeetScopeControl(29);
+        if (key.matches('r', .{ .ctrl = true })) return self.calendarMeetScopeControl(28);
+        if (tabDirection(key)) |back| {
+            const controls = [_]usize{ 27, 28, 29 };
+            var position: usize = 0;
+            for (controls, 0..) |control, index| if (control == self.calendar_meet_scope_focus) {
+                position = index;
+            };
+            self.calendar_meet_scope_focus = controls[(position + if (back) controls.len - 1 else 1) % controls.len];
+        } else if (key.matches(Key.enter, .{})) {
+            try self.calendarMeetScopeControl(self.calendar_meet_scope_focus);
+        } else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.calendar_meet_scope_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.calendar_meet_scope_scroll -|= 1;
+    }
+    fn drawCalendarMeetScope(self: *App, win: vaxis.Window) !void {
+        self.mouse_hits.clear();
+        const a = self.frame.allocator();
+        const width: u16 = @min(win.width -| 2, 90);
+        const height: u16 = @min(win.height, 28);
+        if (width < 30 or height < 12) {
+            try self.line(win, 2, "Event editor · enlarge terminal", .warning);
+            _ = try self.actionButton(win, win.height -| 2, 0, meet_ui.scopeBack, true, true, .dialog_action, 129);
+            return;
+        }
+        const outer = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
+        const border = outer.child(.{ .border = .{ .where = .all, .style = self.style(.sender) } });
+        const inner = border.child(.{ .x_off = 1, .y_off = 1, .width = border.width -| 2, .height = border.height -| 2 });
+        try self.line(inner, 0, "Connect Meet settings", .subject);
+        try self.line(inner, 1, try self.fitLine(inner, self.calendar_form.account.slice(), inner.width), .sender);
+        const viewport = inner.child(.{ .y_off = 3, .height = inner.height -| 8 });
+        var blocks: std.ArrayList(CardBlock) = .empty;
+        try blocks.append(a, .{ .text = meet_ui.scopeBody });
+        try blocks.append(a, .{ .text = "" });
+        try blocks.append(a, .{ .text = (try self.calendarMeetGrantCommand()) orelse meet_ui.scopeUnknownCapabilities, .tone = .accent });
+        if (self.calendar_meet_access == true) try blocks.append(a, .{ .text = if (self.calendar.page == .event_review) meet_ui.scopeReviewRechecked else meet_ui.scopeRechecked, .tone = .current });
+        if (self.calendar_form_error.len > 0) try blocks.append(a, .{ .text = self.calendar_form_error.slice(), .tone = .warning });
+        const total = try self.measureCardBlocks(viewport, blocks.items);
+        self.calendar_meet_scope_scroll = @min(self.calendar_meet_scope_scroll, total -| viewport.height);
+        try self.drawCardBlocks(viewport, blocks.items, self.calendar_meet_scope_scroll);
+        _ = try self.actionButton(inner, inner.height -| 4, 0, meet_ui.scopeCopy, self.calendar_meet_scope_focus == 27, (try self.calendarMeetGrantCommand()) != null, .dialog_action, 127);
+        _ = try self.actionButton(inner, inner.height -| 3, 0, meet_ui.scopeRefresh, self.calendar_meet_scope_focus == 28, self.job.future == null, .dialog_action, 128);
+        _ = try self.actionButton(inner, inner.height -| 2, 0, meet_ui.scopeBack, self.calendar_meet_scope_focus == 29, true, .dialog_action, 129);
+        try self.line(inner, inner.height -| 1, "Tab Controls · Enter Activate · j/k Scroll", .muted);
+    }
+    fn finishCalendarMeet(self: *App) !void {
+        if (!self.calendar.open or self.job.calendar_compose_generation != self.calendar_form_generation) return;
+        const envelope = if (self.job.response) |raw| std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), raw, .{}) catch @as(Value, .null) else @as(Value, .null);
+        if (self.job.failure != null or !truth(get(envelope, "ok"))) {
+            const code = if (self.job.failure) |err| @errorName(err) else text(get(get(envelope, "error"), "code"));
+            if (self.job.kind == .calendar_meet_pending) {
+                if (self.job.calendar_meet_scope_check) {
+                    try self.calendar_form_error.set(meet_ui.statusCheckFailed);
+                    return;
+                }
+                if (same(code, "UnsupportedCalendarCommand") or same(code, "NativeOnly")) return self.calendarComposeLegacyPending();
+                try self.calendar_form_error.set(meet_ui.pendingCheckFailed);
+                return;
+            }
+            if (same(code, "MeetSettingsPermissionRequired")) {
+                self.calendar_meet_access = false;
+                self.calendar_meet_scope = true;
+                self.calendar_meet_scope_focus = 27;
+                try self.calendarMeetPending();
+                return;
+            }
+            if (self.job.kind == .calendar_meet_review and same(code, "CalendarOperationPending") and !self.calendar_form_unknown) return self.calendarComposePending();
+            if (self.job.kind == .calendar_meet_apply or self.job.kind == .calendar_meet_reconcile) {
+                self.calendar_form_unknown = true;
+                self.calendar_meet_apply_failed = self.calendar_meet_apply_failed or self.job.kind == .calendar_meet_apply;
+                self.calendar.page = .event_review;
+                try self.calendar_form_error.set(if (self.job.kind == .calendar_meet_apply) (if (same(text(get(get(self.calendar_meet_result.value, "calendar"), "state")), "applied")) meet_ui.applyNotesUnknown else meet_ui.applyCalendarUnknown) else meet_ui.checkUnchanged);
+                if (self.job.kind == .calendar_meet_apply and self.calendar_meet_apply_failed and same(text(get(get(self.calendar_meet_result.value, "calendar"), "state")), "applied")) self.calendar_form_error = .{};
+            } else try self.calendarComposeError(code);
+            return;
+        }
+        const result = get(envelope, "data");
+        if (!same(text(get(result, "account")), self.calendar_form.account.slice()) or !same(text(get(result, "calendarId")), self.calendar_form.calendar_id.slice())) return error.CalendarAccountMismatch;
+        if (self.job.kind == .calendar_meet_pending) {
+            self.calendar_meet_access = truth(get(result, "meetSettingsAccess"));
+            try self.calendar_meet_grant.replace(self.allocator, result);
+            if (self.job.calendar_meet_scope_check) {
+                if (self.calendar_meet_access == true) self.calendar_form_error = .{};
+                return;
+            }
+            const pending = get(result, "pending");
+            if (pending == .null) return self.calendarComposeLegacyPending();
+            const options: calendar_composer.Init = .{ .target = .{ .account = self.calendar_form.account.slice(), .calendar_id = self.calendar_form.calendar_id.slice() }, .day = self.calendar.day, .now_ms = 0, .zone_name = text(get(get(pending, "event"), "timeZone")), .zone = &self.calendar.zone };
+            self.calendar_form = try calendar_composer.Model.initReview(self.frame.allocator(), options, pending);
+            try self.calendarComposeLoadFields();
+            self.calendar_form.meet_notes = .on;
+            try self.calendar_form_review.replace(self.allocator, pending);
+            try self.calendar_form_operation.set(text(get(pending, "operationId")));
+            try self.calendar_form_hash.set(text(get(pending, "reviewHash")));
+            self.calendar_form_unknown = true;
+            self.calendar.page = .event_review;
+            self.calendar_form_focus = 26;
+            return;
+        }
+        const review = if (self.job.kind == .calendar_meet_review) result else get(result, "review");
+        if (!same(text(get(review, "contract")), "meet-event-v1")) return error.InvalidCalendarResponse;
+        try self.calendar_form_review.replace(self.allocator, review);
+        try self.calendar_form_operation.set(text(get(review, "operationId")));
+        try self.calendar_form_hash.set(text(get(review, "reviewHash")));
+        self.calendar_form_review_ready = false;
+        self.calendar_form_error = .{};
+        self.calendar_meet_apply_failed = false;
+        self.calendar_form_recovery = .none;
+        self.calendar_form_outcome = .{};
+        self.calendar.page = .event_review;
+        self.calendar.scroll = 0;
+        if (self.job.kind == .calendar_meet_review) {
+            self.calendar_meet_result.deinit();
+            self.calendar_form_unknown = false;
+            self.calendar_form_focus = 17;
+        } else {
+            try self.calendar_meet_result.replace(self.allocator, result);
+            if (self.job.kind == .calendar_meet_reconcile and text(get(result, "readError")).len > 0) try self.calendar_form_error.set(meet_ui.checkUnchanged);
+            const calendar_state = text(get(get(result, "calendar"), "state"));
+            const notes = get(result, "meetAiNotes");
+            self.calendar_form_unknown = same(calendar_state, "unknown") or same(text(get(notes, "state")), "unknown");
+            self.calendar_form_focus = 26;
+            self.calendar_meet_last_check = self.job.kind == .calendar_meet_reconcile;
+            if (same(calendar_state, "applied")) {
+                self.calendar_form_dirty = false;
+                self.calendar.stale = true;
+                self.meeting_wake.store(true, .release);
+            }
+            if (same(calendar_state, "applied") and same(text(get(notes, "reason")), "MeetSettingsPermissionRequired") and integer(get(notes, "attempt")) == 0) {
+                self.calendar_meet_access = false;
+                self.calendar_meet_scope = true;
+                self.calendar_meet_scope_focus = 27;
+                try self.calendarMeetPending();
+            }
+        }
+    }
+    fn calendarMeetReviewKey(self: *App, key: Key) !void {
+        if (self.paste) return;
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.calendarComposeCancel();
+        if (self.job.future != null) return;
+        if (key.matches('r', .{})) return self.calendarMeetRequest(true);
+        if (key.matches('y', .{})) return self.calendarMeetRequest(false);
+        if (tabDirection(key)) |back| {
+            const controls: []const usize = if (self.calendar_meet_result.value == .null and !self.calendar_form_unknown) &.{ 16, 17 } else if (self.calendarMeetCanConfirm()) &.{ 16, 26, 17 } else &.{ 16, 26 };
+            var position: usize = 0;
+            for (controls, 0..) |control, index| if (control == self.calendar_form_focus) {
+                position = index;
+            };
+            self.calendar_form_focus = controls[(position + if (back) controls.len - 1 else 1) % controls.len];
+        } else if (key.matches(Key.enter, .{})) {
+            try self.calendarComposeControl(self.calendar_form_focus);
+        } else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.calendar.scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.calendar.scroll -|= 1 else if (key.matches('d', .{ .ctrl = true })) self.calendar.scroll +|= @max(self.vx.window().height / 2, 1) else if (key.matches('u', .{ .ctrl = true })) self.calendar.scroll -|= @max(self.vx.window().height / 2, 1);
+    }
     fn calendarComposeWriting(self: *const App) bool {
-        return self.job.future != null and (self.job.kind == .calendar_event_apply or self.job.kind == .calendar_event_retry);
+        return self.job.future != null and (self.job.kind == .calendar_event_apply or self.job.kind == .calendar_event_retry or self.job.kind == .calendar_meet_apply);
     }
     fn calendarComposeLoadFields(self: *App) !void {
         self.calendar_form_generation +%= 1;
+        self.calendar_meet_result.deinit();
+        self.calendar_meet_scope = false;
+        self.calendar_meet_last_check = false;
+        self.calendar_meet_apply_failed = false;
+        self.calendar_meet_scope_scroll = 0;
+        self.calendar_meet_access = null;
         for (&self.calendar_form_fields, 0..) |*field, index| try field.set(self.allocator, self.calendar_form.get(@fromBackingInt(@intCast(index))));
         self.calendar_form_focus = 0;
         self.calendar_form_top = 0;
@@ -15206,6 +15449,7 @@ const App = struct {
             .zone = &self.calendar.zone,
             .writable = truth(get(entry, "canWrite")),
             .supports_meet = truth(get(value, "supports_meet")),
+            .primary = truth(get(value, "primary")),
         };
     }
     fn calendarComposeNew(self: *App) !void {
@@ -15248,6 +15492,10 @@ const App = struct {
         try self.calendarComposePending();
     }
     fn calendarComposePending(self: *App) !void {
+        if (!self.calendar_form.editing) return self.calendarMeetPending();
+        return self.calendarComposeLegacyPending();
+    }
+    fn calendarComposeLegacyPending(self: *App) !void {
         if (self.job.future != null) return;
         try self.start(.calendar_event_pending, .{
             .cmd = "calendar.event-pending",
@@ -15305,6 +15553,18 @@ const App = struct {
             return;
         };
         self.calendar_form_error = .{};
+        if (self.calendar_form.meetRowVisible() and self.calendar_form.meet_notes == .on) {
+            if (self.calendar_meet_access == false) {
+                self.calendar_meet_scope = true;
+                self.calendar_meet_scope_focus = 27;
+                try self.calendarMeetPending();
+                return;
+            }
+            var compound = try @import("json.zig").copyObject(self.frame.allocator(), request);
+            try compound.object.put(self.frame.allocator(), "cmd", .{ .string = "calendar.meet-event-review" });
+            try compound.object.put(self.frame.allocator(), "meetAiNotes", .{ .string = "on" });
+            return self.start(.calendar_meet_review, compound);
+        }
         try self.start(.calendar_event_review, request);
     }
     fn calendarComposeApply(self: *App) !void {
@@ -15347,6 +15607,7 @@ const App = struct {
         self.calendar_form_review_ready = false;
     }
     fn finishCalendarCompose(self: *App) !void {
+        if (calendarMeetJob(self.job.kind)) return self.finishCalendarMeet();
         if (!self.calendar.open) return;
         if (self.job.calendar_compose_generation != self.calendar_form_generation) return;
         if (self.job.kind == .calendar_guest_contacts) return self.finishCalendarGuests();
@@ -15812,10 +16073,11 @@ const App = struct {
         _ = try self.actionButton(inner, inner.height -| 2, x, "[Esc Back]", self.calendar_guests_focus == 3, true, .dialog_action, 272);
         try self.line(inner, inner.height -| 1, try self.fitLine(inner, "Tab Controls · ↑/↓ Choose · no invitations sent", inner.width), .muted);
     }
-    fn calendarComposeControlList(self: *const App, buffer: *[19]usize) []const usize {
-        const order = [_]usize{ 0, 12, 13, 1, 2, 3, 4, 5, 14, 9, 8, 23, 15, 6, 7, 10, 11, 16, 17 };
+    fn calendarComposeControlList(self: *const App, buffer: *[20]usize) []const usize {
+        const order = [_]usize{ 0, 12, 13, 1, 2, 3, 4, 5, 14, 24, 9, 8, 23, 15, 6, 7, 10, 11, 16, 17 };
         var count: usize = 0;
         for (order) |control| {
+            if (control == 24 and !self.calendar_form.meetRowVisible()) continue;
             if (control == 23 and !self.calendar_form.editable(.attendees)) continue;
             if (control == 12 and self.calendar_form.editing) continue;
             if (control == 15 and (!self.calendar_form.editing or self.calendar_form.existingGuestCount() == 0)) continue;
@@ -15837,6 +16099,13 @@ const App = struct {
         // saving preferences). Only this form's provider writes block Back.
         self.calendar_form_generation +%= 1;
         self.calendar_guests_open = false;
+        if (self.calendarMeetReview() and self.calendar.page == .event_review and (self.calendar_meet_result.value != .null or self.calendar_form_unknown)) {
+            self.calendar_form_dirty = false;
+            self.calendar.page = .main;
+            self.calendar.focus = null;
+            if (self.job.future == null) try self.loadCalendarAgenda(false);
+            return;
+        }
         if (self.calendar_form_recovery != .none) {
             self.calendar_form_recovery = .none;
             self.calendar_form_review_ready = false;
@@ -15859,8 +16128,16 @@ const App = struct {
         self.calendar.focus = null;
         if (same(self.calendar_form_outcome.slice(), "applied") and self.job.future == null) try self.loadCalendarAgenda(false);
     }
+    fn calendarComposePreemptPending(self: *App) void {
+        if (self.calendar.page != .compose or self.calendar_meet_scope or self.job.future == null) return;
+        if (self.job.kind == .calendar_event_pending or (self.job.kind == .calendar_meet_pending and !self.job.calendar_meet_scope_check)) self.preemptReadOnly();
+    }
     fn calendarComposeControl(self: *App, control: usize) !void {
         if (self.calendarComposeWriting()) return;
+        self.calendarComposePreemptPending();
+        if (control >= 27 and control <= 29) return self.calendarMeetScopeControl(control);
+        if (control == 26) return self.calendarMeetRequest(true);
+        if (control == 17 and self.calendarMeetReview() and self.calendar.page == .event_review) return self.calendarMeetRequest(false);
         if (control == 21) return self.calendarComposeRecovery(false);
         if (control == 22) return self.calendarComposeRecovery(true);
         if (self.calendar_form_discard) {
@@ -15896,6 +16173,8 @@ const App = struct {
                 .google_meet => .link,
                 .link => .none,
             };
+        } else if (control == 24 and self.calendar_form.meetRowVisible()) {
+            self.calendar_form.meet_notes = if (self.calendar_form.meet_notes == .on) .keep else .on;
         } else if (control == 15) {
             self.calendar_form.send_updates = if (self.calendar_form.send_updates == .none) .all else .none;
             self.calendar_form_notify_chosen = true;
@@ -15989,9 +16268,12 @@ const App = struct {
         const value = get(entry, "calendar");
         const target = get(value, "target");
         try self.calendar_form.setTarget(.{ .account = text(get(target, "account")), .calendar_id = text(get(target, "calendar_id")) }, true, truth(get(value, "supports_meet")));
+        self.calendar_form.meet_notes_available = truth(get(value, "primary"));
         self.calendar_form_pick_target = false;
         self.calendar_form_dirty = true;
         self.calendar_form_error = .{};
+        self.calendar_meet_access = null;
+        try self.calendarMeetPending();
     }
     fn calendarComposeTargetName(self: *App) []const u8 {
         for (self.calendarEntries()) |entry| {
@@ -16035,7 +16317,10 @@ const App = struct {
     }
     fn onCalendarComposeKey(self: *App, key: Key) !void {
         if (self.calendarComposeWriting()) return;
+        self.calendarComposePreemptPending();
+        if (self.calendar_meet_scope) return self.calendarMeetScopeKey(key);
         if (self.calendar_guests_open) return self.onCalendarGuestsKey(key);
+        if (self.calendar.page == .event_review and self.calendarMeetReview()) return self.calendarMeetReviewKey(key);
         if (!self.paste and key.matches(Key.escape, .{}) and !self.calendar_form_pick_target and !self.calendar_form_discard) return self.calendarComposeCancel();
         if (self.calendar_form_pick_target) {
             if (self.paste) return;
@@ -16091,7 +16376,7 @@ const App = struct {
         if (key.matches('s', .{ .ctrl = true })) return self.calendarComposeReview();
         if ((index == 8 or index == 23) and (key.matches(' ', .{ .ctrl = true }) or key.matches('@', .{ .ctrl = true }))) return self.calendarGuestsOpen();
         if (tabDirection(key)) |back| {
-            var buffer: [19]usize = undefined;
+            var buffer: [20]usize = undefined;
             const controls = self.calendarComposeControlList(&buffer);
             var position: usize = 0;
             for (controls, 0..) |control, at| if (control == index) {
@@ -16140,9 +16425,10 @@ const App = struct {
     fn drawCalendarComposer(self: *App, win: vaxis.Window) !void {
         const a = self.frame.allocator();
         self.mouse_hits.clear();
+        if (self.calendar_meet_scope) return self.drawCalendarMeetScope(win);
         if (self.calendar_guests_open) return self.drawCalendarGuests(win);
         const width: u16 = @min(win.width -| 2, 90);
-        var layout_controls: [19]usize = undefined;
+        var layout_controls: [20]usize = undefined;
         const desired_height: u16 = if (self.calendar.page == .event_review) 27 else @intCast(self.calendarComposeControlList(&layout_controls).len + 9);
         const height: u16 = @min(win.height, desired_height);
         if (width < 30 or height < 12) {
@@ -16154,15 +16440,15 @@ const App = struct {
         const bordered = outer.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
         const pad: u16 = if (width >= 64) 2 else 1;
         const inner = bordered.child(.{ .x_off = pad, .y_off = 1, .width = bordered.width -| (pad * 2), .height = bordered.height -| 2 });
-        try self.line(inner, 0, if (self.calendar.page == .event_review) (if (same(self.calendar_form_outcome.slice(), "applied")) @as([]const u8, "Event saved") else if (same(self.calendar_form_outcome.slice(), "archived")) "Uncertainty archived" else if (self.calendar_form_unknown) "Check Calendar outcome" else if (self.calendar_form.editing) "Review event changes" else "Review new event") else if (self.calendar_form.editing) "Edit event" else "New event", .subject);
+        try self.line(inner, 0, if (self.calendar.page == .event_review and self.calendarMeetReview()) (if (self.calendar_meet_apply_failed and same(text(get(get(self.calendar_meet_result.value, "calendar"), "state")), "applied")) meet_ui.unknownTitle else meet_ui.title(self.calendar_meet_result.value, self.calendar_form_unknown)) else if (self.calendar.page == .event_review) (if (same(self.calendar_form_outcome.slice(), "applied")) @as([]const u8, "Event saved") else if (same(self.calendar_form_outcome.slice(), "archived")) "Uncertainty archived" else if (self.calendar_form_unknown) "Check Calendar outcome" else if (self.calendar_form.editing) "Review event changes" else "Review new event") else if (self.calendar_form.editing) "Edit event" else "New event", .subject);
         try self.line(inner, 1, try self.fitLine(inner, try std.fmt.allocPrint(a, "{s} · {s}", .{ self.calendarComposeTargetName(), self.calendar_form.account.slice() }), inner.width), .sender);
-        const recovery_menu = self.calendar_form_unknown and self.calendar_form_recovery == .none;
+        const recovery_menu = self.calendar_form_unknown and self.calendar_form_recovery == .none and !self.calendarMeetReview();
         const footer_lines: u16 = if (recovery_menu) 6 else 4;
         const viewport = inner.child(.{ .y_off = 3, .height = inner.height -| (3 + footer_lines) });
         if (self.calendar.page == .event_review) {
             try self.drawCalendarComposeReview(viewport);
         } else {
-            var buffer: [19]usize = undefined;
+            var buffer: [20]usize = undefined;
             const controls = self.calendarComposeControlList(&buffer);
             var label_width: usize = 0;
             for (controls) |control| if (control < 10) {
@@ -16172,7 +16458,7 @@ const App = struct {
             for (controls, 0..) |control, position| if (control == self.calendar_form_focus) {
                 at = position;
             };
-            if (self.calendar_form_focus < 16 or self.calendar_form_focus == 23) {
+            if (self.calendar_form_focus < 16 or self.calendar_form_focus == 23 or self.calendar_form_focus == 24) {
                 if (at < self.calendar_form_top) self.calendar_form_top = at;
                 if (at >= self.calendar_form_top + viewport.height) self.calendar_form_top = at -| (viewport.height -| 1);
             }
@@ -16196,6 +16482,7 @@ const App = struct {
                             .google_meet => "Video: Generate Google Meet link",
                             .link => "Video: Paste meeting link",
                         },
+                        24 => if (self.calendar_form.meet_notes == .on) (if (self.calendar_meet_access == false) (if (viewport.width < 60) meet_ui.needsAccessNarrow else meet_ui.needsAccessWide) else if (viewport.width < 60) "[x] Meet AI notes+transcript" else meet_ui.checkboxOn) else if (viewport.width < 60) "[ ] Meet AI notes+transcript" else meet_ui.checkboxOff,
                         23 => "[Ctrl+Space Contacts · recent mail]",
                         15 => if (!self.calendar_form_notify_chosen) @as([]const u8, "Notify guests: choose Email / No email · Enter") else if (self.calendar_form.send_updates == .all) "[x] Email guests about these changes" else "[ ] No guest update emails requested",
                         else => "",
@@ -16207,9 +16494,13 @@ const App = struct {
             }
         }
         const error_row = inner.height -| footer_lines;
-        if (self.calendar_form_error.len > 0) try self.line(inner, error_row, try self.fitLine(inner, self.calendar_form_error.slice(), inner.width), .warning) else if (self.calendar.page != .event_review) try self.line(inner, error_row, try self.fitLine(inner, if (inner.width < 60) @as([]const u8, "Nothing is sent until you confirm.") else if (self.calendar_form.editing) "This occurrence · existing guests and meeting details are preserved." else "Nothing is saved or sent until you review and confirm.", inner.width), .muted);
+        if (self.calendar_form_error.len > 0) try self.line(inner, error_row, try self.fitLine(inner, self.calendar_form_error.slice(), inner.width), .warning) else if (self.calendar_form_focus == 24 and self.calendar_form.meet_notes == .keep) try self.line(inner, error_row, try self.fitLine(inner, if (inner.width < 60) meet_ui.uncheckedNarrow else meet_ui.uncheckedWide, inner.width), .muted) else if (self.calendar.page != .event_review) try self.line(inner, error_row, try self.fitLine(inner, if (inner.width < 60) @as([]const u8, "Nothing is sent until you confirm.") else if (self.calendar_form.editing) "This occurrence · existing guests and meeting details are preserved." else "Nothing is saved or sent until you review and confirm.", inner.width), .muted);
         const busy = self.job.future != null;
-        if (recovery_menu) {
+        if (self.calendar.page == .event_review and self.calendarMeetReview()) {
+            _ = try self.actionButton(inner, inner.height -| 4, 0, meet_ui.backButton, self.calendar_form_focus == 16, !self.calendarComposeWriting(), .dialog_action, 116);
+            if (self.calendar_meet_result.value != .null or self.calendar_form_unknown) _ = try self.actionButton(inner, inner.height -| 3, 0, meet_ui.checkButton, self.calendar_form_focus == 26, !busy, .dialog_action, 126);
+            if (self.calendarMeetCanConfirm()) _ = try self.actionButton(inner, inner.height -| 2, 0, if (self.calendar_meet_result.value == .null or same(text(get(get(self.calendar_meet_result.value, "calendar"), "state")), "not_sent")) try self.calendarComposeConfirmLabel() else meet_ui.finishButton, self.calendar_form_focus == 17, !busy and self.calendar_form_review_ready, .dialog_action, 117);
+        } else if (recovery_menu) {
             _ = try self.actionButton(inner, inner.height -| 5, 0, "[Back to Calendar]", self.calendar_form_focus == 16, !self.calendarComposeWriting(), .dialog_action, 116);
             _ = try self.actionButton(inner, inner.height -| 4, 0, "[r Check status · reads only]", self.calendar_form_focus == 17, !busy, .dialog_action, 117);
             _ = try self.actionButton(inner, inner.height -| 3, 0, "[Ctrl+R Review an identical retry]", self.calendar_form_focus == 21, !busy and self.calendar_form_retry_possible, .dialog_action, 121);
@@ -16252,8 +16543,35 @@ const App = struct {
         }
         try blocks.append(a, .{ .text = text(get(event, "summary")), .tone = .subject });
         try blocks.append(a, .{ .text = try self.calendarCardWhen(resolved, &zone), .tone = .accent });
-        try blocks.append(a, .{ .text = if (truth(get(event, "allDay"))) @as([]const u8, "All-day dates · kept as civil dates, without a time-zone shift") else try std.fmt.allocPrint(a, "Time zone · {s}", .{text(get(event, "timeZone"))}), .tone = .muted });
+        if (!self.calendarMeetCompact()) try blocks.append(a, .{ .text = if (truth(get(event, "allDay"))) @as([]const u8, "All-day dates · kept as civil dates, without a time-zone shift") else try std.fmt.allocPrint(a, "Time zone · {s}", .{text(get(event, "timeZone"))}), .tone = .muted });
         try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar · {s}\nAccount · {s}", .{ text(get(review, "calendarName")), text(get(review, "account")) }), .tone = .sender });
+        if (self.calendarMeetReview()) {
+            const result = self.calendar_meet_result.value;
+            const cal = get(result, "calendar");
+            const notes = get(result, "meetAiNotes");
+            const state = text(get(notes, "state"));
+            if (self.calendar_meet_apply_failed and same(text(get(cal, "state")), "applied")) {
+                try blocks.append(a, .{ .text = meet_ui.applyNotesUnknown, .tone = .warning });
+            } else if (same(state, "on")) {
+                const stamp = self.calendar.zone.format(a, integer(get(notes, "observedAt"))) catch "";
+                try blocks.append(a, .{ .text = try std.mem.replaceOwned(u8, a, meet_ui.success, "{time}", stamp), .tone = .current });
+            } else if (same(text(get(cal, "state")), "rejected")) {
+                try blocks.append(a, .{ .text = try std.mem.replaceOwned(u8, a, meet_ui.calendarRejected, "{code}", text(get(cal, "reason"))), .tone = .warning });
+            } else if (same(text(get(cal, "state")), "applied")) {
+                if (!same(state, "refused") and (same(text(get(notes, "reason")), "MeetApiDisabled") or same(text(get(notes, "reason")), "MeetSettingsPermissionRequired"))) try blocks.append(a, .{ .text = meet_ui.reason(text(get(notes, "reason"))), .tone = .warning });
+                if (same(state, "refused")) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "{s} · {s}", .{ meet_ui.reason(text(get(notes, "reason"))), text(get(notes, "reason")) }), .tone = .warning }) else try blocks.append(a, .{ .text = if (same(text(get(notes, "phase")), "ready")) meet_ui.readyBody else if (same(state, "unknown")) meet_ui.unknownBody else if (same(state, "waiting_for_link")) meet_ui.waitingBody else meet_ui.pendingBody, .tone = .warning });
+            } else if (self.calendar_form_unknown) try blocks.append(a, .{ .text = meet_ui.calendarUnknown, .tone = .warning });
+        }
+        if (self.calendarMeetCompact()) {
+            const result = self.calendar_meet_result.value;
+            const current = get(result, "current");
+            if (self.calendar_meet_last_check and current != .null) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Checked {s} · Google reports AI notes {s} · transcript {s}", .{ try self.calendar.zone.format(a, integer(get(current, "observedAt"))), meet_ui.enumLabel(text(get(current, "notes"))), meet_ui.enumLabel(text(get(current, "transcription"))) }), .tone = .sender });
+            const total = try self.measureCardBlocks(win, blocks.items);
+            self.calendar.scroll = @min(self.calendar.scroll, total -| win.height);
+            try self.drawCardBlocks(win, blocks.items, self.calendar.scroll);
+            if (win.height > 0 and self.calendar.scroll + win.height >= total) self.calendar_form_review_ready = true;
+            return;
+        }
         const guests = items(get(event, "attendees"));
         if (guests.len > 0) {
             try blocks.append(a, .{ .text = "\nGUESTS", .tone = .muted });
@@ -16261,6 +16579,7 @@ const App = struct {
         } else if (self.calendar_form.editing) try blocks.append(a, .{ .text = "\nExisting guests are preserved.", .tone = .muted });
         try blocks.append(a, .{ .text = if (same(text(get(review, "sendUpdates")), "all")) @as([]const u8, "Guests will receive invitation/update emails.") else "No guest update emails requested; their Calendar may still update.", .tone = if (same(text(get(review, "sendUpdates")), "all")) .offline else .muted });
         if (same(text(get(review, "conference")), "google_meet")) try blocks.append(a, .{ .text = "\nGoogle Meet · a new video link will be generated.", .tone = .sender }) else if (same(text(get(review, "conference")), "link")) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\nMeeting link · {s}", .{text(get(event, "joinUrl"))}), .tone = .sender }) else if (self.calendar_form.existing_join) try blocks.append(a, .{ .text = "\nExisting meeting link is preserved.", .tone = .sender });
+        if (self.calendarMeetReview()) try blocks.append(a, .{ .text = meet_ui.reviewOn, .tone = .accent });
         const previous = get(review, "previous");
         if (previous != .null) {
             try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\nPreviously · {s}", .{try self.calendarCardWhen(previous, &zone)}), .tone = .muted });
@@ -17582,7 +17901,7 @@ const App = struct {
                 return;
             }
             if (self.job.future != null) return;
-            if (index >= 100 and index <= 123) try self.calendarComposeControl(index - 100);
+            if (index >= 100 and index <= 129) try self.calendarComposeControl(index - 100);
             return;
         }
         if (self.calendar.page == .actions and self.calendar.actions_return == .detail and
@@ -27657,7 +27976,7 @@ test "calendar composer: omitted 201 guests require a visible explicit notificat
     try std.testing.expectEqual(@as(usize, 201), app.calendar_form.existingGuestCount());
     try std.testing.expect(!app.calendar_form_notify_chosen);
     try std.testing.expect(!app.calendar_form.editable(.attendees));
-    var controls: [19]usize = undefined;
+    var controls: [20]usize = undefined;
     try std.testing.expect(std.mem.indexOfScalar(usize, app.calendarComposeControlList(&controls), 15) != null);
     try app.onCalendarComposeKey(.{ .codepoint = 's', .mods = .{ .ctrl = true } });
     try std.testing.expectEqual(@as(usize, 15), app.calendar_form_focus);
@@ -31149,4 +31468,183 @@ test "calendar booking modal: empty reviewed fields never show an earlier inspec
     try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "Untitled appointment")) != null);
     try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "STALE OTHER")) == null);
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "meet notes: new-event control is reachable after Video and never edits existing meetings" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .compose;
+    app.calendar_form.conference = .google_meet;
+    var buffer: [20]usize = undefined;
+    const controls = app.calendarComposeControlList(&buffer);
+    for (controls, 0..) |control, index| if (control == 14) try std.testing.expectEqual(@as(usize, 24), controls[index + 1]);
+    app.calendar_form_focus = 14;
+    try app.onCalendarComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 24), app.calendar_form_focus);
+    try app.onCalendarComposeKey(.{ .codepoint = ' ', .text = " " });
+    try std.testing.expectEqual(calendar_composer.MeetNotes.on, app.calendar_form.meet_notes);
+    try std.testing.expect(app.job.future == null);
+    app.calendar_form.editing = true;
+    try std.testing.expect(!app.calendar_form.meetRowVisible());
+    for (app.calendarComposeControlList(&buffer)) |control| try std.testing.expect(control != 24);
+    app.calendar_form.editing = false;
+    app.calendar_form.conference = .link;
+    try std.testing.expect(!app.calendar_form.meetRowVisible());
+    try std.testing.expectEqual(calendar_composer.MeetNotes.on, app.calendar_form.meet_notes);
+}
+
+test "meet notes: connect command uses the fresh bound grant instead of stale account capabilities" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    try app.calendar_form.account.set("self@example.test");
+    try std.testing.expect((try app.calendarMeetGrantCommand()) == null);
+    try app.calendar_meet_grant.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .account = "self@example.test", .capabilities = [_][]const u8{ "mail-read", "mail-send", "calendar-read", "calendar-write-owned", "drive-upload" } }));
+    const command = (try app.calendarMeetGrantCommand()) orelse return error.MissingGrantCommand;
+    try std.testing.expect(std.mem.indexOf(u8, command, "mail-read,mail-send,calendar-read,calendar-write-owned,drive-upload,meet-settings") != null);
+    try app.calendar_form.account.set("other@example.test");
+    try std.testing.expect((try app.calendarMeetGrantCommand()) == null);
+}
+
+test "meet notes: compact narrow result shows the dated confirmation without scrolling" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var environ = std.process.Environ.Map.init(a);
+    defer environ.deinit();
+    app.environ = &environ;
+    app.io = std.testing.io;
+    app.calendar.zone = try timezone.Zone.fromPosix("UTC0");
+    app.calendar.open = true;
+    app.calendar.page = .event_review;
+    try app.calendar_form.account.set("self@example.test");
+    try app.calendar_form_review.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"contract\":\"meet-event-v1\",\"account\":\"self@example.test\",\"calendarName\":\"Personal\",\"event\":{\"summary\":\"Fictional planning\",\"timeZone\":\"UTC\"},\"resolved\":{}}", .{}));
+    try app.calendar_meet_result.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"calendar\":{\"state\":\"applied\"},\"meetAiNotes\":{\"state\":\"on\",\"phase\":\"confirmed\",\"observedAt\":1793696400000}}", .{}));
+    var screen = try vaxis.Screen.init(a, .{ .cols = 66, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 66, .height = 30, .screen = &screen };
+    for ([_]bool{ false, true }) |mono| {
+        app.mono = mono;
+        screen.clear();
+        try app.drawCalendarComposer(win);
+        const shown = try helpTestScreenText(a, &screen);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "confirmed by Google") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Guest update emails") == null);
+        try std.testing.expectEqual(@as(usize, 0), app.calendar.scroll);
+        try std.testing.expect(!app.calendarMeetCanConfirm());
+    }
+}
+
+test "meet notes: late permission check cannot replace a form after its panel closes" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .compose;
+    try app.calendar_form.account.set("self@example.test");
+    try app.calendar_form.calendar_id.set("opaque-calendar");
+    try app.calendar_form_fields[0].set(a, "Unsaved title stays");
+    app.calendar_meet_scope = false;
+    app.job = .{ .kind = .calendar_meet_pending, .calendar_meet_scope_check = true, .calendar_compose_generation = app.calendar_form_generation, .response = "{\"ok\":true,\"data\":{\"account\":\"self@example.test\",\"calendarId\":\"opaque-calendar\",\"meetSettingsAccess\":true,\"capabilities\":[\"mail-read\",\"meet-settings\"],\"pending\":{\"account\":\"self@example.test\"}}}" };
+    try app.finishCalendarMeet();
+    try std.testing.expectEqualStrings("Unsaved title stays", app.calendar_form_fields[0].value());
+    try std.testing.expectEqual(calendar_ui.Page.compose, app.calendar.page);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expect(app.calendar_form_review.value == .null);
+}
+
+test "meet notes: an unsent recovered creation needs the full guest and AI review" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var environ = std.process.Environ.Map.init(a);
+    defer environ.deinit();
+    app.environ = &environ;
+    app.io = std.testing.io;
+    app.calendar.open = true;
+    app.calendar.page = .event_review;
+    try app.calendar_form_review.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"contract\":\"meet-event-v1\",\"account\":\"self@example.test\",\"calendarName\":\"Personal\",\"conference\":\"google_meet\",\"sendUpdates\":\"all\",\"event\":{\"summary\":\"Fictional planning\",\"timeZone\":\"UTC\",\"attendees\":[\"guest@example.test\"]},\"resolved\":{}}", .{}));
+    try app.calendar_meet_result.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"calendar\":{\"state\":\"not_sent\"},\"meetAiNotes\":{\"state\":\"not_sent\",\"phase\":\"waiting_calendar\",\"attempt\":0}}", .{}));
+    try std.testing.expect(!app.calendarMeetCompact());
+    try std.testing.expect(app.calendarMeetCanConfirm());
+    var screen = try vaxis.Screen.init(a, .{ .cols = 66, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 66, .height = 30, .screen = &screen };
+    try app.drawCalendarComposeReview(win.child(.{ .height = 9 }));
+    const shown = try helpTestScreenText(a, &screen);
+    defer a.free(shown);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "guest@example.test") != null);
+    try std.testing.expect(!app.calendar_form_review_ready);
+    app.calendar_form.meet_notes_available = false;
+    app.calendar_form.conference = .google_meet;
+    try std.testing.expect(!app.calendar_form.meetRowVisible());
+}
+
+test "meet notes: failed read after uncertain apply never restores a not-sent card" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var environ = std.process.Environ.Map.init(a);
+    defer environ.deinit();
+    app.environ = &environ;
+    app.io = std.testing.io;
+    app.calendar.zone = try timezone.Zone.fromPosix("UTC0");
+    app.calendar.open = true;
+    app.calendar.page = .event_review;
+    try app.calendar_form_review.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"contract\":\"meet-event-v1\",\"account\":\"self@example.test\",\"calendarName\":\"Personal\",\"event\":{\"summary\":\"Fictional planning\",\"timeZone\":\"UTC\"},\"resolved\":{}}", .{}));
+    try app.calendar_meet_result.replace(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "{\"calendar\":{\"state\":\"applied\"},\"meetAiNotes\":{\"state\":\"not_sent\",\"phase\":\"ready\",\"attempt\":0}}", .{}));
+    app.job = .{ .kind = .calendar_meet_apply, .failure = error.UnknownOutcome, .calendar_compose_generation = app.calendar_form_generation };
+    try app.finishCalendarMeet();
+    app.job = .{ .kind = .calendar_meet_reconcile, .failure = error.ConnectionRefused, .calendar_compose_generation = app.calendar_form_generation };
+    try app.finishCalendarMeet();
+    try std.testing.expect(app.calendar_meet_apply_failed and app.calendar_form_unknown);
+    try std.testing.expectEqualStrings(meet_ui.checkUnchanged, app.calendar_form_error.slice());
+    try std.testing.expect(!app.calendarMeetCanConfirm());
+    var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 30, .screen = &screen };
+    try app.drawCalendarComposer(win);
+    const shown = try helpTestScreenText(a, &screen);
+    defer a.free(shown);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "AI notes outcome unknown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "hasn't been sent") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "not sent yet") == null);
+}
+
+test "meet notes: a pending create found during review resumes the original compound" {
+    const a = std.testing.allocator;
+    var transport: MeetingFlowTestClient = .{};
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    defer app.cancelJob();
+    app.loop = loop;
+    app.client = .{ .ctx = &transport, .callFn = MeetingFlowTestClient.provider };
+    app.calendar.open = true;
+    app.calendar.page = .compose;
+    try app.calendar_form.account.set("work@example.test");
+    try app.calendar_form.calendar_id.set("opaque-calendar");
+    app.job = .{ .kind = .calendar_meet_review, .calendar_compose_generation = app.calendar_form_generation, .response = "{\"ok\":false,\"error\":{\"code\":\"CalendarOperationPending\"}}" };
+    try app.finishCalendarMeet();
+    try transport.waitEntered();
+    try std.testing.expectEqual(JobKind.calendar_meet_pending, app.job.kind);
+    const request = try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), transport.requests[0][0..transport.lengths[0]], .{});
+    try std.testing.expectEqualStrings("calendar.meet-event-pending", text(get(request, "cmd")));
+    try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+    try std.testing.expectEqualStrings("opaque-calendar", text(get(request, "calendarId")));
 }

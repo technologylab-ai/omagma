@@ -29,6 +29,8 @@ SUITES = {
     "terminal_calendar_tui": (),
     "terminal_calendar_booking": (),
     "terminal_calendar_compose": (),
+    "terminal_meet_notes": (),
+    "terminal_meet_notes_tui": (),
     "terminal_calendar_slots": (),
     "terminal_calendar_join_profile": (),
     "terminal_calendar_notifications": (),

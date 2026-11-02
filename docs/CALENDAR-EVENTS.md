@@ -259,3 +259,7 @@ ordinary-event journal or customized Calendar visibility/color preferences.
 Existing v0.2.9 invitation and RSVP reviews, including uncertain outcomes, are
 recognized when upgrading. Switching back to v0.2.9 with that updated store is
 unsupported.
+
+### Automatic Meet AI notes
+
+Auto Meet AI notes + transcript. When you create a new event with Google Meet on the account’s primary calendar, check this box to have Google take AI notes and a transcript automatically when you or a co-host joins Meet on the web, subject to participant consent and admin policy. Unchecked sends no Meet setting, so Google's or your admin's defaults apply. It needs the optional meet-settings permission: if it is missing, Ctrl+S opens a guide that keeps your form and copies an authorization command keeping your current capabilities; Ctrl+R rechecks after you run it. Google also requires the Meet REST API to be enabled in your Cloud project and a Workspace plan and admin policy that allow AI notes. The event is saved first. Success means Google's read-back showed both settings on at that time; they can change later. If the Meet link is still being created, r checks with reads only, and y sends the setting once the link is ready. If Google refuses, or the outcome is unconfirmed, the event stays saved and Omagma says so; nothing is resent automatically, so check AI notes in Meet when you join. Esc keeps the saved status; check it later with omagma calendar meet-event-pending and meet-event-reconcile. Omagma never joins or monitors the meeting.

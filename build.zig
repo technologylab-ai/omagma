@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) void {
     prepare_history.dependOn(&history_stress.step);
 
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
-    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "src/calendar_http_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
+    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "src/calendar_http_probe.zig", "src/meet_http_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
         const probe = b.addExecutable(.{
             .name = std.fs.path.stem(path),
             .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }),

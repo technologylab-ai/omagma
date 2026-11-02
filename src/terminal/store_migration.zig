@@ -235,6 +235,7 @@ pub fn inventory(s: *Store, a: std.mem.Allocator) ![]Object {
     std.sort.heap(Object, rows.items, {}, namesLess);
     try validateRecords(s, rows.items);
     try @import("calendar_store.zig").verifyHistory(s, a);
+    try @import("meet_notes_store.zig").verifyHistory(s, a);
     const result = try rows.toOwnedSlice(a);
     _ = try s.migrationCapacity(result);
     s.migration_inventory = result;

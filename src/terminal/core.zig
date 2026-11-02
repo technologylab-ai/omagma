@@ -266,7 +266,8 @@ pub const Session = struct {
         return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, data);
     }
     fn reconciliationFailure(req: Value, err: anyerror) anyerror {
-        if (!std.mem.eql(u8, j.text(req, "cmd"), "invitation.inspect") or @import("client_contract.zig").readOnlyRequest(req)) return err;
+        const command = j.text(req, "cmd");
+        if (!std.mem.eql(u8, command, "calendar.meet-event-apply") and (!std.mem.eql(u8, command, "invitation.inspect") or @import("client_contract.zig").readOnlyRequest(req))) return err;
         return switch (err) {
             error.Canceled, error.Timeout, error.DeadlineExceeded, error.OutOfMemory, error.VaultOperationCanceled => error.UnknownOutcome,
             else => err,
@@ -286,7 +287,7 @@ pub const Session = struct {
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, may_write: bool, fixtures: bool, data: Value) ![]const u8 {
         return j.encodeAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
             if (!fixtures and may_write and std.mem.eql(u8, cmd, "invitation.inspect")) return failureForError(a, id, account, error.UnknownOutcome);
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-apply", "calendar.event-retry", "draft.gmail-save" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-apply", "calendar.event-retry", "calendar.meet-event-apply", "draft.gmail-save" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -424,6 +425,14 @@ pub const Session = struct {
             for (s.config.accounts[0..s.config.count]) |*account| {
                 const grant = @import("auth.zig").find(&registry, account.address.slice());
                 try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and s.fixtureDriveEnabled()) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy", "drive-upload" } else if (s.options.fixtures and !s.scenario("readonly")) (if (s.scenario("calendar-readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-freebusy" } else &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy" }) else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
+                if (s.options.fixtures and @import("meet_notes_fixture.zig").enabled(s.options.fixture_scenario)) {
+                    const row = &list.items[list.items.len - 1];
+                    if (s.scenario("meet-calendar-readonly")) row.capabilities = &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-freebusy" };
+                    const expanded = try a.alloc([]const u8, row.capabilities.len + 1);
+                    @memcpy(expanded[0..row.capabilities.len], row.capabilities);
+                    expanded[row.capabilities.len] = "meet-settings";
+                    row.capabilities = expanded;
+                }
             }
             return j.value(a, .{ .accounts = list.items });
         }
@@ -4068,14 +4077,16 @@ test "post-dispatch allocation failure preserves live mutation ambiguity" {
     defer arena.deinit();
     const inspecting = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect" });
     const reconciling = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect", .reconcile = true });
+    const meet_applying = try j.value(arena.allocator(), .{ .cmd = "calendar.meet-event-apply" });
     for ([_]anyerror{ error.Canceled, error.Timeout, error.OutOfMemory }) |err| {
         try std.testing.expectEqual(err, Session.reconciliationFailure(inspecting, err));
         try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(reconciling, err));
+        try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(meet_applying, err));
     }
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const a = failing.allocator();
     const receipt: Value = .{ .string = "applied-provider-receipt" };
-    for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply" }) |cmd| {
+    for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "calendar.meet-event-apply" }) |cmd| {
         try std.testing.expectError(error.UnknownOutcome, Session.successResponse(a, .null, "self@example.test", cmd, true, false, receipt));
     }
     try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "mail.read", false, false, receipt));
@@ -6765,4 +6776,26 @@ test "retained recovery: local copies inherit Gmail warnings and require a fresh
         try std.testing.expectEqualDeep(source_link, (try history.gmailLink(&store, a, source_id)).?);
         try std.testing.expectEqualDeep(source, try store.draft(source_id));
     }
+}
+
+test "meet notes: outer deadline after a simulated provider commit retains uncertainty" {
+    const Fixture = struct {
+        committed: std.atomic.Value(bool) = .init(false),
+        fn apply(self: *@This(), io: std.Io) !void {
+            self.committed.store(true, .release);
+            try std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .fromSeconds(10) }, io);
+        }
+    };
+    var fixture: Fixture = .{};
+    const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) };
+    var observed: anyerror = error.NoTimeout;
+    @import("../platform.zig").deadline(std.testing.io, duration, Fixture.apply, .{ &fixture, std.testing.io }) catch |err| {
+        observed = err;
+    };
+    try std.testing.expect(fixture.committed.load(.acquire));
+    try std.testing.expectEqual(error.Timeout, observed);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const request = try j.value(arena.allocator(), .{ .cmd = "calendar.meet-event-apply" });
+    try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(request, observed));
 }

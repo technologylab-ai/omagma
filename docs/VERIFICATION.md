@@ -47,7 +47,8 @@ node tests/ui_model.mjs
 
 Python 3 and Node.js are needed for the harnesses; UI checks also need Quickshell. The UI harness forces `QT_QPA_PLATFORM=offscreen`, removes graphical-session routing variables and uses `--fixtures --dry-run-open`. It starts an isolated shell, never installs the plugin and cleans up its owned processes.
 
-`zig build probes` installs the standalone launch/FD, callback, callback-budget and transport executables. The HTTPS checks make an unauthenticated Google request expecting an unauthorized response; they do not read a mailbox or use OAuth credentials. Run keyring probes only with a separate session bus and temporary synthetic keyring, as in the [release workflow](../.github/workflows/release.yml), rather than against the desktop's account credentials.
+`zig build probes` installs the standalone launch/FD, callback, callback-budget, Calendar/Meet HTTP and transport executables.
+`tests/meet_native_http.py --probe zig-out/bin/meet_http_probe` checks the native Meet wire policy; `tests/terminal_meet_notes.py` and `tests/terminal_meet_notes_tui.py` cover new-event notes through CLI and owned PTYs. The HTTPS checks make an unauthenticated Google request expecting an unauthorized response; they do not read a mailbox or use OAuth credentials. Run keyring probes only with a separate session bus and temporary synthetic keyring, as in the [release workflow](../.github/workflows/release.yml), rather than against the desktop's account credentials.
 
 Release CI first builds each native Safe bundle and runs the complete applicable
 short CLI/TUI, fixture, integration and first-use suites. Only after all four

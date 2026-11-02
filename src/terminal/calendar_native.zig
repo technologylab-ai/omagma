@@ -35,6 +35,21 @@ pub const Native = struct {
     pub fn transport(self: *Native) service.Transport {
         return .{ .context = self, .sendFn = send };
     }
+    pub fn meetTransport(self: *Native) @import("meet_notes_service.zig").Transport {
+        return .{ .context = self, .sendFn = sendMeet };
+    }
+    pub fn meetSettingsAccess(self: *const Native) bool {
+        return self.opened and contains(self.session.capabilities, "meet-settings") and contains(self.session.scopes, @import("meet_notes_provider.zig").scope);
+    }
+    fn sendMeet(context: *anyopaque, a: std.mem.Allocator, request: @import("meet_notes_provider.zig").Request) anyerror!service.Response {
+        const self: *Native = @ptrCast(@alignCast(context));
+        if (!self.opened) return error.CalendarSessionClosed;
+        if (!self.meetSettingsAccess()) return error.MeetSettingsPermissionRequired;
+        if (request.method != (if (request.kind == .configure) std.http.Method.PATCH else .GET) or (request.body != null) != (request.kind == .configure)) return error.InvalidMeetRequest;
+        const response = try self.session.requestMeetRaw(request.account, request.url, request.method, request.body);
+        if (response.body.len > @import("meet_notes_provider.zig").max_response_bytes) return error.MeetResponseTooLarge;
+        return .{ .account = self.session.verified_account, .status = response.status, .body = try a.dupe(u8, response.body) };
+    }
 
     fn send(context: *anyopaque, a: std.mem.Allocator, request: p.Request) anyerror!service.Response {
         const self: *Native = @ptrCast(@alignCast(context));

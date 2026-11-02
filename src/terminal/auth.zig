@@ -9,7 +9,7 @@ const calendar_permissions = @import("calendar_permissions.zig");
 
 pub const allowed_capabilities = [_][]const u8{
     "mail-read",     "mail-drafts",          "mail-send",             "mail-modify",       "contacts-read", "contacts-write", "calendar-rsvp",
-    "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy", "drive-upload",
+    "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy", "drive-upload",  "meet-settings",
 };
 
 pub const Grant = struct {
@@ -38,6 +38,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
     var contacts_read = false;
     var contacts_write = false;
     var drive_upload = false;
+    var meet_notes = false;
     var calendar: calendar_permissions.Selection = .{};
     for (capabilities, 0..) |capability, index| {
         var known = false;
@@ -51,6 +52,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
         contacts_read = contacts_read or std.mem.eql(u8, capability, "contacts-read");
         contacts_write = contacts_write or std.mem.eql(u8, capability, "contacts-write");
         drive_upload = drive_upload or std.mem.eql(u8, capability, "drive-upload");
+        meet_notes = meet_notes or std.mem.eql(u8, capability, "meet-settings");
         calendar.read = calendar.read or std.mem.eql(u8, capability, "calendar-read");
         calendar.write_owned = calendar.write_owned or std.mem.eql(u8, capability, "calendar-write-owned");
         calendar.write_shared = calendar.write_shared or std.mem.eql(u8, capability, "calendar-write-shared");
@@ -67,6 +69,7 @@ pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]cons
     defer a.free(calendar_scopes);
     try scopes.appendSlice(a, calendar_scopes);
     if (drive_upload) try scopes.append(a, "https://www.googleapis.com/auth/drive.file");
+    if (meet_notes) try scopes.append(a, @import("meet_notes_provider.zig").scope);
     return try scopes.toOwnedSlice(a);
 }
 pub fn grantIdentity(scopes: []const []const u8) [64]u8 {
@@ -79,6 +82,25 @@ pub fn grantIdentity(scopes: []const []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "meet notes: optional settings permission preserves existing scopes without Drive access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = try scopesFor(a, &.{ "mail-read", "mail-send", "calendar-read", "calendar-write-owned" });
+    const after = try scopesFor(a, &.{ "mail-read", "mail-send", "calendar-read", "calendar-write-owned", "meet-settings" });
+    try std.testing.expectEqual(before.len + 1, after.len);
+    for (before, after[0..before.len]) |old, current| try std.testing.expectEqualStrings(old, current);
+    try std.testing.expectEqualStrings(@import("meet_notes_provider.zig").scope, after[after.len - 1]);
+    try oauth.validateScopeSet(after);
+    const before_id = grantIdentity(before);
+    const after_id = grantIdentity(after);
+    try std.testing.expect(!std.mem.eql(u8, &before_id, &after_id));
+    const narrow = try scopesFor(a, &.{ "mail-read", "meet-settings" });
+    try std.testing.expectEqual(@as(usize, 2), narrow.len);
+    for (narrow) |scope| try std.testing.expect(std.mem.indexOf(u8, scope, "/drive") == null);
+    try oauth.validateScopeSet(try scopesFor(a, &allowed_capabilities));
 }
 pub fn defaultFile(a: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const u8 {
     const root = env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{env.get("HOME") orelse return error.HomeRequired});
@@ -249,7 +271,7 @@ test "calendar: terminal grants preserve mail and contacts while requesting exac
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const shared = try scopesFor(a, allowed_capabilities[0 .. allowed_capabilities.len - 1]);
+    const shared = try scopesFor(a, &.{ "mail-read", "mail-modify", "mail-send", "mail-drafts", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy" });
     try std.testing.expectEqual(@as(usize, 5), shared.len);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.modify", shared[0]);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/contacts", shared[1]);

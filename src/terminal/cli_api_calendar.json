@@ -667,7 +667,7 @@
     },
     {
       "cmd": "calendar.open",
-      "summary": "Open Google Calendar in this account’s configured Chrome profile.",
+      "summary": "Open Google Calendar in this account\u2019s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -685,12 +685,12 @@
       },
       "required": [],
       "notes": [
-        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account’s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account\u2019s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
       "cmd": "calendar.event-open",
-      "summary": "Open an exact Calendar event in this account’s configured Chrome profile.",
+      "summary": "Open an exact Calendar event in this account\u2019s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -714,7 +714,7 @@
         "eventId"
       ],
       "notes": [
-        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account’s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account\u2019s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
@@ -838,6 +838,144 @@
           "calendarId": "personal@example.com"
         }
       ]
+    },
+    {
+      "cmd": "calendar.meet-event-review",
+      "summary": "Review a new event with a Google Meet link and automatic AI notes + transcript. Reads only and saves a local review.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared",
+        "meet-settings"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "event": {
+          "$ref": "#/$defs/CalendarEventDraft"
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "none",
+            "all"
+          ],
+          "description": "Explicit reviewed guest notification choice. all is mandatory when adding guests; use all when rescheduling a meeting so participants receive updates."
+        },
+        "meetAiNotes": {
+          "type": "string",
+          "enum": [
+            "on"
+          ]
+        }
+      },
+      "required": [
+        "calendarId",
+        "event",
+        "operationId",
+        "sendUpdates",
+        "meetAiNotes"
+      ],
+      "notes": [
+        "There are no transcript, recording, sharing or language options. To create an event without AI notes, use event-review; Google's defaults then apply. Edits, pasted meeting links and recurring events are refused.",
+        "If the meet-settings permission is missing, the review is refused here (MeetSettingsPermissionRequired), before any Calendar write. Google checks API enablement, plan and admin policy only when the setting is sent after the event is saved.",
+        "The Meet change names only the AI notes and transcription settings in its field mask, never a wildcard. Recording and all other Meet settings stay unchanged."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "calendar.meet-event-apply",
+      "summary": "Confirm a reviewed operation exactly: create the event, then send the AI notes setting to its Meet link.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared",
+        "meet-settings"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "reviewHash": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "Inspect state even when ok is true. applied: the event was created and Google's read-back shows AI notes and transcription on. partial: the event was saved but AI notes are not confirmed. rejected: Calendar refused the event and nothing was changed. unknown: the event save could not be confirmed. not_sent: no request reached Google. calendar.state is not_sent, applied, rejected or unknown. meetAiNotes.state is on, waiting_for_link, refused, unknown or not_sent.",
+        "on is a dated observation of Google's read-back, not a guarantee that the setting stays on. refused is final and does not show the current setting.",
+        "If meetAiNotes.state is waiting_for_link and meet-event-reconcile reports the link is ready, running meet-event-apply again with the same operation ID and review hash sends only the first Meet settings request. It never writes Calendar again. An unknown AI notes outcome is never resent."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "calendar.meet-event-reconcile",
+      "summary": "Check a saved operation using Google reads only.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared",
+        "meet-settings"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "reviewHash": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "Sends only Google GET requests and updates the local journal. It never writes Calendar, never changes Meet settings and never emails guests.",
+        "It reports the same states as meet-event-apply. on is reported only when Google's read-back matches both settings. Otherwise an unknown outcome stays unknown; this release has no retry."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "calendar.meet-event-pending",
+      "summary": "Show the saved operation for a calendar or event without contacting Google.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared",
+        "meet-settings"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "calendarId"
+      ],
+      "notes": [
+        "Reads the local journal only. Recorded states are what Omagma last observed, not Google's current settings."
+      ],
+      "examples": []
     }
   ],
   "$defs": {

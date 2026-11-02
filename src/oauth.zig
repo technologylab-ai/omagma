@@ -162,6 +162,7 @@ pub fn validateScopeSet(scopes: []const []const u8) !void {
         "https://www.googleapis.com/auth/calendar.events.owned",
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/meetings.space.settings",
     };
     for (scopes, 0..) |scope, index| {
         var valid = false;
@@ -556,4 +557,16 @@ test "calendar: optional scopes require the complete returned terminal grant and
     const incomplete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-calendar\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly\"}";
     try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, incomplete, &access, null, &expected));
     try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null, .{}));
+}
+
+test "meet notes: returned terminal permission must be complete and is rejected by the bar" {
+    const expected = [_][]const u8{ readonly_scope, "https://www.googleapis.com/auth/meetings.space.settings" };
+    try validateScopeSet(&expected);
+    const complete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-meet\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/meetings.space.settings https://www.googleapis.com/auth/gmail.readonly\"}";
+    var access: [64]u8 = @splat(0x7f);
+    _ = try parseTokensScoped(200, complete, &access, null, &expected);
+    try std.testing.expectError(error.UnexpectedScope, parseTokens(200, complete, &access, null));
+    for (access) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const incomplete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-meet\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly\"}";
+    try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, incomplete, &access, null, &expected));
 }

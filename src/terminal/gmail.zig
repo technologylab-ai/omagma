@@ -421,6 +421,28 @@ pub const NetworkSession = struct {
     pub fn calendarReadRetryAllowed(method: std.http.Method, url: []const u8) bool {
         return method == .GET or (method == .POST and std.mem.eql(u8, url, "https://www.googleapis.com/calendar/v3/freeBusy"));
     }
+    /// Reuse the same verified credential and HTTP workspace sequentially.
+    /// Meet PATCH is dispatched once; only a GET may refresh after a 401.
+    pub fn requestMeetRaw(self: *NetworkSession, account: []const u8, url: []const u8, method: std.http.Method, json_body: ?[]const u8) !http.Response {
+        if (!std.ascii.eqlIgnoreCase(account, self.verified_account)) return error.CalendarAccountMismatch;
+        var permitted = false;
+        for (self.capabilities) |capability| permitted = permitted or std.mem.eql(u8, capability, "meet-settings");
+        var scoped = false;
+        for (self.scopes) |scope| scoped = scoped or std.mem.eql(u8, scope, @import("meet_notes_provider.zig").scope);
+        if (!permitted or !scoped) return error.MeetSettingsPermissionRequired;
+        _ = self.transport();
+        const output = self.response[0..@min(self.response.len, http.meet_response_bytes)];
+        var response = try self.client.requestMeet(url, method, self.network.access, json_body, output);
+        if (response.status == 401) {
+            self.network.invalidate();
+            if (method == .GET and !self.network.refreshed_401) {
+                try self.network.refreshRead();
+                response = try self.client.requestMeet(url, method, self.network.access, json_body, output);
+                if (response.status == 401) self.network.invalidate();
+            }
+        }
+        return response;
+    }
 };
 pub fn execute(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !j.Value {
     return executeProgress(io, a, config, account, cmd, request, null);

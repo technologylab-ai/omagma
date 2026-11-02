@@ -188,3 +188,16 @@ unconfirmed write never means “not added.” After a connection loss, Omagma
 checks the recorded operation before offering another import. Cached agendas
 show their last refresh time and distinguish an unavailable conflict check
 from a verified absence of conflicts.
+
+## Optional automatic Meet notes
+
+New events can request automatic AI notes and transcription with the additional
+`meet-settings` capability, mapped to
+`https://www.googleapis.com/auth/meetings.space.settings`. Keep the account’s
+complete current capability set when authorizing it. The selected OAuth client
+and credential store stay the same. Enable the Google Meet REST API in the
+existing Google Cloud project. Workspace plan, administrator policy and
+participant consent still apply.
+
+Google documents the configuration in its [meeting-space guide](https://developers.google.com/workspace/meet/api/guides/meeting-spaces-configuration)
+and [automatic artifacts help](https://support.google.com/meet/answer/12849897).

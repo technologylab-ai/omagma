@@ -43,6 +43,7 @@ jobs:
             zig build probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode" --test-timeout 120s -Dtest-watchdog=true
             zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
             python3 tests/calendar_native_http.py --probe ".verification-linux-$mode/bin/calendar_http_probe"
+            python3 tests/meet_native_http.py --probe ".verification-linux-$mode/bin/meet_http_probe"
             python3 tests/terminal_integration.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode"
             python3 tests/terminal_compose_actions.py --binary ".verification-linux-$mode/bin/omagma"
             python3 tests/terminal_draft_conflict.py --binary ".verification-linux-$mode/bin/omagma"
@@ -119,6 +120,7 @@ jobs:
             ".verification-macos-$mode/bin/auth_probe" launch
             ".verification-macos-$mode/bin/auth_probe" callback
             python3 tests/calendar_native_http.py --probe ".verification-macos-$mode/bin/calendar_http_probe"
+            python3 tests/meet_native_http.py --probe ".verification-macos-$mode/bin/meet_http_probe"
           done
       - name: Native first-use mail, Calendar and vault workflows
         run: |
