@@ -21,7 +21,7 @@ release qualification have their own instructions in `AGENTS.md`.
 
 ## Install
 
-On macOS, confirm the Mac is Apple Silicon (`uname -m` prints `arm64`) before installing; current releases include no Intel build, so on an Intel Mac do not install and tell the user that v0.2.17 was the last release with an Intel download.
+On macOS, confirm the Mac is Apple Silicon before installing: `sysctl -n hw.optional.arm64` prints `1`, even in a Rosetta shell where `uname -m` reports `x86_64`. Current releases include no Intel build, so on an Intel Mac do not install and tell the user that v0.2.17 was the last release with an Intel download.
 
 - On macOS, prefer `brew install renerocksai/tap/omagma` when Homebrew is available. Check `omagma --version` before consent; inspect an existing installation before upgrading it. If Homebrew is unavailable, download and verify the matching native Mac bundle using `docs/MACOS.md`. Prepare files yourself from the public URL; the user does not need a checkout.
 - On Linux, prefer the matching x86_64 or arm64 bundle from

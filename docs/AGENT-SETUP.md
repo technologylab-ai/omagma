@@ -16,7 +16,7 @@ Add your account addresses, existing Chrome profile directories, and whether you
 
 The preferred installation needs no Zig compiler. On Mac, use `brew install renerocksai/tap/omagma`; the [Mac guide](MACOS.md) also covers verified Apple Silicon bundles. Linux x86_64 and arm64 bundles include the static musl backend and bar UI. Only the Linux bar requires Omarchy/Quickshell. Live authorization uses Chrome; the default credential store needs an unlocked platform keyring. ARM backend build/test checks do not establish ARM desktop integration.
 
-On macOS, confirm the Mac is Apple Silicon (`uname -m` prints `arm64`) before installing; current releases include no Intel build, so on an Intel Mac do not install and tell the user that v0.2.17 was the last release with an Intel download.
+On macOS, confirm the Mac is Apple Silicon before installing: `sysctl -n hw.optional.arm64` prints `1`, even in a Rosetta shell where `uname -m` reports `x86_64`. Current releases include no Intel build, so on an Intel Mac do not install and tell the user that v0.2.17 was the last release with an Intel download.
 
 On a supported platform, if no compatible release asset exists, use a source checkout with exact Zig **0.17.0**. Omarchy may still ship 0.16.x: download the verified 0.17.0 archive matching the host OS/CPU from [the versioned release directory](https://ziglang.org/download/0.17.0/), extract it, prepend its directory to the task's `PATH`, and confirm `zig version`. Keep the system compiler unchanged, follow [the source-build instructions](DEVELOPMENT.md#build-from-source) using `safe`, and verify the resulting binary's version.
 

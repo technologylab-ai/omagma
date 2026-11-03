@@ -19,7 +19,7 @@ access. On macOS, Homebrew is preferred: `brew install renerocksai/tap/omagma`. 
 Chrome profile while you complete the Google steps.
 [Copy a setup prompt](docs/AGENT-SETUP.md).
 
-On macOS, install Omagma with Homebrew (recommended), or download the verified Apple Silicon (arm64) bundle from the latest release. Omagma supports Apple Silicon Macs running macOS 13 or later; see [the Mac guide](docs/MACOS.md) for details. The bar remains a Linux Omarchy integration.
+For macOS, [install with Homebrew](docs/MACOS.md) or use the verified Apple Silicon (arm64) bundle from the latest release, then follow the terminal-only Google setup. Current releases require an Apple Silicon Mac with macOS 13 or later; v0.2.17 was the last release with an Intel build. The bar remains a Linux Omarchy integration.
 
 For manual Linux setup:
 

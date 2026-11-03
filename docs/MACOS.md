@@ -1,6 +1,6 @@
 # Omagma on macOS
 
-Omagma runs natively on Apple Silicon Macs (arm64) with macOS 13 or later. Install it with Homebrew, or download the verified Apple Silicon bundle from the latest release.
+Omagma runs natively on Apple Silicon Macs (arm64) and requires macOS 13 or later. Install it with Homebrew, or download the verified Apple Silicon bundle from the latest release.
 
 Current releases do not include Intel Mac builds. The last release with an Intel download is [v0.2.17](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.17).
 
@@ -117,6 +117,8 @@ If Homebrew is unavailable, download `SHA256SUMS` and the matching archive from
 | `uname -m` | Bundle |
 | --- | --- |
 | `arm64` | `omagma-VERSION-macos-arm64.tar.gz` |
+
+On Apple Silicon, a Rosetta shell reports `x86_64`; if `sysctl -n hw.optional.arm64` prints `1`, use the arm64 bundle. Intel Macs have no current bundle.
 
 `VERSION` is the release number without `v`. Mac binaries target macOS 13.0 and
 later and use system libraries. A deployment target is not evidence of testing
