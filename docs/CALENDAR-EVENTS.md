@@ -62,6 +62,13 @@ changes neither permissions nor colours, and `p` can clear it even after read
 access is lost. `Enter` applies the pending choice; `Esc` cancels it.
 
 
+Week marks the current time with a red line across today’s column, using the
+displayed time zone. The line stays visible beneath meeting titles and selected
+events, and advances on the existing clock ticks. Monochrome uses an uncoloured
+line. It appears only when today and the current hour are visible; it does not
+scroll the calendar or change the events shown. Its position is limited by the
+terminal’s row resolution.
+
 Week uses spare vertical space to show up to four distinct event titles in each
 hour row. Its order favors non-declined events, events starting in that hour,
 then your Priority calendar. `+N` counts events still hidden in that hour;

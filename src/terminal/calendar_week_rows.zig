@@ -32,6 +32,32 @@ pub const Plan = struct {
     used_rows: usize = 0,
 };
 
+/// Project a clock onto existing rows; the clock never changes allocation.
+pub fn nowRow(plan: Plan, first_hour: usize, hour: usize, minute: usize) ?usize {
+    if (hour >= hours or minute >= 60 or hour < first_hour) return null;
+    const slot = hour - first_hour;
+    if (slot >= plan.count or plan.lines[slot] == 0) return null;
+    return plan.offsets[slot] + minute * plan.lines[slot] / 60;
+}
+
+test "calendar now line: minute quantization respects existing rows and hidden hours" {
+    for (1..5) |lines| {
+        var plan: Plan = .{ .count = 2 };
+        plan.lines[0] = @intCast(lines);
+        plan.lines[1] = 1;
+        plan.offsets[1] = lines;
+        try std.testing.expectEqual(@as(?usize, 0), nowRow(plan, 12, 12, 0));
+        try std.testing.expectEqual(@as(?usize, lines - 1), nowRow(plan, 12, 12, 59));
+        try std.testing.expectEqual(@as(?usize, lines), nowRow(plan, 12, 13, 0));
+        try std.testing.expectEqual(@as(?usize, null), nowRow(plan, 12, 11, 59));
+        try std.testing.expectEqual(@as(?usize, null), nowRow(plan, 12, 14, 0));
+        try std.testing.expectEqual(@as(?usize, null), nowRow(plan, 12, 12, 60));
+        for (0..60) |minute| try std.testing.expect(nowRow(plan, 12, 12, minute).? < lines);
+    }
+    try std.testing.expectEqual(@as(?usize, 2), nowRow(allocate(96, @splat(0)), 0, 0, 30));
+    try std.testing.expectEqual(@as(?usize, null), nowRow(.{}, 0, 0, 0));
+}
+
 test "calendar week rows: optional bands preserve all-day capacity and exactly fitting full-day grids" {
     for (0..4) |all_day| {
         const full_height: usize = if (all_day > 2) 29 else 28;

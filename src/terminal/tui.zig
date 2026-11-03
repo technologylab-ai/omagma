@@ -1198,6 +1198,7 @@ const App = struct {
     calendar_slots_drawn: ?calendar_slot.Identity = null,
     calendar_slots_title: @import("../bounded.zig").Text(128) = .{},
     calendar_week_viewport: ?calendar_slot.Viewport = null,
+    calendar_now_minute: ?i64 = null,
     calendar_week_related: usize = 0,
     calendar_week_reveal_bucket: ?calendar_slot.Bucket = null,
     calendar_slots_bucket: ?calendar_slot.Bucket = null,
@@ -18490,6 +18491,13 @@ const App = struct {
         self.mouseRows(badge, 0, 1, .dialog_action, action);
     }
     fn drawCalendarWeek(self: *App, win: vaxis.Window) !void {
+        return self.drawCalendarWeekAt(win, Io.Timestamp.now(self.io, .real).toMilliseconds());
+    }
+    fn calendarClockTickAt(self: *const App, now_ms: i64) bool {
+        return self.calendar.open and self.calendar.page == .main and self.calendar.view == .week and
+            self.calendar_week_viewport != null and self.calendar_now_minute != @divFloor(now_ms, 60000);
+    }
+    fn drawCalendarWeekAt(self: *App, win: vaxis.Window, now_ms: i64) !void {
         self.calendar_week_viewport = null;
         self.calendar_week_related = 0;
         self.calendar_week_title_count = 0;
@@ -18497,7 +18505,7 @@ const App = struct {
         if (days == 0 or !self.calendar.ready) return self.drawCalendarAgenda(win);
         const a = self.frame.allocator();
         const width: u16 = @intCast((win.width - 6) / days);
-        const today = self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch -1;
+        const today: ?i64 = self.calendar.zone.localDay(now_ms) catch null;
         const first = try self.calendarFirstDay(win.width);
         const projected = try calendar_slot.project(a, self.calendarEvents(), self.calendar_query.value());
         var all_day_counts: [7]usize = @splat(0);
@@ -18529,6 +18537,15 @@ const App = struct {
         self.calendar_week_viewport = viewport;
         const grid = try calendar_slot.Grid.init(projected, viewport, &self.calendar.zone, if (self.calendar.week_reveal_selected and self.calendar.selected < projected.len) .{ .index = self.calendar.selected, .bucket = self.calendar_week_reveal_bucket } else null, &self.ui_preferences.calendar);
         const plan = calendar_week_rows.allocate(bands.hour_budget, grid.needs);
+        self.calendar_now_minute = @divFloor(now_ms, 60000);
+        const now_seconds = @divFloor(now_ms, 1000);
+        const local_seconds = now_seconds + (self.calendar.zone.offsetSeconds(now_seconds) catch 0);
+        const hour: usize = @intCast(@divFloor(@mod(local_seconds, 86400), 3600));
+        const minute: usize = @intCast(@divFloor(@mod(local_seconds, 3600), 60));
+        const now_row: ?usize = if (today != null and today.? >= first and today.? < first + @as(i64, @intCast(days))) blk: {
+            const offset = calendar_week_rows.nowRow(plan, start_hour, hour, minute) orelse break :blk null;
+            break :blk bands.grid_start + offset;
+        } else null;
         try self.line(win, 1, "all", .muted);
         try self.line(win, 2, "day", .muted);
         for (0..slots) |slot| try self.line(win, bands.grid_start + plan.offsets[slot], try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + slot))}), .muted);
@@ -18591,15 +18608,14 @@ const App = struct {
                     if (last and more.len > 0) try self.calendarSlotBadge(cell, row + subrow, more, 400 + column * 25 + slot);
                 }
             }
-            if (day == today) {
-                const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
-                const seconds = @divFloor(now, 1000);
-                const hour: usize = @intCast(@divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600));
-                if (hour >= start_hour and hour < start_hour + slots) {
-                    const slot = hour - start_hour;
-                    if (grid.hours[column][slot].count == 0) try self.line(cell, bands.grid_start + plan.offsets[slot], "— now —", .accent);
+            if (day == today) if (now_row) |row| {
+                for (0..cell.width) |x| {
+                    var value = cell.readCell(@intCast(x), @intCast(row)) orelse continue;
+                    value.style.ul = if (self.mono) .default else .{ .rgb = self.palette.red };
+                    value.style.ul_style = .single;
+                    cell.writeCell(@intCast(x), @intCast(row), value);
                 }
-            }
+            };
         }
         const related = try calendar_slot.related(a, projected, self.calendar.selected, viewport, &self.calendar.zone);
         self.calendar_week_related = related.len;
@@ -19041,7 +19057,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
                 // their ordinary owner, backpressure and shutdown behavior.
                 const update_due = app.scheduleUpdateCheck();
                 const meeting_due = app.meetingTick();
-                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due and !meeting_due) continue;
+                const calendar_due = app.calendarClockTickAt(Io.Timestamp.now(io, .real).toMilliseconds());
+                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due and !meeting_due and !calendar_due) continue;
             }
             break :next_input received;
         };
@@ -31647,4 +31664,135 @@ test "meet notes: a pending create found during review resumes the original comp
     try std.testing.expectEqualStrings("calendar.meet-event-pending", text(get(request, "cmd")));
     try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
     try std.testing.expectEqualStrings("opaque-calendar", text(get(request, "calendarId")));
+}
+
+test "calendar now line: selected long titles and badges retain text colors and hit targets" {
+    const a = std.testing.allocator;
+    const first = try timezone.dateDay("2026-11-03");
+    for ([_]u16{ 80, 140, 196 }) |width| for ([_]u16{ 28, 52, 100 }) |height| for ([_]bool{ false, true }) |mono| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.calendar.ready = true;
+        app.calendar.view = .week;
+        app.calendar.day = first;
+        app.mono = mono;
+        const scratch = app.frame.allocator();
+        var events: std.ArrayList(Value) = .empty;
+        for (0..5) |index| try events.append(scratch, try @import("json.zig").value(scratch, .{
+            .target = .{ .account = "personal@example.test", .calendar_id = "primary" },
+            .id = try std.fmt.allocPrint(scratch, "event-{d}", .{index}),
+            .summary = "Planning 界 café with a long title that fills the entire visible calendar column",
+            .start = .{ .kind = "instant", .value = first * 86400000 + 12 * 3600000 },
+            .end = .{ .kind = "instant", .value = first * 86400000 + 13 * 3600000 },
+        }));
+        try app.calendar.agenda.replace(a, try @import("json.zig").value(scratch, .{ .snapshot = .{ .events = events.items } }));
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        // A clock outside this period provides an independently rendered baseline.
+        try app.drawCalendarWeekAt(win, (first - 1) * 86400000);
+        const hour_row = try calendarWeekTestHourRow(&screen, 12);
+        const next_row = try calendarWeekTestHourRow(&screen, 13);
+        const cell_width = (width - 6) / calendar_ui.gridDays(width) - 1;
+        const baseline = try a.alloc(vaxis.Cell, cell_width * (next_row - hour_row));
+        defer a.free(baseline);
+        const baseline_styles = try a.alloc(vaxis.Cell.Style, width * @as(usize, height));
+        defer a.free(baseline_styles);
+        for (0..height) |y| for (0..width) |x| {
+            baseline_styles[y * width + x] = screen.readCell(@intCast(x), @intCast(y)).?.style;
+        };
+        for (0..next_row - hour_row) |y| for (0..cell_width) |x| {
+            baseline[y * cell_width + x] = screen.readCell(@intCast(x + 6), @intCast(hour_row + y)).?;
+        };
+        const hits = app.mouse_hits;
+        for ([_]usize{ 0, 37, 59 }) |minute| {
+            screen.clear();
+            app.mouse_hits.clear();
+            try app.drawCalendarWeekAt(win, first * 86400000 + 12 * 3600000 + @as(i64, @intCast(minute)) * 60000);
+            const row = hour_row + minute * (next_row - hour_row) / 60;
+            for (0..screen.height) |y| for (0..screen.width) |x| {
+                const cell = screen.readCell(@intCast(x), @intCast(y)).?;
+                const marked = y == row and x >= 6 and x < 6 + cell_width;
+                const before = baseline_styles[y * width + x];
+                try std.testing.expectEqual(if (marked) vaxis.Cell.Style.Underline.single else before.ul_style, cell.style.ul_style);
+                try std.testing.expectEqual(if (marked) (if (mono) vaxis.Color.default else vaxis.Color{ .rgb = app.palette.red }) else before.ul, cell.style.ul);
+            };
+            for (0..next_row - hour_row) |y| for (0..cell_width) |x| {
+                var expected = baseline[y * cell_width + x];
+                const actual = screen.readCell(@intCast(x + 6), @intCast(hour_row + y)).?;
+                if (hour_row + y == row) {
+                    expected.style.ul_style = .single;
+                    expected.style.ul = if (mono) .default else .{ .rgb = app.palette.red };
+                }
+                try std.testing.expectEqualDeep(expected, actual);
+            };
+            try std.testing.expectEqual(hits.count, app.mouse_hits.count);
+            for (0..hits.count) |index| try std.testing.expectEqualDeep(hits.areas[index], app.mouse_hits.areas[index]);
+        }
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    };
+}
+
+test "calendar now line: display timezone midnight and DST folds choose the right column and row" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "NPT-5:45", "2026-11-03", @as(i64, 23 * 3600000 + 37 * 60000), @as(usize, 1), @as(usize, 13) },
+        .{ "CET-1CEST,M3.5.0,M10.5.0/3", "2026-10-25", @as(i64, 37 * 60000), @as(usize, 0), @as(usize, 8) },
+        .{ "CET-1CEST,M3.5.0,M10.5.0/3", "2026-10-25", @as(i64, 3600000 + 37 * 60000), @as(usize, 0), @as(usize, 8) },
+    };
+    inline for (cases) |case| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.calendar.ready = true;
+        app.calendar.view = .week;
+        app.calendar.day = try timezone.dateDay(case[1]);
+        app.calendar.zone = try timezone.Zone.fromPosix(case[0]);
+        var screen = try vaxis.Screen.init(a, .{ .cols = 196, .rows = 52, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 196, .height = 52, .screen = &screen };
+        for ([_]i64{ 0, 8 * 86400000 }) |advance| {
+            screen.clear();
+            try app.drawCalendarWeekAt(win, app.calendar.day * 86400000 + case[2] + advance);
+            for (0..screen.height) |y| for (0..screen.width) |x| {
+                const marked = advance == 0 and y == case[4] and x >= 6 + case[3] * 27 and x < 6 + case[3] * 27 + 26;
+                try std.testing.expectEqual(if (marked) vaxis.Cell.Style.Underline.single else .off, screen.readCell(@intCast(x), @intCast(y)).?.style.ul_style);
+            };
+        }
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    }
+}
+
+test "calendar now line: existing tick gate redraws idle Week once per changed minute" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.view = .week;
+    app.calendar.ready = true;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 52, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 52, .screen = &screen };
+    const now: i64 = 12 * 3600000 + 29 * 60000;
+    try app.drawCalendarWeekAt(win, now);
+    try std.testing.expect(!app.calendarClockTickAt(now + 59000));
+    try std.testing.expect(app.calendarClockTickAt(now + 60000));
+    try std.testing.expect(app.calendarClockTickAt(now - 60000));
+    screen.clear();
+    try app.drawCalendarWeekAt(win, now + 60000);
+    try std.testing.expect(!app.calendarClockTickAt(now + 60000));
+    app.calendar.open = false;
+    try std.testing.expect(!app.calendarClockTickAt(now + 120000));
+    app.calendar.open = true;
+    app.calendar.page = .compose;
+    try std.testing.expect(!app.calendarClockTickAt(now + 120000));
+    app.calendar.page = .main;
+    app.calendar.view = .agenda;
+    try std.testing.expect(!app.calendarClockTickAt(now + 120000));
+    app.calendar.view = .week;
+    app.calendar_week_viewport = null;
+    try std.testing.expect(!app.calendarClockTickAt(now + 120000));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
