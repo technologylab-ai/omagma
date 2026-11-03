@@ -22,6 +22,7 @@ SUITES = {
     "terminal_attachment_lifecycle": (),
     "terminal_drive_delivery": ("--drive-scenario", "drive-progress"),
     "terminal_drive_backend": (),
+    "terminal_clipboard_image": (),
     "terminal_formatted_original": (),
     "terminal_formatted_tui": (),
     "terminal_message_isolation": (),

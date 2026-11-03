@@ -3561,6 +3561,7 @@ pub const Session = struct {
         if (draft.id.len != 0 and try @import("operation_history.zig").immutableSource(store, draft.id)) return error.ArchivedDraftReadOnly;
         try store.compactHistory();
         if (store.state.operations.len >= 1000) return error.OperationJournalFull;
+        try @import("native_delivery.zig").verifySource(store, draft);
         var delivery_plan: ?@import("attachment_delivery.zig").Plan = null;
         var delivery_ids: [@import("attachment_delivery.zig").max_drive_files][]const u8 = undefined;
         var delivery_slots: [@import("attachment_delivery.zig").max_drive_files]usize = undefined;
@@ -3646,6 +3647,7 @@ pub const Session = struct {
         // The RSVP's verified attendee may be a send-as alias. Keep this wire
         // identity out of the canonical draft/fingerprint used by old receipts.
         var wire_draft = materialized.draft;
+        wire_draft.attachments = prepared.files(wire_draft);
         if (calendar) |ics| {
             var reply: invitation.Invitation = .{};
             try invitation.parseReply(ics, store.state.account, try cachedAliases(a, store), &reply);

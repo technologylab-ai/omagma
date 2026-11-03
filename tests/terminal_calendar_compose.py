@@ -118,6 +118,18 @@ def open_new(terminal):
     terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
 
 
+def destination_editable(terminal, account):
+    heading = terminal.screen.locate("New event")
+    lines = terminal.screen.lines()
+    text = terminal.text()
+    # Choosing a destination renders its account before the pending-operation
+    # lookup finishes. Mouse field activation is disabled until Review returns.
+    return (heading is not None and heading["row"] + 1 < len(lines)
+            and account in lines[heading["row"] + 1]
+            and "Choose destination calendar" not in text
+            and "[Ctrl+S Review]" in text)
+
+
 def new_dates(offset=4):
     day = (datetime.now(timezone.utc) + timedelta(days=offset)).date()
     return day.isoformat(), (day + timedelta(days=1)).isoformat()
@@ -878,7 +890,7 @@ def guest_contacts(binary, directory, captures):
                 terminal.send(b"j")
                 terminal.gap(.05)
             terminal.send(b"\r")
-            terminal.until(lambda: "New event" in terminal.text() and ACCOUNTS[1] in terminal.text())
+            terminal.until(lambda: destination_editable(terminal, ACCOUNTS[1]))
             first, _ = new_dates()
             ordinary_fields(terminal, "Guest address book " + str(columns), first)
             fill(terminal, "Guests", "typed@example.test")
@@ -985,7 +997,7 @@ def guest_recent(binary, directory, captures):
                 terminal.send(b"j")
                 terminal.gap(.05)
             terminal.send(b"\r")
-            terminal.until(lambda: "New event" in terminal.text() and ACCOUNTS[1] in terminal.text())
+            terminal.until(lambda: destination_editable(terminal, ACCOUNTS[1]))
             first, _ = new_dates()
             ordinary_fields(terminal, "Guest recent mail " + str(columns), first)
             fill(terminal, "Guests", "typed@example.test")

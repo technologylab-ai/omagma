@@ -509,7 +509,7 @@ upload from the account and share viewer-only with the final To and Cc.
 JSON drafts carry `attachments[].delivery` (`attach|auto|drive`, default
 attach). `draft.delivery-plan` returns the plan directly under `data` without
 network access; preview/measure use the `attachmentPlan` wrapper. Plan fields:
-`files[]` (`index`, `filename`, `size`, `requestedDelivery`, `delivery`, `reuse`,
+`files[]` (`index`, `filename`, `size`, `requestedDelivery`, `delivery`, `state`, `reuse`,
 `newCopy`, `sharedWith`),
 `attachedBytes`, `mimeBytes`, `mimeEstimate`, `driveFileCount`,
 `driveFileLimit`, `decodedLimitBytes`, `mimeLimitBytes` and `blockers[]`
@@ -517,6 +517,12 @@ network access; preview/measure use the `attachmentPlan` wrapper. Plan fields:
 allowed. Saving never uploads; uploads and sharing happen only during the
 confirmed send. Preparation retries are explicit and reuse `operationId`;
 never automatically retry `UnknownOutcome`.
+
+`state: "not_in_body"` identifies a retained pasted-image descriptor whose
+owned `![name](cid:...)` marker is absent from the Markdown body (or whose body
+is Plain). Its bytes remain local for editing and Undo; it is neither attached
+nor uploaded and does not consume the outgoing attachment budget. Active inline
+images use Attach delivery and appear at their marker position in HTML mail.
 
 As with other mutation receipts, `ok:true` means a receipt was returned; check
 `data.outcome` to distinguish `applied`, `rejected`, `unknown` and

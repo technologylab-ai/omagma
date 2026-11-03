@@ -23,6 +23,7 @@ import terminal_html
 import terminal_markdown_compose
 import terminal_file_dialog
 import terminal_growing_composer
+import terminal_repaint
 import terminal_pty
 from terminal_integration import require
 from terminal_macos import DarwinTerminal
@@ -31,7 +32,11 @@ from terminal_mouse_screen import MouseScreen
 CASES = ("gg-whole-cache", "accumulate-and-dismiss", "main-only-and-wheel",
          "anchor-later-window", "html-reader-ux", "markdown-new", "markdown-reply",
          "markdown-forward", "file-browser-keyboard", "growing-composer",
-         "unknown-send-reopen")
+         "unknown-send-reopen", "in-band-signal-resize", "idle-missed-resize")
+
+
+class DarwinRepaintTerminal(DarwinTerminal, terminal_repaint.RepaintTerminal):
+    """Keep the native guardian while preserving physical cells on resize."""
 
 
 def guardian_mouse_start(binary, directory, fixture, extra=(), environment=None, columns=160, rows=40):
@@ -82,6 +87,7 @@ def main():
             patch.object(terminal_markdown_compose, "start", guardian_mouse_start), \
             patch.object(terminal_file_dialog, "start", guardian_mouse_start), \
             patch.object(terminal_growing_composer, "Terminal", DarwinTerminal), \
+            patch.object(terminal_repaint, "RepaintTerminal", DarwinRepaintTerminal), \
             tempfile.TemporaryDirectory(prefix="omagma-macos-features-") as temporary:
         # Darwin's default temporary path starts with the system /var symlink.
         # The file browser deliberately refuses every symlink component, so
@@ -106,6 +112,8 @@ def main():
                     result.update(terminal_growing_composer.exercise(binary, directory))
                 elif case == "unknown-send-reopen":
                     result.update(unknown_send_reopen(binary, directory))
+                elif case in ("in-band-signal-resize", "idle-missed-resize"):
+                    result.update(terminal_repaint.resize_signals(binary, directory, missed=case == "idle-missed-resize"))
                 else:
                     terminal_arrivals.run(binary, directory, case)
                 result["passed"] = True

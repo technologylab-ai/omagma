@@ -6,7 +6,7 @@ const t = @import("types.zig");
 const A = std.mem.Allocator;
 pub const max_drive_files = 16;
 pub const max_file_bytes = t.Limits.disk_hard;
-pub const Item = struct { index: usize, delivery: t.AttachmentDelivery };
+pub const Item = struct { index: usize, delivery: t.AttachmentDelivery, omitted: bool = false };
 pub const Plan = struct {
     items: []Item,
     drive_count: usize,
@@ -30,6 +30,11 @@ pub fn preview(a: A, draft: t.Draft, measure: Measure) !Plan {
 fn resolveMode(a: A, draft: t.Draft, measure: Measure, strict: bool) !Plan {
     if (!t.Limits.native) return error.UnsupportedAttachmentDelivery;
     if (draft.attachments.len > t.Limits.attachments) return error.TooManyAttachments;
+    const markdown = @import("markdown_mail.zig");
+    var has_inline = false;
+    for (draft.attachments) |file| has_inline = has_inline or (file.contentId != null and std.mem.eql(u8, file.disposition orelse "", "inline"));
+    const inline_used = if (has_inline) try markdown.inlineUsage(a, draft) else null;
+    defer if (inline_used) |used| a.free(used);
     const items = try a.alloc(Item, draft.attachments.len);
     var plan: Plan = .{ .items = items, .drive_count = 0, .attached_bytes = 0, .mime_bytes = 0 };
     var original_bytes: usize = 0;
@@ -40,7 +45,9 @@ fn resolveMode(a: A, draft: t.Draft, measure: Measure, strict: bool) !Plan {
     plan.attached_bytes = original_bytes;
     for (draft.attachments, items, 0..) |file, *item, index| {
         if (file.size > max_file_bytes) return error.AttachmentsTooLarge;
-        item.* = .{ .index = index, .delivery = if (file.delivery == .drive) .drive else .attach };
+        const omitted = markdown.isClipboardInline(file) and (inline_used == null or !inline_used.?[index]);
+        item.* = .{ .index = index, .delivery = if (!omitted and file.delivery == .drive) .drive else .attach, .omitted = omitted };
+        if (omitted) continue;
         if (item.delivery == .drive) plan.drive_count += 1 else plan.attached_bytes = std.math.add(usize, plan.attached_bytes, file.size) catch return error.AttachmentsTooLarge;
     }
     while (true) {
@@ -61,7 +68,7 @@ fn resolveMode(a: A, draft: t.Draft, measure: Measure, strict: bool) !Plan {
         }
         var largest: ?usize = null;
         for (draft.attachments, items, 0..) |file, item, index| {
-            if (file.delivery != .auto or item.delivery != .attach) continue;
+            if (file.delivery != .auto or item.delivery != .attach or item.omitted or (inline_used != null and inline_used.?[index])) continue;
             if (largest == null or file.size > draft.attachments[largest.?].size or (file.size == draft.attachments[largest.?].size and std.mem.lessThan(u8, file.filename, draft.attachments[largest.?].filename))) largest = index;
         }
         const selected = largest orelse {
@@ -85,6 +92,7 @@ fn overflowEstimate(draft: t.Draft, items: []const Item) usize {
     const source = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText;
     var bytes: usize = 128 * 1024 + source.len * 6;
     for (items) |item| {
+        if (item.omitted) continue;
         const file = draft.attachments[item.index];
         if (item.delivery == .drive) {
             bytes += 2048;
@@ -115,6 +123,10 @@ pub fn wireDraft(a: A, draft: t.Draft, items: []const Item, ids: []const []const
     for (items, 0..) |item, index| {
         if (item.index != index) return error.InvalidAttachmentDelivery;
         const file = draft.attachments[index];
+        if (item.omitted) {
+            if (item.delivery != .attach or !@import("markdown_mail.zig").isClipboardInline(file)) return error.InvalidAttachmentDelivery;
+            continue;
+        }
         if (item.delivery == .attach) {
             var attached = file;
             attached.delivery = null;
@@ -213,4 +225,43 @@ test "attachment delivery: oversized preview refuses with bounded arithmetic ins
     try std.testing.expect(plan.estimated);
     try std.testing.expectEqual(error.AttachmentsTooLarge, plan.problem.?);
     try std.testing.expect(plan.mime_bytes > t.Limits.mime_upload_bytes);
+}
+
+test "authored inline images: dormant source does not upload or consume wire budget and active images stay attach" {
+    const Oracle = struct {
+        fn count(ctx: *anyopaque, _: A, draft: t.Draft, items: []const Item) !usize {
+            const calls: *usize = @ptrCast(@alignCast(ctx));
+            calls.* += 1;
+            var bytes: usize = 1024;
+            for (items) |item| if (!item.omitted and item.delivery == .attach) {
+                bytes += draft.attachments[item.index].size * 2;
+            };
+            return bytes;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var calls: usize = 0;
+    const counter: Measure = .{ .ctx = &calls, .countFn = Oracle.count };
+    const handle: [64]u8 = @splat('0');
+    var image: t.Attachment = .{ .id = "picture", .filename = "clipboard-fixture.png", .mimeType = "image/png", .size = t.Limits.attachment_bytes + 1, .blobId = &handle, .contentId = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid", .disposition = "inline", .delivery = .drive };
+    var draft: t.Draft = .{ .bodyFormat = .markdown, .bodyText = "Only text.", .attachments = &.{image}, .bcc = &.{.{ .address = "hidden@example.test" }} };
+    const dormant = try resolve(a, draft, counter);
+    try std.testing.expect(dormant.items[0].omitted);
+    try std.testing.expectEqual(@as(usize, 0), dormant.drive_count);
+    try std.testing.expectEqual(@as(usize, 0), dormant.attached_bytes);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    const wire = try wireDraft(a, draft, dormant.items, &.{});
+    try std.testing.expectEqual(@as(usize, 0), wire.attachments.len);
+    try std.testing.expectEqualStrings(draft.bodyText, wire.bodyText);
+    draft.bodyText = "![picture](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    try std.testing.expectError(error.InlineImageRequiresAttachment, resolve(a, draft, counter));
+    image.delivery = .auto;
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.InlineImageRequiresAttachment, resolve(a, draft, counter));
+    image.delivery = .attach;
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.AttachmentsTooLarge, resolve(a, draft, counter));
+    try std.testing.expectEqual(@as(usize, 1), calls); // Refused before payload measurement or provider work.
 }

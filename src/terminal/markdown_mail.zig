@@ -5,6 +5,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const highlight = @import("markdown_highlight.zig");
 const original_mail = @import("original_mail.zig");
+const inline_images = @import("inline_images.zig");
 const portable_max_lines = 32768;
 /// Every additional source line consumes a newline byte. Native compose work
 /// is bounded by source/output bytes and nesting, without a smaller line-count
@@ -14,24 +15,112 @@ pub const max_depth = 12;
 pub const max_table_columns = 32;
 pub const logo_content_id = "omagma-logo@omagma.invalid";
 pub const Rendered = struct { plain: []const u8, html: []const u8, logoOffset: usize };
-pub const Prepared = struct { plain: []const u8, html: ?[]const u8 = null, logoOffset: ?usize = null, resources: []const t.Attachment = &.{} };
+pub const Prepared = struct {
+    plain: []const u8,
+    html: ?[]const u8 = null,
+    logoOffset: ?usize = null,
+    resources: []const t.Attachment = &.{},
+    /// Null retains the exact legacy ordinary-file behavior.
+    attachments: ?[]const t.Attachment = null,
+    inline_used: ?[]const bool = null,
+    pub fn files(self: Prepared, draft: t.Draft) []const t.Attachment {
+        return self.attachments orelse draft.attachments;
+    }
+};
+pub const isClipboardInline = inline_images.isClipboardInline;
+/// Explicit Detach uses the same bounded parser that renders outgoing mail.
+/// A synthetic descriptor selects one CID without loading or copying an image.
+pub fn imageMarkerSpans(a: std.mem.Allocator, source: []const u8, content_id: []const u8) ![]inline_images.Span {
+    const cid = try @import("mime.zig").contentId(content_id);
+    var temporary: std.heap.ArenaAllocator = .init(a);
+    defer temporary.deinit();
+    var spans: std.ArrayList(inline_images.Span) = .empty;
+    errdefer spans.deinit(a);
+    var images = try inline_images.Plan.init(temporary.allocator(), &.{.{ .id = "marker", .filename = "inline-image.png", .mimeType = "image/png", .size = 1, .data = "AA", .contentId = cid, .disposition = "inline" }});
+    defer images.deinit();
+    images.capture = .{ .source = source, .spans = &spans, .allocator = a };
+    _ = try renderSourceWithImages(temporary.allocator(), source, .markdown, false, "", &images);
+    return spans.toOwnedSlice(a);
+}
+pub fn removeImageMarkers(a: std.mem.Allocator, source: []const u8, content_id: []const u8, cursor: usize) !inline_images.Removed {
+    const spans = try imageMarkerSpans(a, source, content_id);
+    defer a.free(spans);
+    return inline_images.removeSpans(a, source, spans, cursor);
+}
+
+/// Active authored images only. Temporary rendering is released before the
+/// delivery planner measures MIME, so these two phases do not retain copies.
+pub fn inlineUsage(a: std.mem.Allocator, draft: t.Draft) ![]bool {
+    var temporary: std.heap.ArenaAllocator = .init(a);
+    defer temporary.deinit();
+    var note = draft;
+    note.original = null;
+    note.includeOriginal = false;
+    const prepared = try prepare(temporary.allocator(), note);
+    const used = try a.alloc(bool, draft.attachments.len);
+    if (prepared.inline_used) |values| @memcpy(used, values) else @memset(used, false);
+    return used;
+}
 pub fn prepare(a: std.mem.Allocator, draft: t.Draft) !Prepared {
     return prepareWithSuffix(a, draft, "");
 }
 /// Generated delivery links are parsed independently so an unfinished authored
 /// code fence cannot hide the links or alter their semantic meaning.
 pub fn prepareWithSuffix(a: std.mem.Allocator, draft: t.Draft, suffix: []const u8) !Prepared {
+    var images = try inline_images.Plan.init(a, draft.attachments);
+    defer images.deinit();
     const source = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText;
     if (if (draft.includeOriginal) draft.original else null) |original| {
-        const note = try renderNoteWithSuffix(a, source, draft.bodyFormat, suffix);
+        const note = try renderNoteWithImages(a, source, draft.bodyFormat, suffix, &images);
         defer a.free(note.plain);
         defer a.free(note.html);
         const assembled = try original_mail.prepare(a, .{ .html = note.html, .plain = note.plain, .logoOffset = note.logoOffset }, original);
-        return .{ .plain = assembled.plain, .html = assembled.html, .logoOffset = assembled.logoOffset, .resources = assembled.resources };
+        errdefer a.free(assembled.plain);
+        errdefer a.free(assembled.html);
+        return finishImages(a, draft, &images, .{ .plain = assembled.plain, .html = assembled.html, .logoOffset = assembled.logoOffset, .resources = assembled.resources });
     }
-    if (draft.bodyFormat == .plain) return .{ .plain = if (suffix.len == 0) source else try std.fmt.allocPrint(a, "{s}{s}", .{ source, suffix }) };
-    const rendered = try renderSourceWithSuffix(a, source, .markdown, true, suffix);
-    return .{ .plain = rendered.plain, .html = rendered.html, .logoOffset = rendered.logoOffset };
+    if (draft.bodyFormat == .plain) return finishImages(a, draft, &images, .{ .plain = if (suffix.len == 0) source else try std.fmt.allocPrint(a, "{s}{s}", .{ source, suffix }) });
+    const rendered = try renderSourceWithImages(a, source, .markdown, true, suffix, &images);
+    errdefer a.free(rendered.plain);
+    errdefer a.free(rendered.html);
+    return finishImages(a, draft, &images, .{ .plain = rendered.plain, .html = rendered.html, .logoOffset = rendered.logoOffset });
+}
+
+fn finishImages(a: std.mem.Allocator, draft: t.Draft, images: *const inline_images.Plan, prepared: Prepared) !Prepared {
+    var selected: usize = 0;
+    var removed: usize = 0;
+    for (draft.attachments, images.used) |file, used| {
+        if (used) selected += 1;
+        if (used or isClipboardInline(file)) removed += 1;
+    }
+    var result = prepared;
+    if (removed == 0) return result;
+    if (selected > t.Limits.related_resources -| prepared.resources.len) return error.TooManyAttachments;
+    const files = try a.alloc(t.Attachment, draft.attachments.len - removed);
+    errdefer a.free(files);
+    const resources = try a.alloc(t.Attachment, prepared.resources.len + selected);
+    errdefer a.free(resources);
+    @memcpy(resources[0..prepared.resources.len], prepared.resources);
+    var file_index: usize = 0;
+    var resource_index = prepared.resources.len;
+    for (draft.attachments, images.used) |file, used| {
+        if (used) {
+            const cid = try @import("mime.zig").contentId(file.contentId.?);
+            for (resources[0..resource_index]) |previous| if (previous.contentId) |other| {
+                if (std.mem.eql(u8, cid, try @import("mime.zig").contentId(other))) return error.AmbiguousContentId;
+            };
+            resources[resource_index] = file;
+            resource_index += 1;
+        } else if (!isClipboardInline(file)) {
+            files[file_index] = file;
+            file_index += 1;
+        }
+    }
+    try t.Limits.validateComposeParts(files.len, resources.len);
+    result.attachments = files;
+    result.resources = resources;
+    result.inline_used = try a.dupe(bool, images.used);
+    return result;
 }
 
 const Buffer = struct {
@@ -77,6 +166,7 @@ const Context = struct {
     search_budget: usize,
     blocks_left: usize = max_lines * 4,
     suppress_plain: bool = false,
+    images: ?*inline_images.Plan = null,
 
     fn literalText(self: *Context, bytes: []const u8) !void {
         try self.html.escaped(bytes);
@@ -120,6 +210,24 @@ const Context = struct {
                 literal = i;
                 continue;
             }
+            if (links and self.images != null) if (inline_images.marker(rest)) |image| {
+                if (try self.images.?.resolve(image.url)) |file| {
+                    try self.images.?.record(rest[0..image.end]);
+                    try self.literalText(text[literal..i]);
+                    try self.html.append("<img src=\"");
+                    var cid_reference: [1540]u8 = undefined;
+                    try self.html.escaped(try inline_images.reference(file.contentId.?, &cid_reference));
+                    try self.html.append("\" alt=\"");
+                    try self.html.escaped(image.label);
+                    try self.html.append("\" style=\"display:block;max-width:100%;height:auto;border:0\">");
+                    try self.plainAppend("[Image: ");
+                    try self.plainAppend(image.label);
+                    try self.plainAppend("]");
+                    i += image.end;
+                    literal = i;
+                    continue;
+                }
+            };
             if (links and (rest[0] == '[' or std.mem.startsWith(u8, rest, "!["))) link: {
                 const image = rest[0] == '!';
                 const label_start: usize = if (image) 2 else 1;
@@ -512,7 +620,10 @@ pub fn renderNote(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat
     return renderNoteWithSuffix(a, source, format, "");
 }
 fn renderNoteWithSuffix(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, suffix: []const u8) !Rendered {
-    const rendered = try renderSourceWithSuffix(a, source, format, false, suffix);
+    return renderNoteWithImages(a, source, format, suffix, null);
+}
+fn renderNoteWithImages(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, suffix: []const u8, images: ?*inline_images.Plan) !Rendered {
+    const rendered = try renderSourceWithImages(a, source, format, false, suffix, images);
     defer a.free(rendered.html);
     errdefer a.free(rendered.plain);
     const html = try protectNote(a, rendered.html);
@@ -528,6 +639,9 @@ fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, 
     return renderSourceWithSuffix(a, source, format, standalone, "");
 }
 fn renderSourceWithSuffix(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool, suffix: []const u8) !Rendered {
+    return renderSourceWithImages(a, source, format, standalone, suffix, null);
+}
+fn renderSourceWithImages(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool, suffix: []const u8, images: ?*inline_images.Plan) !Rendered {
     if (suffix.len > t.Limits.compose_body_bytes -| source.len) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
     for (suffix) |c| if ((c < 0x20 and c != '\n' and c != '\r' and c != '\t') or c == 0x7f) return error.InvalidBody;
@@ -543,7 +657,7 @@ fn renderSourceWithSuffix(a: std.mem.Allocator, source: []const u8, format: t.Bo
             try lines.append(a, .{ .text = std.mem.trimEnd(u8, raw, "\r") });
         }
     }
-    var context: Context = .{ .a = a, .html = .{ .allocator = a }, .plain = .{ .allocator = a }, .search_budget = @max(4096, (source.len + suffix.len) * 32) };
+    var context: Context = .{ .a = a, .html = .{ .allocator = a }, .plain = .{ .allocator = a }, .search_budget = @max(4096, (source.len + suffix.len) * 32), .images = images };
     errdefer context.html.bytes.deinit(a);
     errdefer context.plain.bytes.deinit(a);
     if (standalone) try context.html.append(document_prefix);
@@ -796,6 +910,117 @@ pub fn safeUrl(url: []const u8) bool {
     for (url) |c| if (c <= 0x20 or c == 0x7f or c == '\\' or c == '<' or c == '>') return false;
     return (std.ascii.startsWithIgnoreCase(url, "https://") and url.len > 8) or (std.ascii.startsWithIgnoreCase(url, "http://") and url.len > 7) or (std.ascii.startsWithIgnoreCase(url, "mailto:") and url.len > 7);
 }
+
+fn inlineFixture(a: std.mem.Allocator) !t.Attachment {
+    const png = @import("markdown_logo.zig").png;
+    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(png.len));
+    return .{ .id = "clipboard-file", .filename = "clipboard-fixture.png", .mimeType = "image/png", .size = png.len, .data = std.base64.url_safe_no_pad.Encoder.encode(encoded, png), .contentId = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid", .disposition = "inline", .delivery = .attach };
+}
+
+test "authored inline images: exact MIME CID bytes and paragraph position occur once beside ordinary files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const image = try inlineFixture(a);
+    const draft: t.Draft = .{ .bodyFormat = .markdown, .bodyText = "First paragraph.\n\n![Screenshot](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\nLater paragraph.", .attachments = &.{ image, .{ .id = "file", .filename = "report.pdf", .mimeType = "application/pdf", .size = 3, .data = "AQID" } } };
+    const prepared = try prepare(a, draft);
+    try std.testing.expectEqual(@as(usize, 1), prepared.files(draft).len);
+    try std.testing.expectEqual(@as(usize, 1), prepared.resources.len);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.plain, "First paragraph.\n\n[Image: Screenshot]\n\nLater paragraph.") != null);
+    const first = std.mem.indexOf(u8, prepared.html.?, "First paragraph.").?;
+    const at = std.mem.indexOf(u8, prepared.html.?, "<img src=\"cid:clipboard-").?;
+    const last = std.mem.indexOf(u8, prepared.html.?, "Later paragraph.").?;
+    try std.testing.expect(first < at and at < last);
+    const mime = @import("mime.zig");
+    var from: @import("recipients.zig").Mailbox = .{};
+    try from.address.set("sender@example.test");
+    const compose: mime.Compose = .{ .from = from, .allow_empty_recipients = true, .subject = "Inline fixture", .body = prepared.plain, .html = prepared.html, .inline_logo = true, .logo_offset = prepared.logoOffset, .message_id = "<inline-fixture@example.test>", .date = "Tue, 03 Nov 2026 12:00:00 +0000", .attachments = try mime.composeAttachments(prepared.files(draft), a), .related = try mime.composeAttachments(prepared.resources, a) };
+    var bytes: [64 * 1024]u8 = undefined;
+    const raw = try mime.encode(compose, &bytes);
+    const parsed = try mime.parse(raw, a);
+    try std.testing.expectEqual(@as(usize, 3), parsed.attachments.len); // Own image, generated logo, PDF.
+    var images: usize = 0;
+    for (parsed.attachments) |part| if (std.mem.eql(u8, mime.contentId(part.content_id) catch "", image.contentId.?)) {
+        images += 1;
+        try std.testing.expectEqualStrings("inline", part.disposition);
+        try std.testing.expectEqualSlices(u8, @import("markdown_logo.zig").png, part.data);
+    };
+    try std.testing.expectEqual(@as(usize, 1), images);
+    try std.testing.expectEqualStrings(prepared.plain, std.mem.trimEnd(u8, parsed.body_text, "\r\n"));
+    var scratch: [1024]u8 = undefined;
+    var count = std.Io.Writer.Discarding.init(&scratch);
+    try mime.measureTo(compose, &count.writer);
+    try std.testing.expectEqual(raw.len, count.fullCount());
+}
+
+test "authored inline images: dormant and Plain clipboard images stay local while legacy files keep their meaning" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const image = try inlineFixture(a);
+    var draft: t.Draft = .{ .bodyFormat = .markdown, .bodyText = "Text only.\n\n`![example](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)`\n\n\\![escaped](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)", .attachments = &.{image} };
+    const dormant = try prepare(a, draft);
+    try std.testing.expectEqual(@as(usize, 0), dormant.resources.len);
+    try std.testing.expectEqual(@as(usize, 0), dormant.files(draft).len);
+    const usage = try inlineUsage(a, draft);
+    try std.testing.expect(!usage[0]);
+    draft.bodyFormat = .plain;
+    draft.bodyText = "Before\n\n![image](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\nAfter";
+    const plain = try prepare(a, draft);
+    try std.testing.expectEqualStrings(draft.bodyText, plain.plain);
+    try std.testing.expect(plain.html == null and plain.resources.len == 0 and plain.files(draft).len == 0);
+    var legacy = image;
+    legacy.contentId = "legacy@example.test";
+    draft.attachments = &.{legacy};
+    const old = try prepare(a, draft);
+    try std.testing.expect(old.attachments == null and old.files(draft).ptr == draft.attachments.ptr);
+}
+
+test "authored inline images: unowned and remote markers stay text but owned invalid metadata and collisions fail" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var image = try inlineFixture(a);
+    var draft: t.Draft = .{ .bodyFormat = .markdown, .bodyText = "![missing](cid:missing@example.test)\n\n![remote](https://example.test/pixel.png)", .attachments = &.{image} };
+    const unrelated = try prepare(a, draft);
+    try std.testing.expectEqual(@as(usize, 0), unrelated.resources.len);
+    try std.testing.expect(std.mem.indexOf(u8, unrelated.html.?, "<img src=\"cid:missing") == null);
+    try std.testing.expect(std.mem.indexOf(u8, unrelated.html.?, "<img src=\"https:") == null);
+    draft.bodyText = "![image](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    image.delivery = .drive;
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.InlineImageRequiresAttachment, prepare(a, draft));
+    image.delivery = .attach;
+    image.mimeType = "application/pdf";
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.InvalidInlineImage, prepare(a, draft));
+    image = try inlineFixture(a);
+    draft.attachments = &.{ image, image };
+    try std.testing.expectError(error.AmbiguousContentId, prepare(a, draft));
+    image.contentId = "omagma-logo@omagma.invalid";
+    draft.bodyText = "![image](cid:omagma-logo@omagma.invalid)";
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.AmbiguousContentId, prepare(a, draft));
+    image = try inlineFixture(a);
+    draft.bodyText = "![image](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    draft.attachments = &.{image};
+    draft.original = .{ .bodyHtml = "<p>Frozen original.</p><img src='cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid'>", .resources = &.{image} };
+    try std.testing.expectError(error.AmbiguousContentId, prepare(a, draft));
+}
+
+test "authored inline images: canonical CID URI escaping still names the exact owned MIME part" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var image = try inlineFixture(a);
+    image.contentId = "<owned%image#1@example.test>";
+    const draft: t.Draft = .{ .bodyText = "![Escaped](cid:owned%25image%231@example.test)", .bodyFormat = .markdown, .attachments = &.{image} };
+    const prepared = try prepare(a, draft);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.html.?, "src=\"cid:owned%25image%231@example.test\"") != null);
+    var id: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(try @import("mime.zig").contentId(image.contentId.?), inline_images.cidUrl("cid:owned%25image%231@example.test", &id).?);
+    try std.testing.expectEqual(@as(usize, 1), prepared.resources.len);
+}
 const Target = struct { url: []const u8, end: usize };
 fn linkTarget(context: *Context, text: []const u8, start: usize) !?Target {
     var i = start;
@@ -985,4 +1210,105 @@ test "attachment delivery: generated suffix stays outside an unfinished Markdown
     try std.testing.expect(close < link);
     try std.testing.expect(link < prepared.logoOffset.?);
     try std.testing.expectEqualStrings("```\nUnfinished example", draft.bodyText);
+}
+
+test "inline image markers: detach preserves code escaped examples and foreign images" {
+    const a = std.testing.allocator;
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const token = "![screen](cid:" ++ cid ++ ")";
+    const source = "Before\n\n" ++ token ++ "\n\nAfter\n\n`" ++ token ++ "`\n\\" ++ token ++ "\n```md\n" ++ token ++ "\n```\n![foreign](cid:other)\n";
+    const removed = try removeImageMarkers(a, source, cid, source.len);
+    defer a.free(removed.source);
+    try std.testing.expectEqual(@as(usize, 1), removed.count);
+    try std.testing.expect(std.mem.startsWith(u8, removed.source, "Before\n\nAfter"));
+    try std.testing.expect(std.mem.indexOf(u8, removed.source, "`" ++ token ++ "`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, removed.source, "\\" ++ token) != null);
+    try std.testing.expect(std.mem.indexOf(u8, removed.source, "```md\n" ++ token) != null);
+    try std.testing.expect(std.mem.indexOf(u8, removed.source, "![foreign](cid:other)") != null);
+}
+
+test "inline image markers: unmatched backticks on another line do not hide an active marker" {
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const source = "`literal opener\n![Screenshot](cid:" ++ cid ++ ")\nliteral closer`";
+    const removed = try removeImageMarkers(std.testing.allocator, source, cid, source.len);
+    defer std.testing.allocator.free(removed.source);
+    try std.testing.expectEqual(@as(usize, 1), removed.count);
+    try std.testing.expectEqualStrings("`literal opener\n\nliteral closer`", removed.source);
+}
+
+test "inline image markers: Detach removes exactly rendered owned references across nested block scopes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const image = try inlineFixture(a);
+    const token = "![Screenshot](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    const cases = [_]struct { source: []const u8, rendered: usize }{
+        .{ .source = "> ```md\n> " ++ token ++ "\n\nOutside.\n\n" ++ token, .rendered = 1 },
+        .{ .source = "- ```md\n  " ++ token ++ "\n\nOutside.\n\n" ++ token, .rendered = 1 },
+        .{ .source = "> - ```md\n>   " ++ token ++ "\n\nOutside.\n\n" ++ token, .rendered = 1 },
+        .{ .source = "1. ```md\n   " ++ token ++ "\n\n" ++ token, .rendered = 1 },
+        .{ .source = "```md\n" ++ token ++ "\nUnclosed root fence.", .rendered = 0 },
+        .{ .source = "\\" ++ token ++ "\n`" ++ token ++ "`\n\n**" ++ token ++ "**", .rendered = 1 },
+        .{ .source = "[" ++ token ++ "](https://example.test/)\n\n" ++ token, .rendered = 1 },
+        .{ .source = "| Image |\n| --- |\n| " ++ token ++ " |", .rendered = 1 },
+        .{ .source = "``literal " ++ token ++ "``\n" ++ token, .rendered = 1 },
+        .{ .source = token ++ " " ++ token, .rendered = 2 },
+        .{ .source = "> " ++ token, .rendered = 1 },
+    };
+    for (cases) |case| {
+        const prepared = try prepare(a, .{ .bodyText = case.source, .bodyFormat = .markdown, .attachments = &.{image} });
+        const rendered = std.mem.count(u8, prepared.html.?, "<img src=\"cid:clipboard-");
+        try std.testing.expectEqual(case.rendered, rendered);
+        const removed = try removeImageMarkers(a, case.source, image.contentId.?, case.source.len);
+        try std.testing.expectEqual(rendered, removed.count);
+        const after = try prepare(a, .{ .bodyText = removed.source, .bodyFormat = .markdown, .attachments = &.{image} });
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after.html.?, "<img src=\"cid:clipboard-"));
+    }
+}
+
+test "inline image markers: Detach maps carets through real removals blank-line collapse and UTF-8" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const image_marker = "![Screenshot](cid:" ++ cid ++ ")";
+    const prefix = "Préface.\n\n";
+    const source = prefix ++ image_marker ++ "\n\nAprès.";
+    const expected = "Préface.\n\nAprès.";
+    const cases = [_]struct { before: usize, after: usize }{
+        .{ .before = 0, .after = 0 },
+        .{ .before = "Pré".len, .after = "Pré".len },
+        .{ .before = prefix.len - 1, .after = prefix.len - 2 },
+        .{ .before = prefix.len, .after = prefix.len - 2 },
+        .{ .before = prefix.len + 12, .after = prefix.len - 2 },
+        .{ .before = prefix.len + image_marker.len, .after = prefix.len - 2 },
+        .{ .before = prefix.len + image_marker.len + 2, .after = prefix.len },
+        .{ .before = prefix.len + image_marker.len + "\n\nAprès".len, .after = "Préface.\n\nAprès".len },
+        .{ .before = source.len, .after = expected.len },
+    };
+    for (cases) |case| {
+        const removed = try removeImageMarkers(a, source, cid, case.before);
+        try std.testing.expectEqualStrings(expected, removed.source);
+        try std.testing.expectEqual(case.after, removed.cursor);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(removed.source[0..removed.cursor]));
+    }
+    const first_prefix = "α\n\n";
+    const second_prefix = first_prefix ++ image_marker ++ "\n\nβ\n\n";
+    const multiple = second_prefix ++ image_marker ++ "\n\nγ";
+    const multi_expected = "α\n\nβ\n\nγ";
+    const multi_cases = [_]struct { before: usize, after: usize }{
+        .{ .before = "α".len, .after = "α".len },
+        .{ .before = first_prefix.len + 10, .after = "α".len },
+        .{ .before = second_prefix.len - 2, .after = "α\n\nβ".len },
+        .{ .before = second_prefix.len + 10, .after = "α\n\nβ".len },
+        .{ .before = second_prefix.len + image_marker.len + 2, .after = "α\n\nβ\n\n".len },
+        .{ .before = multiple.len, .after = multi_expected.len },
+    };
+    for (multi_cases) |case| {
+        const removed = try removeImageMarkers(a, multiple, cid, case.before);
+        try std.testing.expectEqual(@as(usize, 2), removed.count);
+        try std.testing.expectEqualStrings(multi_expected, removed.source);
+        try std.testing.expectEqual(case.after, removed.cursor);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(removed.source[0..removed.cursor]));
+    }
 }

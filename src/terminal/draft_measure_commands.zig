@@ -33,7 +33,7 @@ fn count(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft, message_id
         .date = "Mon, 05 Oct 2026 12:00:00 +0000",
         .in_reply_to = draft.inReplyTo,
         .references = draft.references,
-    }, draft.attachments, prepared.resources);
+    }, prepared.files(draft), prepared.resources);
 }
 
 fn provenBodyOverflow(err: anyerror) bool {

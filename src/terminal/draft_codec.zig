@@ -133,7 +133,14 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
     const related = if (d.original) |original| original.resources else &.{};
     if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
-    if (send) try t.Limits.validateComposeParts(d.attachments.len, if (d.includeOriginal) related.len else 0);
+    var dormant_capable = false;
+    if (t.Limits.native) for (d.attachments) |file| {
+        dormant_capable = dormant_capable or @import("inline_images.zig").isClipboardInline(file);
+    };
+    // Generated clipboard descriptors are retained for body Undo even when
+    // absent from the wire. The canonical prepared MIME enforces its exact
+    // outgoing counts; source descriptors and immutable handles still validate.
+    if (send and !dormant_capable) try t.Limits.validateComposeParts(d.attachments.len, if (d.includeOriginal) related.len else 0);
     if (d.original) |original| try @import("original_mail.zig").validate(original);
     var attachment_bytes: usize = 0;
     var embedded_bytes: usize = 0;
@@ -165,7 +172,7 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
             }
             if (attachment.delivery != .drive) {
                 attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
-                if (send and !automatic and attachment_bytes > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+                if (send and !automatic and !dormant_capable and attachment_bytes > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
             }
             if (attachment.blobId == null) {
                 embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;

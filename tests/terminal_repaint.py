@@ -9,12 +9,14 @@ import os
 from pathlib import Path
 import selectors
 import shlex
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
 import termios
 import time
+from unittest.mock import patch
 
 from build_info import build_mode, read_build_info
 from terminal_cache import ProviderFixture, seed, metrics
@@ -23,8 +25,10 @@ from terminal_integration import ACCOUNTS, ROOT, Client, require
 from terminal_pty import Terminal, child_session, FIXTURES, cursor_after_source, source_location
 from terminal_reader import reader_contains, reader_rectangle
 from terminal_repaint_screen import PreservedScreen
+import terminal_pty
 
-CASES = ("physical-resize-clears-ghosts", "end-reflow-tail", "long-account-held-cache")
+CASES = ("physical-resize-clears-ghosts", "end-reflow-tail", "long-account-held-cache",
+         "in-band-signal-resize", "idle-missed-resize")
 LONG_ACCOUNT = "personal@example.test"
 MARKER = "Fictional plain repaint marker."
 TAIL = "Fictional plain repaint tail."
@@ -172,6 +176,82 @@ def run_plain(binary, directory, reflow):
         if terminal is not None:terminal.close()
 
 
+def resize_signals(binary, directory, missed=False):
+    """Real PTY geometry, including a negotiated terminal that omits reports."""
+    fixture = plain_fixture(directory)
+    seed(binary, directory, fixture, bodies=("shared-msg-096",))
+    terminal = None
+    previous_session = terminal_pty.child_session
+
+    def masked_session():
+        previous_session()
+        # Simulate a lost/coalesced wakeup without altering the application:
+        # the next existing idle tick must still discover the new kernel size.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGWINCH})
+
+    try:
+        with patch.object(terminal_pty, "child_session", masked_session if missed else previous_session):
+            terminal = RepaintTerminal(binary, directory, extra=fixture.options(), screen_type=PreservedScreen,
+                                       columns=100, rows=24)
+        terminal.until(lambda: reader_contains(terminal.screen, MARKER) and "Up to date" in terminal.text())
+
+        def geometry(columns, rows):
+            rectangle = reader_rectangle(terminal.screen)
+            return (rectangle is not None and rectangle["right"] == min(columns, 240) - 1
+                    and rectangle["bottom"] == min(rows, 80) - 3
+                    and reader_contains(terminal.screen, MARKER))
+
+        if not missed:
+            terminal.send(b"\x1b[48;24;100;480;1000t")
+            # The initial report can correctly be a duplicate. An explicit
+            # existing key proves it was consumed without relying on a delay.
+            terminal.send(b"?")
+            terminal.until(lambda: "Keyboard & mouse" in terminal.text())
+            terminal.send(b"q")
+            terminal.until(lambda: geometry(100, 24))
+        terminal.resize(132, 36)
+        # No input, extra resize or synthetic redraw after the kernel change.
+        terminal.until(lambda: geometry(132, 36))
+        no_ghosts(terminal)
+        if missed:
+            result = {"kernelResizeWhileSignalBlocked": True, "noInputAfterResize": True,
+                      "existingIdleWakeRecoveredGeometry": True}
+        else:
+            # Coalesced rapid kernel notifications must settle on the last
+            # physical size rather than replaying an old queued payload.
+            for columns, rows in ((80, 20), (160, 36), (251, 44), (144, 38)):
+                terminal.resize(columns, rows)
+            terminal.until(lambda: geometry(144, 38))
+            # A late old report cannot rewind newer kernel geometry, even on
+            # a later draw after that kernel size was already observed.
+            terminal.send(b"\x1b[48;24;100;480;1000t?")
+            terminal.until(lambda: "Keyboard & mouse" in terminal.text())
+            terminal.send(b"q")
+            terminal.until(lambda: geometry(144, 38))
+            terminal.resize(160, 40)
+            terminal.until(lambda: geometry(160, 40))
+            terminal.resize(251, 40)
+            terminal.until(lambda: geometry(251, 40))
+            cleared = terminal.screen.full_physical_clears
+            terminal.resize(270, 40)
+            terminal.until(lambda: terminal.screen.full_physical_clears > cleared and geometry(270, 40))
+            cleared = terminal.screen.full_physical_clears
+            fcntl.ioctl(terminal.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 270, 800, 2701))
+            terminal.until(lambda: terminal.screen.full_physical_clears > cleared and geometry(270, 40))
+            no_ghosts(terminal)
+            result = {"kernelResizeAfterInBandNegotiation": True, "burstUsesFinalGeometry": True,
+                      "staleReportCannotRewindKernel": True, "sameLogicalCapStillRepaints": True,
+                      "pixelOnlyChangeStillRepaints": True, "noInputAfterKernelResize": True}
+        result.update(terminal.finish())
+        return result
+    except Exception as error:
+        if terminal is not None: error.repaint_cells = screen_capture(terminal)
+        raise
+    finally:
+        fixture.release()
+        if terminal is not None: terminal.close()
+
+
 def long_account(binary,directory):
     require(len(LONG_ACCOUNT)==21,"fictional long account not21characters")
     directory.mkdir(parents=True)
@@ -233,7 +313,10 @@ def main():
             if args.case and name not in args.case:continue
             started=time.monotonic();directory=Path(temporary)/name
             try:
-                data=long_account(binary,directory) if name=='long-account-held-cache' else run_plain(binary,directory,name=='end-reflow-tail')
+                if name in ('in-band-signal-resize', 'idle-missed-resize'):
+                    data = resize_signals(binary, directory, missed=name == 'idle-missed-resize')
+                else:
+                    data=long_account(binary,directory) if name=='long-account-held-cache' else run_plain(binary,directory,name=='end-reflow-tail')
                 item={'name':name,'passed':True,**data}
             except Exception as error:
                 item={'name':name,'passed':False,'error':f'{type(error).__name__}: {error}'}

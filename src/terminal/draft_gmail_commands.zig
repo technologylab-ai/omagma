@@ -80,7 +80,7 @@ fn fixtureCreate(s: anytype, a: std.mem.Allocator, account: []const u8, attempt:
     snapshot.bodyText = prepared.plain;
     snapshot.bodyFormat = .plain;
     var files: std.ArrayList(t.Attachment) = .empty;
-    try files.appendSlice(a, draft.attachments);
+    try files.appendSlice(a, prepared.files(draft));
     try files.appendSlice(a, prepared.resources);
     snapshot.attachments = files.items;
     snapshot.original = null;

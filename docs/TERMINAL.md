@@ -43,6 +43,8 @@ Enter opens the conversation. Long conversations use 20-message windows with sel
 
 `h`/`l` or Tab changes pane, `v` moves the reader beside or below the list, and `z` expands it. With the reader focused, `J`/`K` moves to adjacent mail across windows while lowercase `j`/`k` scrolls the body. `{`/`}` chooses a thread message, `t` or a click folds its body, and `Q`/`S` folds quoted history/a standard signature. The header stays compact in short panes and shows reading position. These controls do not change stored mail.
 
+In send review, the mouse wheel scrolls the content three rows per notch without activating anything or scrolling the view behind it; the title and controls ignore the wheel, and `j`/`k` work as before.
+
 Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Drag across the received message body to select text, then press `y` or choose **Copy**. Your terminal's selection modifier, or `--no-mouse`, also retains ordinary terminal text selection.
 
 Unread subjects are bold and marked `●`; read subjects use normal weight.
@@ -96,8 +98,7 @@ copy or save a separate file there. Closing the editor returns to the TUI
 and removes the temporary snapshot; changes never update the received mail
 or create a draft. In the composer, `e` continues to edit the draft body.
 
-Copying uses the terminal clipboard protocol (OSC 52), including over SSH.
-The terminal must allow clipboard writes; Omagma does not read the clipboard.
+Copying a received message writes to your clipboard with OSC 52, including over SSH, so your terminal must allow clipboard writes. Omagma reads the clipboard only when you paste an image with Ctrl+V or `:paste-image`, and only from the machine it runs on.
 Received-message editor viewing works independently of clipboard support.
 
 ## Software updates
@@ -364,6 +365,12 @@ limit opens **Too large to attach** before anything is imported: **Auto (a)**
 (d)** shares every new file from Drive, **Keep (k)** adds them as attachments
 while sending stays blocked, and **Cancel**/Esc returns to the browser with its
 marks. The choice applies only to the new files.
+
+### Paste clipboard image
+
+Ctrl+V or `:paste-image` reads an image from the local clipboard. Nothing is uploaded or sent. In a Markdown body the image is inserted at the cursor as a line like `![name](cid:…)`, which you can move or edit like text. The text preview shows `[Image: name]`; the browser preview and the recipient's HTML show the image in that spot. Deleting the line leaves the image out of the message (undo brings it back). Detaching the image also removes its lines. Inline images are always sent as attachments, never through Drive. Images too large to send inline are not pasted; save them and attach with `A`. In Plain bodies and other fields, pasted images are attached normally, and Plain text is never treated as Markdown.
+
+Pasting text into the terminal works as before. On Wayland, Omagma needs `wl-paste`. On macOS, PNG and TIFF clipboard images are converted to PNG. Over SSH, Omagma can't read the clipboard on your own computer, so save the screenshot as a file on the machine running Omagma and attach it with `A` or `:attach`. Normal attachment limits apply.
 
 ### Google Drive delivery
 
@@ -739,12 +746,14 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Tab/Shift+Tab, Enter in normal compose | Focus fields/controls; edit a field or activate a control |
 | Ctrl+S / :send in compose | Open outgoing send review |
 | y in send review | Confirm the reviewed draft and start the local send countdown |
+| Wheel over send-review content | Scroll three rows per notch; title and controls ignore the wheel |
 | :send-grace 0..30 | Cancellation period in seconds; default 10, explicit 0 means immediate |
 | Ctrl+S during the countdown | Send now for this reviewed message; the default delay remains unchanged |
 | Ctrl+Z / Undo during countdown | Cancel before submission and return to editing |
 | Tab/Shift+Tab, then Enter during countdown | Choose Undo or Send now; Undo is focused initially |
 | :resume-send / :cancel-send | Explicitly handle a recovered paused send |
 | A in normal compose | Add outgoing attachment |
+| Ctrl+V / :paste-image in editable compose | Paste image: inline at cursor (Markdown body), else attach |
 | L / B | Links / received-file picker |
 | o | Open selected mail in Gmail |
 | Space / Ctrl+A / Ctrl+Z | Select / select window / undo |

@@ -12,6 +12,7 @@ pub fn create(store: *storage.Store, draft: t.Draft, attempt: []const u8) !spool
     if (draft.recoveryFields != null) return error.UnfinishedDraft;
     if (!mime.validMessageId(attempt)) return error.InvalidDraftLink;
     const a = store.allocator;
+    try @import("native_delivery.zig").verifySource(store, draft);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
     var from: recipients.Mailbox = .{};
     const sender = draft.from orelse t.Address{ .address = store.state.account };
@@ -30,5 +31,5 @@ pub fn create(store: *storage.Store, draft: t.Draft, attempt: []const u8) !spool
         .date = if (store.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(store.io, a, false),
         .in_reply_to = draft.inReplyTo,
         .references = draft.references,
-    }, draft.attachments, prepared.resources);
+    }, prepared.files(draft), prepared.resources);
 }

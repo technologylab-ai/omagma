@@ -32,6 +32,7 @@ const compose_text = @import("compose_text.zig");
 const html_view = @import("html_view.zig");
 const mime = @import("mime.zig");
 const markdown_mail = @import("markdown_mail.zig");
+const clipboard_image = @import("clipboard_image.zig");
 const original_mail = @import("original_mail.zig");
 const recipients = @import("recipients.zig");
 const mail_limits = @import("mail_limits.zig");
@@ -65,7 +66,7 @@ const Key = vaxis.Key;
 const max_cols = 240;
 const max_rows = 80;
 const response_limit = types.Limits.runtime_bytes / 2;
-const Event = union(enum) { fetch_progress, loading_tick, cache_changed, theme_tick, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
+const Event = union(enum) { fetch_progress, loading_tick, cache_changed, theme_tick, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, tty_resize, paste_start, paste_end, operation_done, compose_idle, terminate };
 const Loop = if (browser_target) struct {} else input_loop.Loop(Event);
 const Tty = if (browser_target) struct {
     output: *Io.Writer,
@@ -81,7 +82,7 @@ const Tone = enum { text, subject, sender, muted, accent, selected, warning, fet
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
 const meet_ui = @import("calendar_meet_ui.zig");
-const JobKind = enum { calendar_meet_pending, calendar_meet_review, calendar_meet_apply, calendar_meet_reconcile, calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const JobKind = enum { clipboard_image, clipboard_import, calendar_meet_pending, calendar_meet_review, calendar_meet_apply, calendar_meet_reconcile, calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -517,6 +518,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "x in compose buttons", .action = "Remove the focused outgoing file; Enter also activates its removal", .requires = .attachments },
     .{ .keys = "Ctrl+N / Ctrl+P in compose buttons", .action = "Move through attachment, format, preview and alias controls" },
     .{ .keys = "Ctrl+S / :send", .action = "Save the draft and review before sending" },
+    .{ .keys = "Ctrl+V", .action = "paste image: inline at cursor (Markdown body), else attach", .requires = .files },
+    .{ .keys = ":paste-image", .action = "same as Ctrl+V", .requires = .files },
     .{ .keys = "y in send review", .action = "Explicitly send; Esc / q returns to the draft" },
     .{ .keys = "n in send or Trash review", .action = "Cancel the review without submitting" },
     .{ .keys = "o in normal reply/forward", .action = "Open the original mail in this account's browser profile", .requires = .open_urls },
@@ -755,6 +758,21 @@ fn safe(allocator: Allocator, input: []const u8, multiline: bool) ![]const u8 {
     return out.toOwnedSlice(allocator);
 }
 
+const InlineInsertion = struct { source: []const u8, added: usize };
+/// Split at a captured UTF-8 boundary; the image owns a complete paragraph.
+/// Preserve existing blank lines rather than accumulating separators on paste.
+fn inlineInsertion(a: Allocator, source: []const u8, anchor: usize, name: []const u8, cid: []const u8) !InlineInsertion {
+    if (anchor > source.len or (anchor < source.len and source[anchor] & 0xc0 == 0x80)) return error.InvalidCursor;
+    const before = source[0..anchor];
+    const after = source[anchor..];
+    const prefix: []const u8 = if (before.len == 0 or std.mem.endsWith(u8, before, "\n\n")) "" else if (std.mem.endsWith(u8, before, "\n")) "\n" else "\n\n";
+    const suffix: []const u8 = if (std.mem.startsWith(u8, after, "\n\n")) "" else if (std.mem.startsWith(u8, after, "\n")) "\n" else "\n\n";
+    const marker = try std.fmt.allocPrint(a, "{s}![{s}](cid:{s}){s}", .{ prefix, name, cid, suffix });
+    defer a.free(marker);
+    if (marker.len > types.Limits.compose_body_bytes -| source.len) return error.BodyTooLarge;
+    return .{ .source = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ before, marker, after }), .added = marker.len };
+}
+
 const Field = struct {
     bytes: std.ArrayList(u8) = .empty,
     cursor: usize = 0,
@@ -900,6 +918,7 @@ const Compose = struct {
     attachments: []const types.Attachment = &.{},
     omitted_attachments: usize = 0,
     attachment_arena: ?std.heap.ArenaAllocator = null,
+    attachment_generation: u64 = 0,
     original: ?types.Original = null,
     original_arena: ?std.heap.ArenaAllocator = null,
     original_digest: [32]u8 = @splat(0),
@@ -1113,10 +1132,24 @@ const Compose = struct {
         if (self.attachment_arena) |*previous| previous.deinit();
         self.attachment_arena = arena;
         self.attachments = owned;
+        self.attachment_generation +%= 1;
     }
 };
 
+const ClipboardPaste = struct {
+    active: bool = false,
+    inline_body: bool = false,
+    prefix_hash: [32]u8 = @splat(0),
+    cursor: usize = 0,
+    generation: u64 = 0,
+    picker_generation: u64 = 0,
+    account: usize = 0,
+    draft: @import("../bounded.zig").Text(128) = .{},
+    capture: ?clipboard_image.Capture = null,
+};
+
 const Job = struct {
+    clipboard_capture: ?clipboard_image.Capture = null,
     calendar_compose_generation: u64 = 0,
     update_snapshot: updates.Snapshot = .{},
     kind: JobKind = .list,
@@ -1170,6 +1203,7 @@ const App = struct {
     environ: *const std.process.Environ.Map,
     vx: *vaxis.Vaxis,
     tty: *Tty,
+    physical_size: ?vaxis.Winsize = null,
     loop: *Loop,
     cancellation: Io.Event = .unset,
     account_arena: std.heap.ArenaAllocator,
@@ -1562,7 +1596,7 @@ const App = struct {
     compose_preview_display: compose_text.Cache = .{},
     compose_original_display: compose_text.Cache = .{},
     compose_preview_digest: ?[32]u8 = null,
-    compose_preview_key: ?struct { version: u64, format: types.BodyFormat, original: ?[32]u8, include_original: bool, folded_tail: bool } = null,
+    compose_preview_key: ?struct { version: u64, attachment_generation: u64, format: types.BodyFormat, original: ?[32]u8, include_original: bool, folded_tail: bool } = null,
     compose_preview_format: types.BodyFormat = .plain,
     compose_preview_error: ?anyerror = null,
     compose_preview_builds: usize = 0,
@@ -1808,6 +1842,9 @@ const App = struct {
     bulk_save_flags: [types.Limits.message_attachments]bool = @splat(false),
     selected_files: std.ArrayList(Field) = .empty,
     selected_file_count: usize = 0,
+    clipboard_inline_usage: [types.Limits.attachments]bool = @splat(false),
+    clipboard_inline_revision: u64 = std.math.maxInt(u64),
+    clipboard_paste: ClipboardPaste = .{},
     pending_files: std.ArrayList(Field) = .empty,
     pending_file_count: usize = 0,
     pending_file_position: usize = 0,
@@ -1889,6 +1926,7 @@ const App = struct {
         if (self.label_arena) |*arena| arena.deinit();
         self.cancelAutosaveTimer();
         self.cancelJob();
+        self.clearClipboardPaste();
         self.clearMarkup();
         self.pending_page_boundary.deinit(self.allocator);
         self.page_previous_cursor.deinit(self.allocator);
@@ -3908,6 +3946,7 @@ const App = struct {
                 .updates => self.capabilities.updates,
                 .files, .save_all => self.capabilities.files,
                 .sender => self.capabilities.aliases,
+                .paste_image => self.pasteImageAvailable(),
                 .preview_browser => self.capabilities.open_urls,
                 .view_editor => self.capabilities.editor,
                 .copy_message, .select_text => self.capabilities.clipboard,
@@ -3954,6 +3993,11 @@ const App = struct {
         self.say(false, "Running Omagma {s} in this TUI · restart it after an upgrade to use the new version", .{@import("build_options").version});
     }
     fn onUxCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "paste-image")) {
+            if (self.mode == .command) self.mode = self.previous_mode;
+            try self.pasteClipboardImage();
+            return true;
+        }
         if (same(command, "resolve-draft") or same(command, "reload-draft") or same(command, "save-copy")) {
             if (self.mode == .command) self.mode = self.previous_mode;
             if (same(command, "resolve-draft")) try self.openDraftConflict() else if (same(command, "reload-draft")) try self.reloadChangedDraft() else try self.saveLocalDraftCopy();
@@ -4296,6 +4340,7 @@ const App = struct {
     }
     fn runExtendedAction(self: *App, action: action_palette.Id) !void {
         switch (action) {
+            .paste_image => try self.pasteClipboardImage(),
             .sender => try self.cycleComposeIdentity(),
             .preview_browser => if (self.compose_active and self.compose.unknown_outcome) try self.openProtectedPreview() else try self.saveDraft(.save_browser),
             .gmail_draft => try self.openGmailDraft(),
@@ -5759,6 +5804,14 @@ const App = struct {
         }
     }
     fn worker(self: *App) void {
+        if (!browser_target and self.job.kind == .clipboard_image) {
+            self.readClipboardImage() catch |err| {
+                self.job.failure = err;
+            };
+            self.job.done.store(true, .release);
+            _ = platform.postEvent(self.loop, .operation_done) catch {};
+            return;
+        }
         if (!browser_target and updateJob(self.job.kind)) {
             if (self.job.kind == .updates_load) {
                 self.job.update_snapshot = updates.init(self.io, self.job_arena.allocator(), self.environ, self.options.fixtures) catch |err| blk: {
@@ -5771,6 +5824,14 @@ const App = struct {
             self.job.done.store(true, .release);
             _ = platform.postEvent(self.loop, .operation_done) catch {};
             return;
+        }
+        if (self.options.fixtures and same(self.options.fixture_scenario, "clipboard-slow-attach") and self.clipboard_paste.active and (self.job.kind == .selection_plan or self.job.kind == .attachment_import)) {
+            self.io.sleep(.fromMilliseconds(650), .awake) catch |err| {
+                self.job.failure = err;
+                self.job.done.store(true, .release);
+                _ = platform.postEvent(self.loop, .operation_done) catch {};
+                return;
+            };
         }
         const retry_snapshot = self.options.remote_preferences and @import("backend_retry.zig").snapshotCommand(self.job_arena.allocator(), self.job.request);
         self.job.response = (if (retry_snapshot) @import("backend_retry.zig").call(self.io, self.allocator, self.job_arena.allocator(), self.client, self.job.request, 35000) else if (self.job.kind == .cached_search or self.job.kind == .recipient_cache) self.cachedSearchResponse() else if (self.job.kind == .refresh) self.refreshResponse() else self.client.callWithProgress(self.job_arena.allocator(), self.job.request, self.fetchSink())) catch |err| blk: {
@@ -5889,6 +5950,11 @@ const App = struct {
         self.stopLoadingAnimation();
         if (self.job.future) |*future| future.cancel(self.io);
         self.job.future = null;
+        if (self.job.clipboard_capture) |*captured| captured.deinit(self.io);
+        self.job.clipboard_capture = null;
+        // A background update/refresh can yield while an oversized clipboard
+        // selection waits for consent. Only its owned pipeline cancels it.
+        if (self.job.kind == .clipboard_image or self.job.kind == .clipboard_import or self.job.kind == .selection_plan or self.job.kind == .attachment_import) self.clearClipboardPaste();
         self.pending_list = false;
         self.pending_remote_list = false;
         self.pending_cached_list = false;
@@ -6025,6 +6091,9 @@ const App = struct {
     }
     fn finish(self: *App) !void {
         if (self.job.future == null or !self.job.done.load(.acquire)) return;
+        // Complete an explicit terminal text paste as one existing undo unit
+        // before the asynchronous image adds its own independent body edit.
+        if (self.paste and (self.job.kind == .clipboard_image or self.job.kind == .clipboard_import)) return;
         self.job.future.?.await(self.io);
         const completed_kind = self.job.kind;
         const contact_compose_completed = completed_kind == .compose;
@@ -6038,7 +6107,11 @@ const App = struct {
             self.job.response = null;
             _ = self.job_arena.reset(.free_all);
         };
-        if (self.job.kind == .draft_measure) {
+        if (self.job.kind == .clipboard_image) {
+            try self.finishClipboardImage();
+        } else if (self.job.kind == .clipboard_import) {
+            try self.finishClipboardImport();
+        } else if (self.job.kind == .draft_measure) {
             if (self.composeMeasureJobCurrent()) {
                 if (self.job.failure) |err| self.compose_measure.failure.set(@errorName(err)) catch {} else if (self.job.response) |response| self.apply(.draft_measure, response) catch |err| {
                     self.compose_measure.failure.set(@errorName(err)) catch {};
@@ -6201,9 +6274,19 @@ const App = struct {
                 if (completed_kind == .grace_process or completed_kind == .invitation) self.markUnknown(completed_kind);
                 if (completed_kind == .invitation_reconcile) self.invitationCheckUncertain(@errorName(err));
                 if (self.job.kind == .attachments_save) self.abortSaveAll(@errorName(err));
-                if (self.job.kind == .attachment_import) self.pending_file_count = 0;
+                if (self.job.kind == .attachment_import or self.job.kind == .selection_plan) {
+                    self.pending_file_count = 0;
+                    if (self.clipboard_paste.active) {
+                        self.clearClipboardPaste();
+                        self.mode = .compose;
+                    }
+                }
                 return err;
             };
+        }
+        if (self.clipboard_paste.active and self.job.future == null and (completed_kind == .selection_plan or completed_kind == .attachment_import) and self.oversized == null) {
+            self.clearClipboardPaste();
+            if (self.mode == .attachment) self.mode = .compose;
         }
         if (self.exit_persistence) return;
         if (self.pending_contacts and self.contactsOpen()) try self.dispatchPending();
@@ -6518,6 +6601,7 @@ const App = struct {
                 self.say(false, "Local draft discarded · email kept", .{});
             },
             .attachment_import => {
+                if (self.clipboard_paste.active and (!self.clipboardContextCurrent() or self.mode != .compose)) return;
                 const result = try self.data(self.job_arena.allocator(), response);
                 var attachment = try std.json.parseFromValueLeaky(types.Attachment, self.frame.allocator(), result, .{ .allocate = .alloc_always });
                 // The descriptor must echo the chosen delivery; Keep stays Attach.
@@ -6548,11 +6632,18 @@ const App = struct {
                     self.pending_file_count = 0;
                     self.pending_delivery = null;
                     self.mode = .compose;
-                    self.compose.insert_mode = false;
-                    try self.saveDraft(.save);
+                    if (self.clipboard_paste.active) {
+                        const name = try self.frame.allocator().dupe(u8, self.compose.attachments[self.compose.attachments.len - 1].filename);
+                        self.clearClipboardPaste();
+                        self.sayAction(false, "Attached {s} — inline paste needs a Markdown body", .{name});
+                    } else {
+                        self.compose.insert_mode = false;
+                        try self.saveDraft(.save);
+                    }
                 }
             },
             .selection_plan => try self.applySelectionPlan(response),
+            .clipboard_image, .clipboard_import => {}, // Explicit local worker; finished above.
             // Completed by finishStopProbe, never through apply.
             .stop_probe => {},
             // Completed by finishRetryPlan, never through apply.
@@ -7683,7 +7774,7 @@ const App = struct {
     }
     fn ensureComposePreview(self: *App) !void {
         const source = self.compose.fields[4].value();
-        const key: @typeInfo(@TypeOf(self.compose_preview_key)).optional.child = .{ .version = self.compose.fields[4].version, .format = self.compose.body_format, .original = if (self.compose.original != null) self.compose.original_digest else null, .include_original = self.compose.include_original, .folded_tail = self.quotedTail() != null and self.originalFolded() };
+        const key: @typeInfo(@TypeOf(self.compose_preview_key)).optional.child = .{ .version = self.compose.fields[4].version, .attachment_generation = self.compose.attachment_generation, .format = self.compose.body_format, .original = if (self.compose.original != null) self.compose.original_digest else null, .include_original = self.compose.include_original, .folded_tail = self.quotedTail() != null and self.originalFolded() };
         if (self.compose_preview_key) |previous| if (std.meta.eql(previous, key)) {
             if (self.compose_preview_error) |err| return err;
             return;
@@ -7691,6 +7782,7 @@ const App = struct {
         var digest: [32]u8 = undefined;
         var identity = std.crypto.hash.sha2.Sha256.init(.{});
         identity.update(source);
+        identity.update(std.mem.asBytes(&self.compose.attachment_generation));
         identity.update(if (self.compose.original != null) "\x00original\x00" else "\x00no-original\x00");
         identity.update(if (self.compose.include_original) "\x00included\x00" else "\x00excluded\x00");
         identity.update(if (key.folded_tail) "\x00folded\x00" else "\x00expanded\x00");
@@ -7724,7 +7816,7 @@ const App = struct {
         const backing = composeBacking(self.allocator);
         self.compose_preview_arena = .init(backing);
         const owned = self.compose_preview_arena.?.allocator();
-        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .original = self.compose.original, .includeOriginal = self.compose.include_original });
+        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .attachments = self.compose.attachments, .original = self.compose.original, .includeOriginal = self.compose.include_original });
         // Plain prepare borrows the editable field. Own it here so a later
         // field reallocation can never invalidate a retained preview.
         self.compose_preview_plain = try owned.dupe(u8, output.plain);
@@ -8598,6 +8690,10 @@ const App = struct {
         self.say(false, "Previous draft sent elsewhere; edits saved as a new draft", .{});
     }
     fn saveDraft(self: *App, kind: JobKind) !void {
+        if (self.clipboard_paste.active and self.job.future != null) {
+            self.say(false, "Please wait for the current operation", .{});
+            return;
+        }
         if (self.compose.saved_changed) return self.openDraftConflict();
         if (self.compose.gmailPaused()) {
             if (kind == .save_back) {
@@ -8759,6 +8855,10 @@ const App = struct {
     /// Composer replaced or closed: drop display-only and selection plans.
     /// The measured plan (currentPlan) stays bound to its own digest checks.
     fn invalidateComposerState(self: *App) void {
+        self.clipboard_inline_revision = std.math.maxInt(u64);
+        if (self.clipboard_paste.active) {
+            if (self.job.future != null and (self.job.kind == .clipboard_image or self.job.kind == .clipboard_import or self.job.kind == .selection_plan or self.job.kind == .attachment_import)) self.cancelJob() else self.clearClipboardPaste();
+        }
         self.composer_plan = .{};
         self.composer_plan_requested = std.math.maxInt(u64);
         self.composer_plan_revision = std.math.maxInt(u64);
@@ -8815,7 +8915,7 @@ const App = struct {
     }
     fn uploadAllAvailable(self: *const App) bool {
         if (!self.capabilities.attachments or self.compose.unknown_outcome or self.compose.gmailPaused()) return false;
-        for (self.compose.attachments) |item| if (!delivery_view.isDrive(item.delivery)) return true;
+        for (self.compose.attachments) |item| if (!markdown_mail.isClipboardInline(item) and !delivery_view.isDrive(item.delivery)) return true;
         return false;
     }
     fn connectDriveAvailable(self: *const App) bool {
@@ -8824,11 +8924,22 @@ const App = struct {
     }
     fn composeSecondaryAvailable(self: *const App, control: usize) bool {
         if (control == 0) return self.uploadAllAvailable();
-        if (control <= self.compose.attachments.len) return self.capabilities.attachments;
+        if (control > 0 and control <= self.compose.attachments.len) return self.capabilities.attachments and !markdown_mail.isClipboardInline(self.compose.attachments[control - 1]);
         return control == self.compose.attachments.len + 1 and self.connectDriveAvailable();
+    }
+    fn inlineTotalWarning(self: *App) !?[]const u8 {
+        var bytes: u64 = 0;
+        for (self.compose.attachments, 0..) |file, index| {
+            if (markdown_mail.isClipboardInline(file) and try self.clipboardInlineUsed(index)) bytes += file.size;
+        }
+        // This is the exact decoded-image subtotal. Canonical MIME bytes and
+        // mixed bundles remain governed by the backend's 35 MiB wire plan.
+        if (bytes <= types.Limits.attachment_bytes) return null;
+        return try std.fmt.allocPrint(self.frame.allocator(), "Inline images total {s} > {s} — remove a marker, or save the image and attach with A.", .{ try delivery_view.limit(self.frame.allocator(), bytes), try delivery_view.limit(self.frame.allocator(), types.Limits.attachment_bytes) });
     }
     fn deliveryWarning(self: *App) !?[]const u8 {
         if (self.compose.attachments.len == 0) return null;
+        if (try self.inlineTotalWarning()) |warning| return warning;
         const plan = self.displayPlan() orelse return if (self.deliveryRequested() and self.composeMeasureCurrent()) "⚠ Drive plan unavailable · review again before Send." else null;
         const blocker = plan.first() orelse return null;
         return try delivery_view.warning(self.frame.allocator(), plan, blocker, self.account());
@@ -8836,6 +8947,7 @@ const App = struct {
     fn setAttachmentDeliveries(self: *App, index: ?usize, delivery: ?types.AttachmentDelivery) !void {
         const changed = try self.frame.allocator().dupe(types.Attachment, self.compose.attachments);
         for (changed, 0..) |*item, position| {
+            if (markdown_mail.isClipboardInline(item.*)) continue;
             if (index) |only| {
                 if (only == position) item.delivery = delivery_view.next(item.delivery);
             } else item.delivery = delivery;
@@ -8847,6 +8959,7 @@ const App = struct {
     fn cycleAttachmentDelivery(self: *App, index: usize) !void {
         if (!self.canEditAttachments()) return;
         if (index >= self.compose.attachments.len) return error.InvalidAttachment;
+        if (markdown_mail.isClipboardInline(self.compose.attachments[index])) return;
         try self.setAttachmentDeliveries(index, null);
         self.say(false, "{s} · {s} · nothing is uploaded until you send", .{ self.compose.attachments[index].filename, delivery_view.label(self.compose.attachments[index].delivery, .unknown) });
     }
@@ -9019,7 +9132,8 @@ const App = struct {
             const raw = if (confirm) self.pending_files.items[index].value() else self.selected_files.items[index].value();
             path.* = try Io.Dir.cwd().realPathFileAlloc(self.io, raw, sa);
         }
-        const draft = try self.compose.draft(sa);
+        var recovery_fields: [5][]const u8 = undefined;
+        const draft = if (self.clipboard_paste.active) self.compose.recovery(&recovery_fields) else try self.compose.draft(sa);
         // A summary refresh never displaces a confirming plan.
         if (!confirm and self.job.future != null and self.job.kind == .selection_plan and self.selection_confirm) return;
         self.preemptReadOnly();
@@ -9045,7 +9159,15 @@ const App = struct {
         self.selection_confirm = false;
         const count = if (confirm) self.pending_file_count else self.selected_file_count;
         // A plan for another selection, draft revision or mode is stale.
-        if (self.mode != .attachment or !self.compose_active or self.compose.revision != self.selection_plan_revision or count != self.selection_plan_count) return;
+        const clipboard_selection = self.clipboard_paste.active and !self.clipboard_paste.inline_body and self.mode == .compose;
+        if ((self.mode != .attachment and !clipboard_selection) or !self.compose_active or count != self.selection_plan_count) return;
+        if (clipboard_selection and !self.clipboardContextCurrent()) return;
+        if (self.compose.revision != self.selection_plan_revision) {
+            // Typing changes the complete MIME estimate. Re-plan this same
+            // captured file against current fields, preserving every edit.
+            if (clipboard_selection) try self.requestSelectionPlan(confirm, !self.selection_plan_attach);
+            return;
+        }
         delivery_view.parseSelection(&self.selection_plan, result, self.compose.attachments.len, count) catch |err| {
             if (confirm) {
                 self.pending_file_count = 0;
@@ -9063,6 +9185,7 @@ const App = struct {
             // Ask for the Auto split before showing the choices.
             if (self.selection_plan_attach) return self.requestSelectionPlan(true, true);
             self.oversized = .{ .count = count, .bytes = self.selection_plan.selected_attached_bytes + self.selection_plan.selected_drive_bytes };
+            if (clipboard_selection) self.mode = .attachment;
             return;
         }
         try self.importNextFile();
@@ -9130,6 +9253,15 @@ const App = struct {
         self.handleFileDialogKey(key, field, receiving) catch |err| self.fileDialogFailure(err);
     }
     fn handleFileDialogKey(self: *App, key: Key, field: *Field, receiving: bool) !void {
+        if (self.clipboard_paste.active and !receiving) {
+            if (self.oversized != null) return self.onOversizedKey(key);
+            if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
+                self.cancelJob();
+                self.pending_file_count = 0;
+                self.mode = .compose;
+            }
+            return;
+        }
         if (self.job.future != null and (self.job.kind == .attachment_import or self.job.kind == .attachment_save)) return;
         if (!receiving and self.oversized != null) return self.onOversizedKey(key);
         if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
@@ -9274,6 +9406,10 @@ const App = struct {
     fn drawFileDialog(self: *App, win: vaxis.Window) !void {
         if (browser_target) return;
         if (!self.fileDialogActive()) return;
+        if (self.clipboard_paste.active and self.mode == .attachment) {
+            if (self.oversized != null) try self.oversizedDraw(win);
+            return;
+        }
         self.mouse_hits.clear();
         const width = @min(win.width -| 2, 92);
         const height = fileDialogHeight(self.file_browser.entries.len, win.height -| 2);
@@ -9566,6 +9702,13 @@ const App = struct {
     fn detachAttachment(self: *App, index: usize) !void {
         if (!self.canEditAttachments()) return;
         if (index >= self.compose.attachments.len) return error.InvalidAttachment;
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        const detached = self.compose.attachments[index];
+        const inline_part = markdown_mail.isClipboardInline(detached);
+        const name = try scratch.allocator().dupe(u8, detached.filename);
+        const removed = if (inline_part and self.compose.body_format == .markdown) try markdown_mail.removeImageMarkers(scratch.allocator(), self.compose.fields[4].value(), detached.contentId.?, self.compose.fields[4].cursor) else null;
+        if (removed) |changed| if (changed.count > 0) try self.compose.fields[4].recordUndo(self.allocator, changed.source.len);
         const retained = try self.frame.allocator().alloc(types.Attachment, self.compose.attachments.len - 1);
         var count: usize = 0;
         for (self.compose.attachments, 0..) |item, attachment_index| if (attachment_index != index) {
@@ -9573,6 +9716,11 @@ const App = struct {
             count += 1;
         };
         try self.compose.replaceAttachments(self.allocator, retained[0..count]);
+        if (removed) |changed| if (changed.count > 0) {
+            const field = &self.compose.fields[4];
+            try field.assign(self.allocator, changed.source);
+            field.cursor = changed.cursor;
+        };
         if (self.compose_source_mode == .attached) {
             var has_original = false;
             for (self.compose.attachments) |attachment| has_original = has_original or originalAttachment(attachment);
@@ -9581,7 +9729,134 @@ const App = struct {
         self.compose.attachment_scroll = @min(self.compose.attachment_scroll, count -| self.compose.attachment_height);
         if (self.compose.attachment_focus) self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
         try self.composerChanged();
-        self.say(false, "Attachment removed · local draft · Ctrl+S Review", .{});
+        if (inline_part) self.say(false, "Detached {s}; removed {d} inline marker(s)", .{ name, if (removed) |changed| changed.count else @as(usize, 0) }) else self.say(false, "Attachment removed · local draft · Ctrl+S Review", .{});
+    }
+    fn clearClipboardPaste(self: *App) void {
+        if (self.clipboard_paste.capture) |*captured| captured.deinit(self.io);
+        self.clipboard_paste = .{};
+    }
+    fn pasteImageAvailable(self: *const App) bool {
+        return !browser_target and self.capabilities.files and self.capabilities.attachments and self.compose_active and !self.compose_preview_full and !self.calendar.open and !self.update_open and !self.grace_active and !self.grace_recovery and !self.compose.gmailPaused() and !self.compose.unknown_outcome and !self.sendProgressActive() and !self.sendFailureVisible() and self.canEditAttachments();
+    }
+    fn canPasteImage(self: *const App) bool {
+        return self.pasteImageAvailable() and self.mode == .compose and !self.paste and self.ux_overlay == .none and self.reader_overlay == .none;
+    }
+    fn composeWorkerAllowsInput(self: *const App) bool {
+        return self.job.future == null or readOnlyJob(self.job.kind) or (self.clipboard_paste.active and self.job.kind == .attachment_import);
+    }
+    fn clipboardContextCurrent(self: *const App) bool {
+        const intent = &self.clipboard_paste;
+        if (!intent.active or !self.compose_active or intent.account != self.account_index or intent.generation != self.generation or intent.picker_generation != self.file_selection_generation or !same(intent.draft.slice(), self.compose.id.value()) or self.compose.gmailPaused() or self.compose.unknown_outcome or self.grace_active or self.grace_recovery) return false;
+        if (intent.inline_body) {
+            const body = self.compose.fields[4].value();
+            if (self.compose.body_format != .markdown or body.len < intent.cursor) return false;
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(body[0..intent.cursor], &digest, .{});
+            if (!std.mem.eql(u8, &digest, &intent.prefix_hash)) return false;
+        }
+        return true;
+    }
+    fn pasteClipboardImage(self: *App) !void {
+        // A second key never cancels/restarts the owned capture. Text paste is
+        // handled before this path; no clipboard read occurs from pasted ^V.
+        if (self.clipboard_paste.active or !self.canPasteImage()) return;
+        if (self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
+        if (if (self.compose.include_original) self.compose.original else null) |original| try types.Limits.validateComposeParts(self.compose.attachments.len + 1, original.resources.len);
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        self.clipboard_paste = .{ .active = true, .inline_body = self.compose.selected == 4 and !self.compose.attachment_focus and self.compose.body_format == .markdown, .cursor = self.compose.fields[4].cursor, .generation = self.generation, .picker_generation = self.file_selection_generation, .account = self.account_index };
+        try self.clipboard_paste.draft.set(self.compose.id.value());
+        std.crypto.hash.sha2.Sha256.hash(self.compose.fields[4].value()[0..self.clipboard_paste.cursor], &self.clipboard_paste.prefix_hash, .{});
+        errdefer self.clearClipboardPaste();
+        try self.start(.clipboard_image, .{});
+    }
+    fn readClipboardImage(self: *App) !void {
+        const scenario = self.options.fixture_scenario;
+        const source: clipboard_image.Source = if (self.options.fixtures) .{ .fixture = if (same(scenario, "clipboard-slow-attach")) "png" else if (std.mem.startsWith(u8, scenario, "clipboard-")) scenario[10..] else "png" } else .desktop;
+        self.job.clipboard_capture = try clipboard_image.capture(self.io, self.allocator, self.environ, source);
+    }
+    fn clipboardFailure(self: *App, err: anyerror) !void {
+        switch (err) {
+            error.NoClipboardImage => self.sayAction(false, "No image on clipboard. Use your terminal's paste for text.", .{}),
+            error.ClipboardToolMissing => self.sayAction(true, "Image paste needs wl-paste (wl-clipboard).", .{}),
+            error.ClipboardUnavailable => self.sayAction(true, "Image paste unavailable here: needs a local Wayland or macOS clipboard.", .{}),
+            error.ClipboardImageTooLarge => self.sayAction(true, "Clipboard image exceeds 25 MiB. Save it and attach with A.", .{}),
+            error.ClipboardDimensionsTooLarge => self.sayAction(true, "Clipboard image exceeds 64 megapixels or 32768 pixels per edge. Save it and attach with A.", .{}),
+            error.Canceled => {},
+            else => self.sayAction(true, "Couldn't read clipboard image.", .{}),
+        }
+    }
+    fn noticeClipboardStale(self: *App) void {
+        const intent = &self.clipboard_paste;
+        if (intent.active and intent.inline_body and self.mode == .compose and self.compose_active and self.compose.body_format == .markdown and intent.account == self.account_index and intent.generation == self.generation and intent.picker_generation == self.file_selection_generation and same(intent.draft.slice(), self.compose.id.value()) and !self.compose.unknown_outcome and !self.compose.gmailPaused()) self.sayAction(false, "Image paste canceled: text before it changed. Paste again.", .{});
+    }
+    fn finishClipboardImage(self: *App) !void {
+        defer {
+            if (self.job.clipboard_capture) |*captured| captured.deinit(self.io);
+            self.job.clipboard_capture = null;
+        }
+        if (!self.clipboardContextCurrent() or self.mode != .compose) {
+            self.noticeClipboardStale();
+            self.clearClipboardPaste();
+            return;
+        }
+        if (self.job.failure) |err| {
+            try self.clipboardFailure(err);
+            self.clearClipboardPaste();
+            return;
+        }
+        self.clipboard_paste.capture = self.job.clipboard_capture orelse return error.ClipboardReadFailed;
+        self.job.clipboard_capture = null;
+        errdefer self.clearClipboardPaste();
+        const captured = &self.clipboard_paste.capture.?;
+        if (self.clipboard_paste.inline_body) {
+            // Local immutable blob import uses the same quota/ownership path
+            // as A. The pinned inline policy cannot select Drive.
+            try self.start(.clipboard_import, .{ .cmd = "attachment.import", .account = self.account(), .path = captured.path, .mimeType = "image/png", .delivery = "attach" });
+        } else {
+            // Reuse the existing batch planner and oversized consent. The
+            // browser itself stays hidden for this one explicit clipboard file.
+            try self.attachFile(captured.path);
+        }
+    }
+    fn finishClipboardImport(self: *App) !void {
+        defer self.clearClipboardPaste();
+        if (!self.clipboardContextCurrent() or self.mode != .compose) {
+            self.noticeClipboardStale();
+            return;
+        }
+        if (self.job.failure) |err| return self.clipboardFailure(err);
+        const response = self.job.response orelse return error.ClipboardReadFailed;
+        const result = try self.data(self.job_arena.allocator(), response);
+        var attachment = try std.json.parseFromValueLeaky(types.Attachment, self.frame.allocator(), result, .{ .allocate = .alloc_always });
+        const captured = &self.clipboard_paste.capture.?;
+        if (attachment.size != captured.size or !same(attachment.mimeType, "image/png") or !same(attachment.filename, std.fs.path.basename(captured.path)) or attachment.blobId == null) return error.InvalidAttachment;
+        var nonce: [16]u8 = undefined;
+        try self.io.randomSecure(&nonce);
+        attachment.contentId = try std.fmt.allocPrint(self.frame.allocator(), "clipboard-{s}@omagma.invalid", .{std.fmt.bytesToHex(nonce, .lower)});
+        attachment.disposition = "inline";
+        attachment.delivery = .attach;
+        try self.insertClipboardInline(attachment, self.clipboard_paste.cursor);
+        self.sayAction(false, "Pasted {s} inline ({s})", .{ attachment.filename, try attachmentSizeLabel(self.frame.allocator(), attachment.size) });
+    }
+    fn insertClipboardInline(self: *App, attachment: types.Attachment, anchor: usize) !void {
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const field = &self.compose.fields[4];
+        const inserted = try inlineInsertion(a, field.value(), anchor, attachment.filename, attachment.contentId.?);
+        if (inserted.source.len > types.Limits.compose_body_bytes) return error.BodyTooLarge;
+        const combined = try a.alloc(types.Attachment, self.compose.attachments.len + 1);
+        @memcpy(combined[0..self.compose.attachments.len], self.compose.attachments);
+        combined[self.compose.attachments.len] = attachment;
+        try types.Limits.validateComposeParts(combined.len, if (self.compose.include_original) (if (self.compose.original) |original| original.resources.len else 0) else 0);
+        const old_cursor = field.cursor;
+        try field.bytes.ensureTotalCapacity(field.owner(self.allocator), inserted.source.len);
+        try field.recordUndo(self.allocator, inserted.source.len);
+        try self.compose.replaceAttachments(self.allocator, combined);
+        try field.assign(self.allocator, inserted.source);
+        field.cursor = if (old_cursor >= anchor) old_cursor + inserted.added else old_cursor;
+        try self.composerChanged();
     }
     fn attachFile(self: *App, path: []const u8) !void {
         if (browser_target) return error.FileAccessUnavailable;
@@ -9607,8 +9882,13 @@ const App = struct {
         self.oversized = null;
         if (choice >= 3) {
             self.pending_file_count = 0;
+            if (self.clipboard_paste.active) {
+                self.clearClipboardPaste();
+                self.mode = .compose;
+            }
             return;
         }
+        if (self.clipboard_paste.active) self.mode = .compose;
         self.pending_delivery = switch (choice) {
             0 => .auto,
             1 => .drive,
@@ -9637,7 +9917,9 @@ const App = struct {
         if (self.pending_file_position == 0) self.clearPendingImports();
         self.preemptReadOnly();
         // Import pins local bytes only; Drive work waits for a reviewed send.
-        if (self.pending_delivery) |delivery| {
+        if (self.clipboard_paste.active) {
+            try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value(), .mimeType = "image/png", .delivery = if (self.pending_delivery) |delivery| @tagName(delivery) else "attach" });
+        } else if (self.pending_delivery) |delivery| {
             try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value(), .delivery = @tagName(delivery) });
         } else try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value() });
         self.say(false, "Importing attachment {d}/{d}…", .{ self.pending_file_position + 1, self.pending_file_count });
@@ -10569,7 +10851,7 @@ const App = struct {
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
             .calendar_meet_pending, .calendar_meet_review, .calendar_meet_reconcile, .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
-            .draft_measure, .composer_plan, .selection_plan, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
+            .clipboard_image, .clipboard_import, .draft_measure, .composer_plan, .selection_plan, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
     }
@@ -11102,12 +11384,28 @@ const App = struct {
             return;
         }
         if (self.mode == .review or self.mode == .trash_confirm or self.mode == .invitation) {
-            if (wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+            if (wheel) |down| {
+                if (self.mode == .review and mouse.col >= 0 and mouse.row >= 0) {
+                    const x: u16 = @intCast(mouse.col);
+                    const y: u16 = @intCast(mouse.row);
+                    // Inline content controls can overlap the viewport hit.
+                    // A wheel gesture still scrolls it without activating one.
+                    for (self.mouse_hits.areas[0..self.mouse_hits.count]) |hit| {
+                        const rect = hit.rect;
+                        if (hit.kind != .compose_preview_scroll or x < rect.x or y < rect.y or x - rect.x >= rect.width or y - rect.y >= rect.height) continue;
+                        self.compose_preview_scroll = if (down)
+                            @min(self.compose_preview_scroll +| 3, readerEnd(self.compose_preview_lines, self.compose_preview_height))
+                        else
+                            self.compose_preview_scroll -| 3;
+                        break;
+                    }
+                }
+            } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
                 if (hit.kind == .dialog_action) {
                     self.dialog_focus.index = hit.index;
                     try self.onConfirmationKey(.{ .codepoint = Key.enter });
                 }
-            };
+            }
             return;
         }
         // Modal hit maps contain their own explicit controls only; clicking
@@ -11382,7 +11680,7 @@ const App = struct {
     fn onComposeKey(self: *App, key: Key) !void {
         if (!self.compose.insert_mode and key.matches('z', .{})) return self.toggleOriginalFold();
         if (!self.compose.insert_mode and (key.matches('Q', .{}) or key.matches('q', .{ .shift = true }))) return self.setOriginalIncluded(!self.compose.include_original, true);
-        if (self.job.future != null and !readOnlyJob(self.job.kind)) {
+        if (!self.composeWorkerAllowsInput()) {
             if (key.matches('q', .{}) or key.matches(Key.escape, .{})) self.say(false, "Draft operation pending · wait for its result", .{});
             return;
         }
@@ -11745,6 +12043,10 @@ const App = struct {
             }
             return;
         }
+        if (!self.paste and key.matches('v', .{ .ctrl = true })) {
+            try self.pasteClipboardImage();
+            return;
+        }
         if (!self.paste and self.mode == .browse and key.matches('p', .{ .ctrl = true })) return self.openActions();
         if (!self.paste and self.mode == .browse and self.reader_find_active and !self.label_picker and self.reader_overlay == .none and !self.compose_choice) {
             if (key.matches(Key.escape, .{})) {
@@ -11780,7 +12082,7 @@ const App = struct {
             if (!(key.matches('q', .{}) or key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true }) or key.matches('q', .{ .ctrl = true }))) return err;
         };
         if (self.paste) {
-            const changing = self.job.future != null and !readOnlyJob(self.job.kind);
+            const changing = !self.composeWorkerAllowsInput();
             if ((self.mode == .compose and (changing or self.compose.unknown_outcome or self.compose.gmailPaused())) or (self.mode == .contact_edit and changing)) {
                 self.say(true, "Paste not applied while saving or protecting an uncertain draft", .{});
                 return;
@@ -13686,6 +13988,22 @@ const App = struct {
         }
         return row;
     }
+    fn clipboardInlineUsed(self: *App, index: usize) !bool {
+        if (index >= self.compose.attachments.len or !markdown_mail.isClipboardInline(self.compose.attachments[index])) return false;
+        if (self.clipboard_inline_revision != self.compose.revision) {
+            var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+            defer scratch.deinit();
+            const used = try markdown_mail.inlineUsage(scratch.allocator(), .{ .bodyFormat = self.compose.body_format, .bodyText = self.compose.fields[4].value(), .attachments = self.compose.attachments });
+            @memset(&self.clipboard_inline_usage, false);
+            @memcpy(self.clipboard_inline_usage[0..used.len], used);
+            self.clipboard_inline_revision = self.compose.revision;
+        }
+        return self.clipboard_inline_usage[index];
+    }
+    fn clipboardInlineSuffix(self: *App, index: usize) ![]const u8 {
+        if (!markdown_mail.isClipboardInline(self.compose.attachments[index])) return "";
+        return if (try self.clipboardInlineUsed(index)) " · inline" else " · inline · not in body, won't be sent";
+    }
     fn composeAttachmentsDraw(self: *App, win: vaxis.Window, row: usize, rows_available: usize) !void {
         if (!self.capabilities.attachments) {
             try self.line(win, row, "Attachments unavailable · Ctrl+S Review · a Contacts", .muted);
@@ -13737,7 +14055,8 @@ const App = struct {
         const end = @min(self.compose.attachment_scroll + visible, self.compose.attachments.len);
         for (self.compose.attachments[self.compose.attachment_scroll..end], self.compose.attachment_scroll..) |attachment, index| {
             const resolved_row: delivery_view.Resolved = if (plan) |current| current.resolution(index) else .unknown;
-            const badge = if (plan) |current| current.badge(index) else "";
+            const inline_part = markdown_mail.isClipboardInline(attachment);
+            const badge = if (inline_part) try self.clipboardInlineSuffix(index) else if (plan) |current| current.badge(index) else "";
             const marked_large = plan != null and plan.?.sizeBlocked() and delivery_view.isAttach(attachment.delivery) and resolved_row == .attach;
             if (per_file == 2) {
                 try self.composeAttachmentPairDraw(viewport, 1 + (index - self.compose.attachment_scroll) * 2, attachment, index, resolved_row, if (marked_large) " · too large" else badge, can_edit);
@@ -13751,7 +14070,7 @@ const App = struct {
             const remove_x = file_row.width - remove_width;
             // The fixed-width delivery button keeps every [x] aligned.
             const cells = if (narrow) delivery_view.narrow_button_cells else delivery_view.button_cells;
-            const delivery_width: u16 = if (!browser_target and remove_x > cells + 12) cells else 0;
+            const delivery_width: u16 = if (!browser_target and !inline_part and remove_x > cells + 12) cells else 0;
             const delivery_x = remove_x -| delivery_width -| @as(u16, if (delivery_width > 0) 1 else 0);
             const resolved: delivery_view.Resolved = if (plan) |current| current.resolution(index) else .unknown;
             const size = try attachmentSizeLabel(self.frame.allocator(), attachment.size);
@@ -13800,11 +14119,14 @@ const App = struct {
         try self.line(pair.child(.{ .width = name_width, .height = 1 }), 0, try std.fmt.allocPrint(a, "{s}{s}{s}", .{ label, name, suffix }), if (std.mem.eql(u8, suffix, " · too large")) .warning else .text);
         try self.line(pair.child(.{ .x_off = pair.width -| size_width, .width = size_width, .height = 1 }), 0, size, .muted);
         const indent: u16 = @min(4, pair.width);
-        const button_width = delivery_view.narrow_button_cells;
+        const inline_part = markdown_mail.isClipboardInline(attachment);
+        const button_width: u16 = if (inline_part) 0 else delivery_view.narrow_button_cells;
         if (pair.width < indent + button_width + 5) return;
         const delivery_button = pair.child(.{ .x_off = indent, .y_off = 1, .width = button_width, .height = 1 });
-        try self.line(delivery_button, 0, delivery_view.button(attachment.delivery, resolved, true), if (!can_edit) .muted else if (focused and self.compose_secondary) .selected else .accent);
-        if (can_edit) self.mouseArea(delivery_button, .compose_attachment_select, delivery_hit_base + index);
+        if (!inline_part) {
+            try self.line(delivery_button, 0, delivery_view.button(attachment.delivery, resolved, true), if (!can_edit) .muted else if (focused and self.compose_secondary) .selected else .accent);
+            if (can_edit) self.mouseArea(delivery_button, .compose_attachment_select, delivery_hit_base + index);
+        }
         const remove_button = pair.child(.{ .x_off = indent + button_width + 2, .y_off = 1, .width = 3, .height = 1 });
         try self.line(remove_button, 0, "[x]", if (!can_edit) .muted else if (focused and !self.compose_secondary) .selected else .accent);
         if (can_edit) self.mouseArea(remove_button, .compose_attachment_remove, index);
@@ -13819,10 +14141,15 @@ const App = struct {
         for (self.compose.attachments, 0..) |_, index| {
             if (plan.resolution(index) == .drive) drive_files += 1;
         }
-        const attached_files = self.compose.attachments.len - drive_files;
+        var attached_files: usize = 0;
+        for (self.compose.attachments, 0..) |attachment, index| {
+            if (markdown_mail.isClipboardInline(attachment) and !try self.clipboardInlineUsed(index)) continue;
+            if (plan.resolution(index) != .drive) attached_files += 1;
+        }
         rows = try self.flowTone(content, try std.fmt.allocPrint(a, "Attached {d} · {s} of {s}\n", .{ attached_files, try delivery_view.size(a, plan.attached_bytes), try delivery_view.limit(a, plan.decoded_limit) }), self.compose_preview_scroll, rows, if (plan.sizeBlocked()) .warning else .muted);
         for (self.compose.attachments, 0..) |attachment, index| if (plan.resolution(index) != .drive) {
-            rows = try self.flow(content, try std.fmt.allocPrint(a, "  Attachment {d}: {s} ({s}) · {s}\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(a, attachment.size), delivery_view.label(attachment.delivery, plan.resolution(index)) }), self.compose_preview_scroll, rows);
+            if (markdown_mail.isClipboardInline(attachment) and !try self.clipboardInlineUsed(index)) continue;
+            rows = try self.flow(content, try std.fmt.allocPrint(a, "  Attachment {d}: {s} ({s}) · {s}\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(a, attachment.size), if (markdown_mail.isClipboardInline(attachment)) @as([]const u8, "inline") else delivery_view.label(attachment.delivery, plan.resolution(index)) }), self.compose_preview_scroll, rows);
         };
         if (drive_files == 0) return self.flow(content, "\n", self.compose_preview_scroll, rows);
         rows = try self.flowTone(content, try std.fmt.allocPrint(a, "From Drive {d} · uploaded to {s}'s Drive after the countdown\n", .{ drive_files, self.account() }), self.compose_preview_scroll, rows, .muted);
@@ -13858,10 +14185,13 @@ const App = struct {
             return self.flowTone(content, if (pending) "Drive plan: calculating… · Send waits for it.\n" else "⚠ Drive plan unavailable · review again before Send.\n", self.compose_preview_scroll, rows, if (pending) .muted else .warning);
         };
         var warnings: std.ArrayList(u8) = .empty;
+        const inline_warning = try self.inlineTotalWarning();
+        if (inline_warning) |warning| try warnings.appendSlice(a, warning);
         var bit: u4 = 0;
         while (bit < 8) : (bit += 1) {
             const blocker: delivery_view.Blocker = @fromBackingInt(@intCast(@as(u3, @intCast(bit))));
             if (!plan.has(blocker)) continue;
+            if (inline_warning != null and (blocker == .attachments_too_large or blocker == .message_too_large)) continue;
             if (warnings.items.len > 0) try warnings.append(a, '\n');
             try warnings.appendSlice(a, try delivery_view.warning(a, plan, blocker, self.account()));
         }
@@ -13968,6 +14298,7 @@ const App = struct {
             }
             const inner = self.panel(win, 0, win.width, if (delivery_blocked) " Can't send yet " else " Review send · explicit confirmation ", true);
             const content = inner.child(.{ .height = inner.height -| @as(u16, if (self.canFoldOriginal()) 3 else 2) });
+            self.mouseArea(content, .compose_preview_scroll, 0);
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null and self.compose.include_original) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             // A blocked review leads with its reasons and Connect Drive's
             // command, so neither waits below the fold behind the message.
@@ -14204,7 +14535,7 @@ const App = struct {
             .contacts => if (!self.capabilities.contacts_write) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
+            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else if (self.canPasteImage()) " INSERT · ^V image · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help" else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
@@ -14313,12 +14644,12 @@ const App = struct {
         if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview j/k Scroll q Back" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back";
         if (self.mode == .compose and self.compose.attachment_focus) return if (width < 90) " Tab Buttons · Enter Activate · x Remove · A Add · Esc Body" else self.contextHints();
         if (self.mode == .compose and !self.compose.insert_mode and !self.compose.unknown_outcome) {
-            if (width < 50) return "e Editor Ctrl+S Review ? Help";
-            if (width < 80) return " e Editor  A Files  Ctrl+S Review  q Back  ? Help";
-            if (width < 100) return " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · q Back · ? Help";
-            if (width < 145) return " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
+            if (width < 50) return if (self.canPasteImage()) "^V image Ctrl+S Review ? Help" else "e Editor Ctrl+S Review ? Help";
+            if (width < 80) return if (self.canPasteImage()) " ^V image  A Files  Ctrl+S Review  q Back  ? Help" else " e Editor  A Files  Ctrl+S Review  q Back  ? Help";
+            if (width < 100) return if (self.canPasteImage()) " i Edit · ^V image · A Files · p Preview · Ctrl+S Review · q Back · ? Help" else " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · q Back · ? Help";
+            if (width < 145) return if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back" else " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
         }
-        if (self.mode == .compose and self.compose.insert_mode and width < 80) return " INSERT · Esc Normal · Tab Field · q is text";
+        if (self.mode == .compose and self.compose.insert_mode and width < 80) return if (self.canPasteImage()) " INSERT · ^V image · Esc Normal · Tab Field · q is text" else " INSERT · Esc Normal · Tab Field · q is text";
         return self.contextHints();
     }
     fn drawThemePicker(self: *App, win: vaxis.Window) !void {
@@ -14787,12 +15118,24 @@ const App = struct {
         try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Enter Activate · j/k Scroll · Esc Back", inner.width), .muted);
     }
     fn resize(self: *App, original: vaxis.Winsize) !void {
+        if (!browser_target) if (self.physical_size) |previous| if (std.meta.eql(previous, original)) return;
         self.reader_drag_anchor = null;
         self.reader_dragging = false;
         var size = original;
         size.cols = @min(@max(size.cols, 1), max_cols);
         size.rows = @min(@max(size.rows, 1), max_rows);
         try self.vx.resize(self.allocator, self.tty.writer(), size);
+        self.physical_size = original;
+    }
+    fn syncNativeSize(self: *App) !bool {
+        if (browser_target) return false;
+        const reported = self.loop.takeWinsize();
+        const actual = self.tty.getWinsize() catch null;
+        const newest = input_loop.newestWinsize(reported, actual, self.physical_size);
+        const size = newest orelse return false;
+        if (self.physical_size) |previous| if (std.meta.eql(previous, size)) return false;
+        try self.resize(size);
+        return true;
     }
     fn meetingReadJob(kind: JobKind) bool {
         return kind == .meeting_calendars or kind == .meeting_agenda;
@@ -19047,6 +19390,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         app.adoptBackgroundCache() catch {};
         try app.dispatchPending();
         _ = app.pollTheme();
+        _ = try app.syncNativeSize();
         try app.draw();
         try vx.render(tty.writer());
         try tty.writer().flush();
@@ -19055,6 +19399,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
                 error.Closed, error.EndOfStream => break :main_loop,
                 else => return err,
             };
+            if (received == .tty_resize and !try app.syncNativeSize()) continue;
             if (received == .theme_tick) {
                 app.theme_tick_pending.store(false, .release);
                 // An unchanged desktop theme needs one bounded stat check,
@@ -19063,7 +19408,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
                 const update_due = app.scheduleUpdateCheck();
                 const meeting_due = app.meetingTick();
                 const calendar_due = app.calendarClockTickAt(Io.Timestamp.now(io, .real).toMilliseconds());
-                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due and !meeting_due and !calendar_due) continue;
+                const resize_due = try app.syncNativeSize();
+                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due and !meeting_due and !calendar_due and !resize_due) continue;
             }
             break :next_input received;
         };
@@ -19071,6 +19417,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
             .key_press => |key| app.onKey(key) catch |err| app.sayError(@errorName(err)),
             .mouse => |mouse| app.onMouse(mouse) catch |err| app.sayError(@errorName(err)),
             .winsize => |size| try app.resize(size),
+            .tty_resize => {},
             .paste_start => app.pasteStart(),
             .paste_end => app.pasteEnd(),
             .operation_done => {},
@@ -23086,6 +23433,50 @@ test "local UI: help search reveals and highlights actual wrapped matches after 
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "terminal resize: physical cap pixel changes and duplicate geometry retain the active editor" {
+    const a = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    var vx = try vaxis.init(std.testing.io, a, &env, .{});
+    var buffer: [1024]u8 = undefined;
+    var tty = try vaxis.Tty.init(std.testing.io, &buffer);
+    defer tty.deinit();
+    defer vx.deinit(a, tty.writer());
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.vx = &vx;
+    app.tty = &tty;
+    app.mode = .review;
+    app.focus = .reader;
+    app.compose_preview_scroll = 7;
+    app.compose.selected = 4;
+    try app.compose.fields[4].set(a, "Keep this unsent draft and caret");
+    app.compose.fields[4].cursor = 9;
+    var physical: vaxis.Winsize = .{ .cols = 251, .rows = 100, .x_pixel = 2510, .y_pixel = 2000 };
+    try app.resize(physical);
+    try std.testing.expectEqual(@as(u16, max_cols), vx.screen.width);
+    try std.testing.expectEqual(@as(u16, max_rows), vx.screen.height);
+    app.reader_dragging = true;
+    try app.resize(physical);
+    try std.testing.expect(app.reader_dragging);
+    physical.cols = 270;
+    try app.resize(physical);
+    try std.testing.expect(!app.reader_dragging);
+    app.reader_dragging = true;
+    physical.x_pixel += 1;
+    try app.resize(physical);
+    try std.testing.expect(!app.reader_dragging);
+    try std.testing.expectEqualDeep(physical, app.physical_size.?);
+    try std.testing.expectEqual(Mode.review, app.mode);
+    try std.testing.expectEqual(layout.Focus.reader, app.focus);
+    try std.testing.expectEqual(@as(usize, 7), app.compose_preview_scroll);
+    try std.testing.expectEqual(@as(usize, 4), app.compose.selected);
+    try std.testing.expectEqualStrings("Keep this unsent draft and caret", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 9), app.compose.fields[4].cursor);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
 test "reader tail remains visible in the resize frame after reduced wrapping" {
     const allocator = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -24750,6 +25141,107 @@ test "recipient preview: a fresh composer renders its draft and not unrelated in
     try app.onComposeKey(.{ .codepoint = 'u', .mods = .{ .ctrl = true } });
     try std.testing.expectEqual(@as(usize, 0), app.compose_preview_scroll);
     try std.testing.expectEqual(@as(usize, 0), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "send review wheel: only content scrolls within bounds without activating controls" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.mode = .review;
+    app.compose_active = true;
+    app.compose.body_format = .plain;
+    try app.compose.fields[0].set(a, "reader@example.test");
+    try app.compose.fields[3].set(a, "Wheel review fixture");
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(a);
+    for (0..90) |index| try body.appendSlice(a, try std.fmt.allocPrint(app.frame.allocator(), "WHEEL BODY {d} fictional text.\n", .{index}));
+    try app.compose.fields[4].set(a, body.items);
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 120, .rows = 32, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.selected = 9;
+    app.reader_scroll = 7;
+    try app.composeDraw(vx.window());
+    var viewport: ?layout.Rect = null;
+    var back: ?layout.Rect = null;
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+        if (hit.kind == .compose_preview_scroll) viewport = hit.rect;
+        if (hit.kind == .dialog_action and hit.index == 0) back = hit.rect;
+    }
+    const content = viewport orelse return error.MissingReviewViewport;
+    const button = back orelse return error.MissingReviewBackControl;
+    try std.testing.expect(content.height == app.compose_preview_height and content.height > 0);
+    try std.testing.expect(content.y + content.height <= button.y);
+    app.dialog_focus.index = 1;
+    var wheel: vaxis.Mouse = .{ .col = @intCast(content.x + 1), .row = @intCast(content.y + 1), .type = .press, .button = .wheel_down, .mods = .{} };
+    // A content control is drawn after its parent viewport. The topmost hit
+    // must not turn a wheel into activation or suppress viewport scrolling.
+    app.mouse_hits.add(.{ .x = content.x + 1, .y = content.y + 1, .width = 4, .height = 1 }, .dialog_action, 1);
+    try std.testing.expectEqual(layout.HitKind.dialog_action, app.mouse_hits.at(wheel.col, wheel.row).?.kind);
+    try app.onMouse(wheel);
+    try std.testing.expectEqual(@as(usize, 3), app.compose_preview_scroll);
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    try std.testing.expectEqual(Mode.review, app.mode);
+    try std.testing.expectEqual(@as(usize, 9), app.selected);
+    try std.testing.expectEqual(@as(usize, 7), app.reader_scroll);
+    const limit = readerEnd(app.compose_preview_lines, app.compose_preview_height);
+    try std.testing.expect(limit > 3);
+    app.compose_preview_scroll = limit - 1;
+    try app.onMouse(wheel);
+    try app.onMouse(wheel);
+    try std.testing.expectEqual(limit, app.compose_preview_scroll);
+    wheel.button = .wheel_up;
+    app.compose_preview_scroll = 1;
+    try app.onMouse(wheel);
+    try std.testing.expectEqual(@as(usize, 0), app.compose_preview_scroll);
+    app.compose_preview_scroll = 6;
+    wheel.col = @intCast(button.x);
+    wheel.row = @intCast(button.y);
+    try app.onMouse(wheel);
+    try std.testing.expectEqual(@as(usize, 6), app.compose_preview_scroll);
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    try std.testing.expectEqual(Mode.review, app.mode);
+    for ([_]vaxis.Mouse.Button{ .wheel_left, .wheel_right }) |direction| {
+        wheel.button = direction;
+        for ([_]layout.Rect{ content, button }) |target| {
+            wheel.col = @intCast(target.x);
+            wheel.row = @intCast(target.y);
+            try app.onMouse(wheel);
+            try std.testing.expectEqual(@as(usize, 6), app.compose_preview_scroll);
+            try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+            try std.testing.expectEqual(Mode.review, app.mode);
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+        }
+    }
+    wheel.button = .wheel_up;
+    wheel.col = @intCast(content.x);
+    wheel.row = @intCast(content.y - 1); // Title, outside the content viewport.
+    try app.onMouse(wheel);
+    wheel.col = 0;
+    wheel.row = 0; // Application header/backdrop.
+    try app.onMouse(wheel);
+    try std.testing.expectEqual(@as(usize, 6), app.compose_preview_scroll);
+    for ([_]Mode{ .trash_confirm, .invitation }) |mode| {
+        app.mode = mode;
+        wheel.col = @intCast(content.x + 1);
+        wheel.row = @intCast(content.y + 1);
+        try app.onMouse(wheel);
+        try std.testing.expectEqual(@as(usize, 6), app.compose_preview_scroll);
+        try std.testing.expectEqual(mode, app.mode);
+    }
+    app.mode = .review;
+    try app.onConfirmationKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqual(@as(usize, 7), app.compose_preview_scroll);
+    try app.onConfirmationKey(.{ .codepoint = 'k' });
+    try std.testing.expectEqual(@as(usize, 6), app.compose_preview_scroll);
+    try std.testing.expectEqualStrings(body.items, app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 0), app.compose.operation_id.value().len);
+    try std.testing.expect(app.job.future == null);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -31805,5 +32297,301 @@ test "calendar now line: existing tick gate redraws idle Week once per changed m
     app.calendar.view = .week;
     app.calendar_week_viewport = null;
     try std.testing.expect(!app.calendarClockTickAt(now + 120000));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: inline insertion is a paragraph at the captured anchor" {
+    const a = std.testing.allocator;
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const cases = [_]struct { source: []const u8, anchor: usize, expected: []const u8 }{
+        .{ .source = "", .anchor = 0, .expected = "![shot.png](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\n" },
+        .{ .source = "BeforeAfter", .anchor = 6, .expected = "Before\n\n![shot.png](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\nAfter" },
+        .{ .source = "Before\n\nAfter", .anchor = 8, .expected = "Before\n\n![shot.png](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\nAfter" },
+        .{ .source = "Before\n\nAfter", .anchor = 6, .expected = "Before\n\n![shot.png](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)\n\nAfter" },
+    };
+    for (cases) |case| {
+        const inserted = try inlineInsertion(a, case.source, case.anchor, "shot.png", cid);
+        defer a.free(inserted.source);
+        try std.testing.expectEqualStrings(case.expected, inserted.source);
+        try std.testing.expectEqual(inserted.source.len - case.source.len, inserted.added);
+    }
+    try std.testing.expectError(error.InvalidCursor, inlineInsertion(a, "é", 1, "shot.png", cid));
+}
+
+test "clipboard image: pending body anchor tolerates following typing and one undo retains that typing" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.compose.insert_mode = true;
+    app.compose.body_format = .markdown;
+    try app.compose.id.set(a, "synthetic-draft");
+    try app.compose.fields[4].set(a, "First paragraph.");
+    const anchor = app.compose.fields[4].cursor;
+    app.clipboard_paste = .{ .active = true, .inline_body = true, .cursor = anchor, .generation = app.generation, .picker_generation = app.file_selection_generation, .account = app.account_index };
+    try app.clipboard_paste.draft.set(app.compose.id.value());
+    std.crypto.hash.sha2.Sha256.hash(app.compose.fields[4].value(), &app.clipboard_paste.prefix_hash, .{});
+    try app.compose.fields[4].insert(a, "\n\nFollowing paragraph typed while capture runs.", types.Limits.compose_body_bytes);
+    const current_body = try a.dupe(u8, app.compose.fields[4].value());
+    defer a.free(current_body);
+    const current_cursor = app.compose.fields[4].cursor;
+    try std.testing.expect(app.clipboardContextCurrent());
+    const file: types.Attachment = .{ .id = "local-image", .filename = "shot.png", .mimeType = "image/png", .size = @import("markdown_logo.zig").png.len, .data = "aW1hZ2U=", .contentId = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid", .disposition = "inline", .delivery = .attach };
+    try app.insertClipboardInline(file, anchor);
+    const marker = "![shot.png](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    try std.testing.expect(std.mem.startsWith(u8, app.compose.fields[4].value(), "First paragraph.\n\n" ++ marker ++ "\n\nFollowing paragraph"));
+    try std.testing.expectEqual(current_cursor + app.compose.fields[4].value().len - current_body.len, app.compose.fields[4].cursor);
+    try std.testing.expectEqual(@as(usize, 1), app.compose.fields[4].history.past_count);
+    try std.testing.expect(try app.clipboardInlineUsed(0));
+    const restored = (try app.compose.fields[4].history.undo(a, app.compose.fields[4].value(), app.compose.fields[4].cursor)).?;
+    try app.compose.fields[4].assign(a, restored.text);
+    app.compose.fields[4].cursor = restored.cursor;
+    try app.composerChanged();
+    try std.testing.expectEqualStrings(current_body, app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 1), app.compose.attachments.len);
+    try std.testing.expect(!try app.clipboardInlineUsed(0));
+    // Editing before the original anchor invalidates only that pending image.
+    app.compose.fields[4].cursor = 0;
+    try app.compose.fields[4].insert(a, "Changed prefix: ", types.Limits.compose_body_bytes);
+    try std.testing.expect(!app.clipboardContextCurrent());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: detach removes owned real markers once and undo leaves them unowned" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.compose.body_format = .markdown;
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const marker = "![shot.png](cid:" ++ cid ++ ")";
+    const source = "Before\n\n" ++ marker ++ "\n\nAfter\n\n`" ++ marker ++ "`";
+    try app.compose.fields[4].set(a, source);
+    try app.compose.replaceAttachments(a, &.{.{ .id = "local-image", .filename = "shot.png", .mimeType = "image/png", .size = @import("markdown_logo.zig").png.len, .data = "aW1hZ2U=", .contentId = cid, .disposition = "inline", .delivery = .attach }});
+    try app.detachAttachment(0);
+    try std.testing.expectEqual(@as(usize, 0), app.compose.attachments.len);
+    try std.testing.expectEqualStrings("Before\n\nAfter\n\n`" ++ marker ++ "`", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 1), app.compose.fields[4].history.past_count);
+    const restored = (try app.compose.fields[4].history.undo(a, app.compose.fields[4].value(), app.compose.fields[4].cursor)).?;
+    try app.compose.fields[4].assign(a, restored.text);
+    app.compose.fields[4].cursor = restored.cursor;
+    try std.testing.expectEqualStrings(source, app.compose.fields[4].value());
+    const prepared = try markdown_mail.prepare(app.frame.allocator(), .{ .bodyFormat = .markdown, .bodyText = source, .attachments = app.compose.attachments });
+    try std.testing.expectEqual(@as(usize, 0), prepared.resources.len);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: detach preserves a Unicode body caret and Undo restores its original position" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.body_format = .markdown;
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const marker = "![shot.png](cid:" ++ cid ++ ")";
+    const prefix = "Before\n\n";
+    const tail = "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€ after";
+    const source = prefix ++ marker ++ "\n\n" ++ tail;
+    const old_cursor = prefix.len + marker.len + "\n\n€€".len;
+    try app.compose.fields[4].set(a, source);
+    app.compose.fields[4].cursor = old_cursor;
+    try app.compose.replaceAttachments(a, &.{.{ .id = "local-image", .filename = "shot.png", .mimeType = "image/png", .size = 5, .data = "aW1hZ2U=", .contentId = cid, .disposition = "inline", .delivery = .attach }});
+    try app.detachAttachment(0);
+    try std.testing.expectEqualStrings(prefix ++ tail, app.compose.fields[4].value());
+    const mapped = "Before\n\n€€".len;
+    try std.testing.expectEqual(mapped, app.compose.fields[4].cursor);
+    const changed = try a.dupe(u8, app.compose.fields[4].value());
+    defer a.free(changed);
+    const restored = (try app.compose.fields[4].history.undo(a, changed, mapped)).?;
+    try std.testing.expectEqualStrings(source, restored.text);
+    try std.testing.expectEqual(old_cursor, restored.cursor);
+    try app.compose.fields[4].insert(a, "X", types.Limits.compose_body_bytes);
+    try std.testing.expect(std.mem.startsWith(u8, app.compose.fields[4].value(), "Before\n\n€€X"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(app.compose.fields[4].value()));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: explicit shortcut is limited to editable composer and inline delivery stays pinned" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.capabilities.files = true;
+    app.capabilities.attachments = true;
+    app.compose_active = true;
+    app.mode = .compose;
+    try std.testing.expect(app.canPasteImage());
+    for ([_]Mode{ .browse, .review, .contacts, .help, .attachment, .invitation, .command }) |mode| {
+        app.mode = mode;
+        try std.testing.expect(!app.canPasteImage());
+    }
+    app.mode = .compose;
+    app.paste = true;
+    try std.testing.expect(!app.canPasteImage());
+    app.paste = false;
+    app.compose_preview_full = true;
+    try std.testing.expect(!app.canPasteImage());
+    app.compose_preview_full = false;
+    app.compose.unknown_outcome = true;
+    try std.testing.expect(!app.canPasteImage());
+    app.compose.unknown_outcome = false;
+    try app.compose.replaceAttachments(a, &.{
+        .{ .id = "inline", .filename = "shot.png", .mimeType = "image/png", .contentId = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid", .disposition = "inline", .delivery = .attach },
+        .{ .id = "ordinary", .filename = "notes.pdf", .delivery = .attach },
+    });
+    try app.setAttachmentDeliveries(null, .drive);
+    try std.testing.expectEqual(types.AttachmentDelivery.attach, app.compose.attachments[0].delivery.?);
+    try std.testing.expectEqual(types.AttachmentDelivery.drive, app.compose.attachments[1].delivery.?);
+    try std.testing.expect(!app.composeSecondaryAvailable(1));
+    try std.testing.expect(app.composeSecondaryAvailable(2));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: detach and undo invalidate the native preview ownership cache" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.body_format = .markdown;
+    const cid = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid";
+    const source = "Before\n\n![shot.png](cid:" ++ cid ++ ")\n\nAfter";
+    try app.compose.fields[4].set(a, source);
+    try app.compose.replaceAttachments(a, &.{.{ .id = "inline", .filename = "shot.png", .mimeType = "image/png", .contentId = cid, .disposition = "inline", .delivery = .attach, .size = 5, .data = "aW1hZ2U=" }});
+    try app.ensureComposePreview();
+    try std.testing.expect(std.mem.indexOf(u8, app.compose_preview_plain, "[Image: shot.png]") != null);
+    const builds = app.compose_preview_builds;
+    try app.detachAttachment(0);
+    const restored = (try app.compose.fields[4].history.undo(a, app.compose.fields[4].value(), app.compose.fields[4].cursor)).?;
+    try app.compose.fields[4].assign(a, restored.text);
+    app.compose.fields[4].cursor = restored.cursor;
+    try app.composerChanged();
+    try app.ensureComposePreview();
+    try std.testing.expectEqual(builds + 1, app.compose_preview_builds);
+    try std.testing.expectEqualStrings(source, app.compose.fields[4].value());
+    // Existing unowned-image rendering is a literal text placeholder. Its
+    // raw marker survives in editable source, with no related image resource.
+    const prepared = try markdown_mail.prepare(app.frame.allocator(), .{ .bodyFormat = .markdown, .bodyText = source, .attachments = app.compose.attachments });
+    try std.testing.expectEqual(@as(usize, 0), prepared.resources.len);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.html.?, "cid:" ++ cid) == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: active decoded subtotal gives specific advice and dormant parts do not block" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.body_format = .markdown;
+    const cid_a = "clipboard-0123456789abcdef0123456789abcdea@omagma.invalid";
+    const cid_b = "clipboard-0123456789abcdef0123456789abcdeb@omagma.invalid";
+    try app.compose.fields[4].set(a, "![a.png](cid:" ++ cid_a ++ ")\n\n![b.png](cid:" ++ cid_b ++ ")");
+    try app.compose.replaceAttachments(a, &.{
+        .{ .id = "a", .filename = "a.png", .mimeType = "image/png", .contentId = cid_a, .disposition = "inline", .delivery = .attach, .size = 13 * 1024 * 1024, .data = "aW1hZ2U=" },
+        .{ .id = "b", .filename = "b.png", .mimeType = "image/png", .contentId = cid_b, .disposition = "inline", .delivery = .attach, .size = 13 * 1024 * 1024, .data = "aW1hZ2U=" },
+    });
+    try std.testing.expectEqualStrings("Inline images total 26 MiB > 25 MiB — remove a marker, or save the image and attach with A.", (try app.deliveryWarning()).?);
+    app.compose.body_format = .plain;
+    try app.composerChanged();
+    try std.testing.expect(try app.deliveryWarning() == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: every body hint shares the native action availability guard" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.capabilities.files = true;
+    app.capabilities.attachments = true;
+    for ([_]bool{ false, true }) |insert| {
+        app.compose.insert_mode = insert;
+        for ([_]u16{ 44, 64, 90, 120, 180 }) |width| {
+            try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "^V image") != null);
+            app.capabilities.files = false;
+            try std.testing.expect(!app.pasteImageAvailable());
+            try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "^V image") == null);
+            app.capabilities.files = true;
+            app.capabilities.attachments = false;
+            try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "^V image") == null);
+            app.capabilities.attachments = true;
+            app.compose.unknown_outcome = true;
+            try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "^V image") == null);
+            app.compose.unknown_outcome = false;
+        }
+    }
+}
+
+test "clipboard image: ordinary pending import keeps keyboard body edits and review waits" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    // Only the optional presence flag is observed by the input guard; this
+    // synthetic handle must never be awaited or canceled.
+    defer app.job.future = null;
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.compose.insert_mode = true;
+    app.compose.body_format = .plain;
+    try app.compose.fields[4].set(a, "Before");
+    app.job.kind = .attachment_import;
+    app.job.future = @as(platform.Job, undefined);
+    app.clipboard_paste.active = true;
+    try std.testing.expect(app.composeWorkerAllowsInput());
+    try app.onComposeKey(.{ .codepoint = 'x', .text = "x" });
+    try std.testing.expectEqualStrings("Beforex", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 7), app.compose.fields[4].cursor);
+    try app.saveDraft(.save_review);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expect(app.clipboard_paste.active);
+    app.clipboard_paste.active = false;
+    try std.testing.expect(!app.composeWorkerAllowsInput());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "clipboard image: explicit empty failure and stale outcomes survive real autosave application" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]"));
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.body_format = .markdown;
+    try app.compose.id.set(a, "synthetic-draft");
+    const saved = "{\"ok\":true,\"data\":{\"id\":\"synthetic-draft\"}}";
+    for ([_]struct { failure: anyerror, expected: []const u8, warning: bool }{
+        .{ .failure = error.NoClipboardImage, .expected = "No image on clipboard. Use your terminal's paste for text.", .warning = false },
+        .{ .failure = error.ClipboardTimeout, .expected = "Couldn't read clipboard image.", .warning = true },
+    }) |case| {
+        app.action_notice = false; // The next explicit user action owns its result.
+        try app.clipboardFailure(case.failure);
+        try app.apply(.autosave, saved);
+        try std.testing.expectEqualStrings(case.expected, app.status[0..app.status_len]);
+        try std.testing.expectEqual(case.warning, app.warning);
+        try std.testing.expectEqual(StatusKind.action, app.status_kind);
+    }
+    app.action_notice = false;
+    app.clipboard_paste = .{ .active = true, .inline_body = true, .account = app.account_index, .generation = app.generation, .picker_generation = app.file_selection_generation };
+    try app.clipboard_paste.draft.set(app.compose.id.value());
+    app.noticeClipboardStale();
+    try app.apply(.autosave, saved);
+    try std.testing.expectEqualStrings("Image paste canceled: text before it changed. Paste again.", app.status[0..app.status_len]);
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }

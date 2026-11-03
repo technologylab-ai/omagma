@@ -7,10 +7,12 @@ import tempfile
 
 from build_info import read_build_info
 from terminal_integration import Client, require
-from terminal_mouse import click, point
+from terminal_mouse import click, point, report
 from terminal_reader_editor import MouseTerminal
 from terminal_compose_screen import ComposerScreen, check_compose_resize_oracle
 from terminal_reader_next_ux import capture
+from terminal_polish_compose import panel_text
+from terminal_pty import send_review_ready, wait_saved_compose
 
 
 def exercise(binary, root, captures):
@@ -120,15 +122,126 @@ def exercise(binary, root, captures):
         terminal.close()
 
 
+def preview_wheel(binary, root, captures):
+    """Real wheel reports scroll only the visible preview; they never send."""
+    body = "\n".join(f"WHEEL BODY {number:03} — fictional preview line." for number in range(90))
+    terminal = MouseTerminal(binary, root, screen_type=ComposerScreen, columns=120, rows=32,
+                             environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
+    try:
+        terminal.until(lambda: "Ready" in terminal.text()
+                       and terminal.screen.mouse_tracking_mode == 1002)
+        terminal.send(b"c")
+        terminal.until(lambda: "Subject:" in terminal.text() and "Attachments 0" in terminal.text())
+        terminal.send(b"ireader@example.test\t\t\tPreview wheel fixture\t"
+                      + b"\x1b[200~" + body.encode() + b"\x1b[201~\x1b")
+        terminal.until(lambda: "WHEEL BODY 089" in terminal.text() and "INSERT" not in terminal.text())
+        terminal.send(b"\x14")
+        terminal.until(lambda: "[Markdown Ctrl+T]" in terminal.text())
+        wait_saved_compose(terminal, 0)
+        with Client(binary, root) as client:
+            drafts = client.request("draft.list")["drafts"]
+            require(len(drafts) == 1, "preview fixture did not retain one draft")
+            draft = client.request("draft.read", draftId=drafts[0]["id"])
+            recovery = draft.get("recoveryFields") or []
+            saved_body = recovery[4] if recovery else draft["bodyText"]
+            require(saved_body == body and draft["bodyFormat"] == "plain",
+                    "preview fixture source was not saved exactly")
+        terminal.until(lambda: terminal.screen.compose_geometry_ready()
+                       and "WHEEL BODY 000" in panel_text(terminal, "Draft preview"))
+        # The existing side preview owns this wheel target, independently of
+        # the editable body which contains the same text on the left.
+        preview_point = (terminal.columns - 4, 8)
+        report(terminal, *preview_point, button=65)
+        terminal.until(lambda: "WHEEL BODY 000" not in panel_text(terminal, "Draft preview")
+                       and "WHEEL BODY" in panel_text(terminal, "Draft preview"))
+        report(terminal, *preview_point, button=64)
+        terminal.until(lambda: "WHEEL BODY 000" in panel_text(terminal, "Draft preview"))
+        terminal.resize(64, 24)
+        terminal.until(lambda: terminal.screen.compose_geometry_ready())
+        terminal.send(b"p")
+        terminal.until(lambda: "[Back]" in terminal.text()
+                       and "WHEEL BODY 000" in panel_text(terminal, "Draft preview"))
+        report(terminal, terminal.columns - 4, 8, button=65)
+        terminal.until(lambda: "WHEEL BODY 000" not in panel_text(terminal, "Draft preview")
+                       and "WHEEL BODY" in panel_text(terminal, "Draft preview"))
+        report(terminal, terminal.columns - 4, 8, button=64)
+        terminal.until(lambda: "WHEEL BODY 000" in panel_text(terminal, "Draft preview"))
+        terminal.send(b"q")
+        terminal.until(lambda: terminal.screen.compose_geometry_ready())
+        sizes = ((64, 24), (120, 32))
+        for columns, rows in sizes:
+            if (terminal.columns, terminal.rows) != (columns, rows):
+                terminal.resize(columns, rows)
+            terminal.until(lambda: terminal.screen.compose_geometry_ready())
+            terminal.send(b"\x13")
+            terminal.until(lambda: send_review_ready(terminal)
+                           and "Sending account:" in terminal.text())
+            review_point = (columns - 4, 7)
+            for button in ("[Back]", "[y Send]"):
+                report(terminal, *review_point, button=65)
+                terminal.until(lambda: "Sending account:" not in terminal.text()
+                               and "To:" not in terminal.text() and "Review send" in terminal.text())
+                # A wheel on a fixed control must neither scroll nor activate
+                # it. The following k must expose the third envelope line,
+                # proving the wheel did not add another three-row movement.
+                report(terminal, *point(terminal, button), button=65)
+                terminal.send(b"k")
+                terminal.until(lambda: "To:" in terminal.text() and "Review send" in terminal.text())
+                report(terminal, *review_point, button=64)
+                terminal.until(lambda: "Sending account:" in terminal.text())
+            for _ in range(40):
+                report(terminal, *review_point, button=65)
+            terminal.until(lambda: "WHEEL BODY 089" in terminal.text()
+                           and "Sending account:" not in terminal.text())
+            bottom = panel_text(terminal, "Review send")
+            # k then one wheel-down returns to the same final clamped page.
+            terminal.send(b"k")
+            terminal.until(lambda: panel_text(terminal, "Review send") != bottom)
+            report(terminal, *review_point, button=65)
+            terminal.until(lambda: panel_text(terminal, "Review send") == bottom)
+            for _ in range(40):
+                report(terminal, *review_point, button=64)
+            terminal.until(lambda: "Sending account:" in terminal.text())
+            capture(terminal, captures, f"compose-review-wheel-{columns}x{rows}")
+            terminal.send(b"\x1b")
+            terminal.until(lambda: terminal.screen.compose_geometry_ready())
+        terminal.finish()
+        with Client(binary, root) as client:
+            saved = client.request("draft.read", draftId=draft["id"])
+            require(saved["bodyText"] == body and saved["bodyFormat"] == "plain"
+                    and [recipient["address"] for recipient in saved["to"]] == ["reader@example.test"]
+                    and saved["subject"] == "Preview wheel fixture",
+                    "preview scrolling changed the saved draft")
+            require(client.request("cache.stats")["fixtureSends"] == 0,
+                    "preview wheel sent mail")
+            require(client.request("operation.list")["operations"] == []
+                    and client.request("queue.list")["queue"] == [],
+                    "preview wheel staged or dispatched a send")
+        return dict(sidePreview=True, fullPreview=True, reviewSizes=sizes,
+                    boundedReviewScroll=True, fixedControlsDoNotActivate=True, draftPreserved=True,
+                    sends=0, queuedSends=0)
+    except Exception:
+        print(terminal.text())
+        capture(terminal, captures, "compose-preview-wheel-failure")
+        raise
+    finally:
+        terminal.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--captures", type=Path)
+    parser.add_argument("--case", choices=("actions", "preview-wheel", "all"), default="all")
     args = parser.parse_args()
     binary = args.binary.resolve()
     print(json.dumps(read_build_info(binary)), flush=True)
     with tempfile.TemporaryDirectory(prefix="omagma-compose-actions-") as directory:
-        print(json.dumps(exercise(binary, Path(directory).resolve(), args.captures)), flush=True)
+        root = Path(directory).resolve()
+        result = exercise(binary, root, args.captures) if args.case != "preview-wheel" else {}
+        if args.case != "actions":
+            result["previewWheel"] = preview_wheel(binary, root / "preview-wheel", args.captures)
+        print(json.dumps(result), flush=True)
 
 
 if __name__ == "__main__":

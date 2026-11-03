@@ -2099,7 +2099,7 @@
       "required": [],
       "notes": [
         "Local only: no network, upload, share or send. Preserves delivery settings and reports blockers; Drive may be selected while disconnected but sending remains blocked.",
-        "Result contains files(index/filename/size/requestedDelivery/delivery/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers.",
+        "Result contains files(index/filename/size/requestedDelivery/delivery/state/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers. A retained pasted image absent from the Markdown body has state not_in_body: its bytes stay local and are not attached or uploaded.",
         "Supply draft or draftId; provided source takes precedence.",
         "Optional operationId supplies that send's recorded Drive receipts so files are planned locally as reuse or newCopy; it does not authorize, start or retry a send.",
         "blockers are {code,message} records for attachment delivery only. An empty list does not mean the whole send will proceed: sender identity, recipients and provider checks still run when sending."
@@ -2151,7 +2151,7 @@
       ],
       "notes": [
         "Local only: no network, upload, share or send. Preserves delivery settings and reports blockers; Drive may be selected while disconnected but sending remains blocked.",
-        "Result contains files(index/filename/size/requestedDelivery/delivery/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers.",
+        "Result contains files(index/filename/size/requestedDelivery/delivery/state/reuse/newCopy/sharedWith), attachedBytes, mimeBytes/mimeEstimate, driveFileCount/driveFileLimit, decodedLimitBytes/mimeLimitBytes and blockers. A retained pasted image absent from the Markdown body has state not_in_body: its bytes stay local and are not attached or uploaded.",
         "Selection also reports selectedStart, selectedAttachedCount/Bytes, selectedDriveCount/Bytes and selectionOverLimit. Supplied recoveryFields are retained without treating incomplete fields as a send envelope. No blobs are imported."
       ],
       "examples": []

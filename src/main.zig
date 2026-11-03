@@ -148,7 +148,7 @@ fn app(minimal: std.process.Init.Minimal) !void {
     var early = minimal.args.iterate();
     _ = early.skip();
     const early_mode = early.next() orelse "help";
-    var lean_client = false;
+    var lean_client = std.mem.eql(u8, early_mode, "__clipboard-image");
     if (std.mem.eql(u8, early_mode, "vault")) {
         const verb = early.next() orelse "help";
         lean_client = !std.mem.eql(u8, verb, "serve") and !std.mem.eql(u8, verb, "init") and !std.mem.eql(u8, verb, "migrate");
@@ -211,6 +211,18 @@ fn app(minimal: std.process.Init.Minimal) !void {
     if (std.mem.eql(u8, mode, "vault")) return @import("terminal/vault_daemon.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "credentials")) return @import("terminal/credential_cli.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);
+    if (std.mem.eql(u8, mode, "__clipboard-image")) {
+        const clipboard = @import("terminal/clipboard_image.zig");
+        var command: [2][]const u8 = undefined;
+        var count: usize = 0;
+        while (args.next()) |arg| {
+            if (count == command.len) return error.InvalidArgv;
+            command[count] = arg;
+            count += 1;
+        }
+        clipboard.worker(io, command[0..count], &runtime.environ) catch |err| std.process.exit(clipboard.exitCode(err));
+        return;
+    }
     if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
         const phase = args.next() orelse return error.Args;
         const directory = args.next() orelse return error.Args;

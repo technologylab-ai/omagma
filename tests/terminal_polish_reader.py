@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 from terminal_integration import ACCOUNTS, Client, require
-from terminal_reader import reader_contains, reader_rows
+from terminal_reader import reader_contains, reader_rectangle, reader_rows
 from terminal_scroll_progress import fixture, options, seed, start, contains
 
 
@@ -92,8 +92,14 @@ def compact(binary, directory):
         require(contains(terminal, 96), "S lost focused thread card")
         terminal.resize(80, 24)
         terminal.send(b"v")
-        terminal.until(lambda: reader_contains(terminal.screen, "Hi Alex,"))
-        terminal.gap(.08)
+        # The greeting is already visible in the old side layout. Wait for
+        # the actual full-width lower pane, not that unchanged body text.
+        def below_reader_ready():
+            rectangle = reader_rectangle(terminal.screen)
+            return (rectangle is not None and rectangle["left"] == 1
+                    and rectangle["right"] == terminal.columns - 1 and rectangle["top"] > 3
+                    and reader_contains(terminal.screen, "Hi Alex,"))
+        terminal.until(below_reader_ready)
         rows = [text for _, text in reader_rows(terminal.screen)]
         require(contains(terminal, 96) and reader_contains(terminal.screen, "Hi Alex,"),
                 "small reader does not expose actual body text below its status/labels")

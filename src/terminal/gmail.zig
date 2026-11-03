@@ -1215,9 +1215,12 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
         try b.identifier(draft.threadId);
         if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
     }
-    try minimumSendForm(draft);
-    const attachments = try mime.composeAttachments(draft.attachments, a);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
+    // The provider adapter has no native account store for local handles,
+    // including dormant clipboard descriptors omitted from this wire form.
+    for (draft.attachments) |file| if (file.blobId != null) return error.AttachmentHandleRequiresNativeTransport;
+    try minimumSendForm(prepared.files(draft), prepared.resources);
+    const attachments = try mime.composeAttachments(prepared.files(draft), a);
     const compose: mime.Compose = .{ .from = from, .destinations = .{ .to = draft.to, .cc = draft.cc, .bcc = draft.bcc }, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments };
     var count_buffer: [4096]u8 = undefined;
     var counting = std.Io.Writer.Discarding.init(&count_buffer);
@@ -1240,10 +1243,9 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
 /// Refuse an impossible JSON send before allocating binary/MIME copies. This
 /// counts only attachment content, so omitted headers, boundaries, line breaks
 /// and authored text can only increase the exact encoded size checked below.
-fn minimumSendForm(draft: types.Draft) !void {
+fn minimumSendForm(attachments: []const types.Attachment, resources: []const types.Attachment) !void {
     var minimum_raw: usize = 0;
-    const resources = if (draft.includeOriginal) (if (draft.original) |original| original.resources else &.{}) else &.{};
-    for ([_][]const types.Attachment{ draft.attachments, resources }) |files| for (files) |file| {
+    for ([_][]const types.Attachment{ attachments, resources }) |files| for (files) |file| {
         if (file.size > types.Limits.request_bytes) return error.FormTooLarge;
         const identity = std.ascii.eqlIgnoreCase(file.mimeType, "message/rfc822") or std.ascii.eqlIgnoreCase(file.mimeType, "message/global");
         const part_size = if (identity) file.size else std.base64.standard.Encoder.calcSize(file.size);
@@ -1616,11 +1618,51 @@ pub fn prepareDraftAuthorized(io: std.Io, a: std.mem.Allocator, account: []const
 }
 
 test "send preparation: attachment expansion refuses impossible forms without allocating or rejecting legal original identity data" {
-    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .attachments = &.{.{ .id = "impossible", .filename = "impossible.bin", .size = std.math.maxInt(usize) }} }));
-    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .original = .{ .resources = &.{.{ .id = "image", .filename = "image.png", .mimeType = "image/png", .size = 1850 * 1024 }} } }));
-    try minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/rfc822", .size = types.Limits.body_bytes }} });
-    try minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/global", .size = types.Limits.body_bytes }} });
-    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "application/octet-stream", .size = types.Limits.body_bytes }} }));
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(&.{.{ .id = "impossible", .filename = "impossible.bin", .size = std.math.maxInt(usize) }}, &.{}));
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(&.{}, &.{.{ .id = "image", .filename = "image.png", .mimeType = "image/png", .size = 1850 * 1024 }}));
+    try minimumSendForm(&.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/rfc822", .size = types.Limits.body_bytes }}, &.{});
+    try minimumSendForm(&.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/global", .size = types.Limits.body_bytes }}, &.{});
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(&.{.{ .id = "original", .filename = "original.eml", .mimeType = "application/octet-stream", .size = types.Limits.body_bytes }}, &.{}));
+}
+
+test "authored inline images: portable send bounds canonical parts while preserving dormant source validation" {
+    const Oracle = struct {
+        fn request(_: *anyopaque, _: std.mem.Allocator, _: std.http.Method, _: []const u8, _: ?j.Value) !j.Value {
+            return error.UnexpectedProviderRequest;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var context: u8 = 0;
+    const transport: Transport = .{ .context = &context, .requestFn = Oracle.request };
+    const bytes = try a.alloc(u8, 1850 * 1024);
+    @memset(bytes, 0x5a);
+    const data = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(bytes.len));
+    var image: types.Attachment = .{ .id = "dormant", .filename = "clipboard-fixture.png", .mimeType = "image/png", .size = bytes.len, .data = std.base64.url_safe_no_pad.Encoder.encode(data, bytes), .contentId = "clipboard-0123456789abcdef0123456789abcdef@omagma.invalid", .disposition = "inline" };
+    var draft: types.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Only text.", .attachments = &.{image} };
+    for ([_]types.BodyFormat{ .plain, .markdown }) |format| {
+        draft.bodyFormat = format;
+        const ready = try prepareDraftAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, draft, "dormant-portable-fixture");
+        const raw = try mime.decodeBase64Url(try j.required(ready.body, "raw"), a);
+        try std.testing.expect(raw.len < 64 * 1024);
+        const parsed = try mime.parse(raw, a);
+        try std.testing.expect(std.mem.startsWith(u8, parsed.body_text, draft.bodyText));
+        try std.testing.expectEqual(@as(usize, if (format == .plain) 0 else 1), parsed.attachments.len); // Only the generated footer in Markdown.
+        for (parsed.attachments) |part| try std.testing.expect(!std.mem.eql(u8, mime.contentId(part.content_id) catch "", image.contentId.?));
+    }
+    // The same owned bytes must still fail the exact active transport bound.
+    draft.bodyText = "![Screenshot](cid:clipboard-0123456789abcdef0123456789abcdef@omagma.invalid)";
+    try std.testing.expectError(error.FormTooLarge, prepareDraftAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, draft, "active-portable-fixture"));
+    // Dormancy cannot excuse malformed source data or invalid local handles.
+    draft.bodyText = "Only text.";
+    image.data = image.data[0 .. image.data.len - 1];
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.InvalidAttachment, prepareDraftAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, draft, "invalid-dormant-fixture"));
+    image.data = "";
+    image.blobId = "invalid-handle";
+    draft.attachments = &.{image};
+    try std.testing.expectError(error.InvalidAttachmentHandle, prepareDraftAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, draft, "invalid-dormant-handle"));
 }
 
 test "send preparation: frozen host body is ready before submission and oversized MIME never reaches transport" {

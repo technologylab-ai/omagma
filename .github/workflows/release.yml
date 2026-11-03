@@ -43,6 +43,7 @@ jobs:
           python3 tests/ci_cache_key.py
           python3 tests/ci_cache_prepare.py
           python3 tests/terminal_editor_readiness.py
+          python3 tests/terminal_pty_send.py
           python3 tests/release_binary.py
           python3 tests/publication_privacy.py
           python3 tests/release_notes.py

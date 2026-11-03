@@ -9,6 +9,26 @@ const vaxis = @import("vaxis");
 
 const capacity = 1024;
 
+/// Kernel cell geometry is authoritative whenever it is available. A delayed
+/// report cannot be ordered against a later ioctl, even across two draws.
+/// Matching reports can still supply pixel dimensions the kernel omits.
+pub fn newestWinsize(reported: ?vaxis.Winsize, actual: ?vaxis.Winsize, previous_applied: ?vaxis.Winsize) ?vaxis.Winsize {
+    var size = actual orelse reported orelse return null;
+    if (reported) |report| {
+        if (size.cols == report.cols and size.rows == report.rows) {
+            if (size.x_pixel == 0) size.x_pixel = report.x_pixel;
+            if (size.y_pixel == 0) size.y_pixel = report.y_pixel;
+        }
+    }
+    if (previous_applied) |previous| {
+        if (size.cols == previous.cols and size.rows == previous.rows) {
+            if (size.x_pixel == 0) size.x_pixel = previous.x_pixel;
+            if (size.y_pixel == 0) size.y_pixel = previous.y_pixel;
+        }
+    }
+    return size;
+}
+
 fn completeUtf8Prefix(bytes: []const u8) usize {
     if (bytes.len == 0) return 0;
     var start = bytes.len - 1;
@@ -98,6 +118,9 @@ pub fn Loop(comptime Event: type) type {
         cache: vaxis.GraphemeCache = .{},
         consumer_text: ?[]const u8 = null,
         resize_installed: bool = false,
+        resize_size: std.atomic.Value(u64) = .init(0),
+        resize_pending: std.atomic.Value(bool) = .init(false),
+        resize_wake_pending: std.atomic.Value(bool) = .init(false),
 
         /// Initialize heap storage in place; never return the fixed queue or
         /// its containing loop by value through the runtime task stack.
@@ -117,6 +140,9 @@ pub fn Loop(comptime Event: type) type {
             self.cache = .{};
             self.consumer_text = null;
             self.resize_installed = false;
+            self.resize_size = .init(0);
+            self.resize_pending = .init(false);
+            self.resize_wake_pending = .init(false);
         }
         fn owned(self: *Self, event: Event) !Item {
             var item: Item = .{ .event = event };
@@ -176,9 +202,26 @@ pub fn Loop(comptime Event: type) type {
         }
         pub fn winsizeCallback(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
-            if (self.vaxis.state.in_band_resize) return;
-            const size = self.tty.getWinsize() catch return;
-            _ = self.tryPostEvent(.{ .winsize = size }) catch {};
+            self.wakeResize();
+        }
+        fn wakeResize(self: *Self) void {
+            // Only a wakeup enters the bounded queue. The next existing draw
+            // samples the actual TTY, so an old queued signal cannot rewind it.
+            if (self.resize_wake_pending.swap(true, .acq_rel)) return;
+            _ = self.tryPostEvent(.tty_resize) catch {};
+        }
+        pub fn postWinsize(self: *Self, size: vaxis.Winsize) void {
+            const bits = @as(u64, size.cols) | (@as(u64, size.rows) << 16) |
+                (@as(u64, size.x_pixel) << 32) | (@as(u64, size.y_pixel) << 48);
+            self.resize_size.store(bits, .release);
+            self.resize_pending.store(true, .release);
+            self.wakeResize();
+        }
+        pub fn takeWinsize(self: *Self) ?vaxis.Winsize {
+            self.resize_wake_pending.store(false, .release);
+            if (!self.resize_pending.swap(false, .acq_rel)) return null;
+            const bits = self.resize_size.load(.acquire);
+            return .{ .cols = @truncate(bits), .rows = @truncate(bits >> 16), .x_pixel = @truncate(bits >> 32), .y_pixel = @truncate(bits >> 48) };
         }
         pub fn start(self: *Self) !void {
             if (self.thread != null) return;
@@ -197,6 +240,8 @@ pub fn Loop(comptime Event: type) type {
             while (self.queue.drain()) |item| self.release(item);
             self.queue.mutex.unlock(self.io);
             self.releaseConsumer();
+            self.resize_pending.store(false, .release);
+            self.resize_wake_pending.store(false, .release);
         }
         pub fn deinit(self: *Self) void {
             self.stop();
@@ -207,7 +252,7 @@ pub fn Loop(comptime Event: type) type {
         }
         fn read(self: *Self) !void {
             if (builtin.is_test) return;
-            try self.postEvent(.{ .winsize = try self.tty.getWinsize() });
+            self.postWinsize(try self.tty.getWinsize());
             var decoder: Decoder = .{ .parser = .{ .cursor_position_requests = &self.vaxis.cursor_position_requests } };
             var retries: u8 = 0;
             while (true) {
@@ -235,6 +280,15 @@ pub fn Loop(comptime Event: type) type {
                         if (polls[0].revents & std.posix.POLL.IN != 0) break;
                     }
                     const event = try decoder.next() orelse break;
+                    if (event == .winsize) {
+                        // The upstream dispatcher unregisters every SIGWINCH
+                        // subscriber after its first in-band report. Keep the
+                        // native fallback: terminals/multiplexers can omit a
+                        // later report even after negotiation succeeded.
+                        self.vaxis.state.in_band_resize = true;
+                        self.postWinsize(event.winsize);
+                        continue;
+                    }
                     try vaxis.loop.handleEventGeneric(self, self.vaxis, &self.cache, Event, event, null);
                 }
             }
@@ -312,7 +366,7 @@ test "grapheme lookahead sees only complete UTF8 with a fragmented suffix" {
 
 test "input queue owns text and releases rejected queued and consumed events" {
     const allocator = std.testing.allocator;
-    const TestEvent = union(enum) { key_press: vaxis.Key, winsize: vaxis.Winsize };
+    const TestEvent = union(enum) { key_press: vaxis.Key, winsize: vaxis.Winsize, tty_resize };
     const TestLoop = Loop(TestEvent);
     // A fixed text array per entry made by-value initialization exceed the
     // runtime stack. Queue descriptors remain small; text belongs to the heap.
@@ -342,6 +396,68 @@ test "input queue owns text and releases rejected queued and consumed events" {
     const restarted = try loop.nextEvent();
     try std.testing.expectEqualStrings("xail", restarted.key_press.text.?);
     try std.testing.expect(try loop.queue.isEmpty());
+}
+
+test "terminal resize: latest report survives a full queue and duplicate wakes are bounded" {
+    const a = std.testing.allocator;
+    const TestEvent = union(enum) { key_press: vaxis.Key, winsize: vaxis.Winsize, tty_resize };
+    const TestLoop = Loop(TestEvent);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(TestLoop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    const old: vaxis.Winsize = .{ .cols = 100, .rows = 24, .x_pixel = 1000, .y_pixel = 480 };
+    const newest: vaxis.Winsize = .{ .cols = 132, .rows = 36, .x_pixel = 1320, .y_pixel = 720 };
+    loop.postWinsize(old);
+    loop.postWinsize(newest);
+    try std.testing.expectEqualDeep(newest, loop.takeWinsize().?);
+    try std.testing.expect(loop.takeWinsize() == null);
+    try std.testing.expectEqual(std.meta.Tag(TestEvent).tty_resize, std.meta.activeTag(try loop.nextEvent()));
+    try std.testing.expect(try loop.queue.isEmpty());
+    for (0..512) |_| try loop.postEvent(.{ .key_press = .{ .codepoint = 'j' } });
+    loop.postWinsize(old);
+    loop.postWinsize(newest);
+    try std.testing.expectEqualDeep(newest, loop.takeWinsize().?);
+    try std.testing.expect(loop.takeWinsize() == null);
+    for (0..512) |_| try std.testing.expectEqual(std.meta.Tag(TestEvent).key_press, std.meta.activeTag(try loop.nextEvent()));
+    try std.testing.expect(try loop.queue.isEmpty());
+}
+
+test "terminal resize: kernel geometry defeats delayed reports across two draws and keeps compatible pixels" {
+    const old: vaxis.Winsize = .{ .cols = 100, .rows = 24, .x_pixel = 1000, .y_pixel = 480 };
+    const newest: vaxis.Winsize = .{ .cols = 132, .rows = 36, .x_pixel = 1320, .y_pixel = 720 };
+    // No report was pending at the first take, then a producer queued old
+    // geometry before the owner observed the new kernel size. Consuming that
+    // report on the next draw must not undo the already-applied new geometry.
+    var applied = newestWinsize(null, newest, old).?;
+    try std.testing.expectEqualDeep(newest, applied);
+    applied = newestWinsize(old, newest, applied).?;
+    try std.testing.expectEqualDeep(newest, applied);
+    try std.testing.expectEqualDeep(newest, newestWinsize(null, newest, applied).?);
+    try std.testing.expectEqualDeep(old, newestWinsize(newest, old, old).?);
+    try std.testing.expectEqualDeep(old, newestWinsize(newest, old, null).?);
+    // A valid report is the fallback while ioctl fails. When ioctl recovers,
+    // its unchanged original geometry must reclaim authority immediately.
+    applied = newestWinsize(newest, null, old).?;
+    try std.testing.expectEqualDeep(newest, applied);
+    applied = newestWinsize(null, old, applied).?;
+    try std.testing.expectEqualDeep(old, applied);
+    try std.testing.expectEqualDeep(old, newestWinsize(null, old, applied).?);
+    try std.testing.expect(newestWinsize(null, null, applied) == null);
+    var no_pixels = newest;
+    no_pixels.x_pixel = 0;
+    no_pixels.y_pixel = 0;
+    try std.testing.expectEqualDeep(newest, newestWinsize(newest, no_pixels, null).?);
+    try std.testing.expectEqualDeep(newest, newestWinsize(old, no_pixels, newest).?);
+    try std.testing.expectEqualDeep(newest, newestWinsize(null, no_pixels, newest).?);
+    var physical = newest;
+    physical.cols = 251;
+    try std.testing.expectEqualDeep(physical, newestWinsize(null, physical, newest).?);
+    var pixels = physical;
+    pixels.x_pixel += 1;
+    try std.testing.expectEqualDeep(pixels, newestWinsize(null, pixels, physical).?);
 }
 
 test "mouse reports keep zero based coordinates buttons and release across fragments" {
