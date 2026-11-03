@@ -214,7 +214,7 @@ class GuardTests(unittest.TestCase):
 
     def test_release_runs_growing_stress_separately_on_all_native_platforms(self):
         release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  gates:", 1)[1]
-        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", release)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64]", release)
         self.assertIn(", send,", release)
         gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
         commands = [line for line in gate.splitlines() if "zig build test-native-send-stress " in line]
@@ -227,7 +227,7 @@ class GuardTests(unittest.TestCase):
 
     def test_retained_history_stress_is_mandatory_on_all_safe_native_platforms(self):
         release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  gates:", 1)[1]
-        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", release)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64]", release)
         for case in ("calendar", "sends-plain", "sends-vault", "files-plain", "files-vault"):
             self.assertIn("history-" + case, release)
         gate = (ROOT / ".github/workflows/native-gate.yml").read_text()

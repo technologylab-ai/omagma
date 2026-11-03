@@ -17,8 +17,7 @@ import tempfile
 import urllib.request
 
 REPOSITORY = "technologylab-ai/omagma"
-PLATFORMS = (("macos", "arm64"), ("macos", "x86_64"),
-             ("linux", "arm64"), ("linux", "x86_64"))
+PLATFORMS = (("macos", "arm64"), ("linux", "arm64"), ("linux", "x86_64"))
 MAX_ASSET = 256 * 1024 * 1024
 
 
@@ -28,10 +27,21 @@ def validate_version(version):
     return version
 
 
+def platforms_for(version):
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[0-9A-Za-z.-]+)?", version)
+    if not match:
+        raise ValueError("A numeric release version is required")
+    # Already-published releases retain their original Intel Mac inventory.
+    if tuple(map(int, match.groups())) < (0, 2, 18):
+        return (("macos", "arm64"), ("macos", "x86_64"),
+                ("linux", "arm64"), ("linux", "x86_64"))
+    return PLATFORMS
+
+
 def names_for(version):
     validate_version(version)
     return {"LICENSES.txt"} | {
-        name for os_name, arch in PLATFORMS for name in
+        name for os_name, arch in platforms_for(version) for name in
         (f"omagma-{os_name}-{arch}", f"omagma-{version}-{os_name}-{arch}.tar.gz")}
 
 
@@ -43,7 +53,7 @@ def parse_checksums(raw, version):
             raise ValueError("Malformed, duplicate or placeholder checksum")
         sums[match[2]] = match[1]
     if set(sums) != names_for(version):
-        raise ValueError("Published checksums do not cover the complete four-platform release")
+        raise ValueError("Published checksums do not cover the complete release platform inventory")
     return sums
 
 
@@ -78,7 +88,7 @@ def published_assets(metadata, version):
             raise ValueError("Invalid published asset size")
         assets[name] = item
     if set(assets) != names_for(version) | {"SHA256SUMS"}:
-        raise ValueError("The release is not a complete four-platform publication")
+        raise ValueError("The release does not contain the complete platform inventory")
     return assets
 
 
@@ -156,9 +166,9 @@ def formula_revision(version, sums, previous=None):
     entries = re.findall(r'^      url "([^"\n]+)"\n      sha256 "([0-9a-f]{64})"$', previous, re.M)
     base = f"https://github.com/{REPOSITORY}/releases/download/v{version}/"
     expected = {base + f"omagma-{version}-{os_name}-{arch}.tar.gz":
-                sums[f"omagma-{version}-{os_name}-{arch}.tar.gz"] for os_name, arch in PLATFORMS}
-    if len(entries) != 4 or len(dict(entries)) != 4 or set(dict(entries)) != set(expected):
-        raise ValueError("Existing formula has an unknown four-platform asset inventory")
+                sums[f"omagma-{version}-{os_name}-{arch}.tar.gz"] for os_name, arch in platforms_for(version)}
+    if len(entries) != len(expected) or len(dict(entries)) != len(expected) or set(dict(entries)) != set(expected):
+        raise ValueError("Existing formula has an unknown platform asset inventory")
     return revision + (dict(entries) != expected)
 
 
@@ -174,7 +184,11 @@ def render_formula(version, sums, revision=0):
         lines = [f"  on_{os_name} do"]
         if os_name == "macos":
             lines.append("    depends_on macos: :ventura")
+            if ("macos", "x86_64") not in platforms_for(version):
+                lines.append("    depends_on arch: :arm64")
         for arm, arch in ((True, "arm64"), (False, "x86_64")):
+            if (os_name, arch) not in platforms_for(version):
+                continue
             name = f"omagma-{version}-{os_name}-{arch}.tar.gz"
             lines.extend([f"    on_{'arm' if arm else 'intel'} do",
                           f'      url "{base}/{name}"', f'      sha256 "{sums[name]}"', "    end"])
@@ -267,7 +281,7 @@ def main():
         raise ValueError("Local checksums differ from the published release")
     sums = parse_checksums(raw, version)
     with tempfile.TemporaryDirectory(prefix="omagma-formula-assets-") as temporary:
-        for os_name, arch in PLATFORMS:
+        for os_name, arch in platforms_for(version):
             name = f"omagma-{version}-{os_name}-{arch}.tar.gz"
             path = verified_bundle(assets[name], sums[name], Path(temporary), args.asset_dir)
             verify_bundle(path, version, os_name, arch, sums[f"omagma-{os_name}-{arch}"])

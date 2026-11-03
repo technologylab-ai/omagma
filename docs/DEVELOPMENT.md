@@ -52,7 +52,7 @@ zig build -Doptimize=safe -Dtarget=aarch64-macos.13.0 -Dcpu=baseline
 zig-out/bin/omagma --version
 ```
 
-Use `x86_64-macos.13.0` on an Intel Mac. If automatic SDK discovery is unavailable,
+If automatic SDK discovery is unavailable,
 pass `-Dmacos-sdk=/absolute/path/to/MacOSX.sdk`; this is a build option, not an
 installed user's configuration setting. Mac executables use system libraries
 and frameworks rather than static musl. Cross builds and deployment metadata do
@@ -114,7 +114,7 @@ the existing memory/quiet-CPU gates. [Verification](VERIFICATION.md) and
 Actual RSS/PSS and application-owned limits are separate quantities.
 
 [Release maintenance](RELEASING.md) describes version bumps, compiler archive
-checksums, Linux static-musl and native macOS x86_64/arm64 bundles, privacy checks, CI and downloaded
+checksums, Linux static-musl and native macOS Apple Silicon bundles, privacy checks, CI and downloaded
 artifact validation. Published assets and dated failed/passed evidence are
 immutable. A local interface update is not a new release or fresh resource
 qualification.
@@ -142,8 +142,8 @@ python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode s
 Run the corresponding Safe checks and packaging gates for release qualification.
 The macOS 13.0 binary deployment target is distinct from actual native test
 hosts: CI uses newer macOS hosts and local Apple Silicon qualification uses
-macOS 26.6.2/SDK 27.0. Keep each architecture/OS result separate, and require
-native Intel evidence rather than calling an ARM cross-build an Intel test.
+macOS 26.6.2/SDK 27.0. Current Mac releases qualify Apple Silicon only. Keep
+each architecture/OS result separate; a cross-build is not native execution.
 Mac memory/CPU gates have platform-specific evidence; do not copy the dated
 Linux bar estimate onto Mac or TUI workloads. Synthetic checks are not live
 Google delivery/consent or Omarchy bar qualification.

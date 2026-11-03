@@ -4,10 +4,13 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from homebrew_formula import names_for
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -36,10 +39,7 @@ def main():
         if error.code != 404:
             raise
         release = None
-    systems = ("linux", "macos") if (ROOT / "docs/MACOS.md").exists() else ("linux",)
-    expected = {"SHA256SUMS", "LICENSES.txt"} | {
-        name for system in systems for arch in ("x86_64", "arm64")
-        for name in (f"omagma-{system}-{arch}", f"omagma-{version}-{system}-{arch}.tar.gz")}
+    expected = names_for(version) | {"SHA256SUMS"}
     ready = bool(release and release.get("draft") is False and release.get("prerelease") is False
                  and release.get("tag_name") == "v" + version
                  and expected <= {asset["name"] for asset in release.get("assets", [])})

@@ -1,6 +1,10 @@
 # Omagma on macOS
 
-The experimental TUI and agent CLI run natively on Apple Silicon and Intel Macs.
+Omagma runs natively on Apple Silicon Macs (arm64) with macOS 13 or later. Install it with Homebrew, or download the verified Apple Silicon bundle from the latest release.
+
+Current releases do not include Intel Mac builds. The last release with an Intel download is [v0.2.17](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.17).
+
+The native TUI and agent CLI remain experimental.
 The bar widget remains a Linux Omarchy integration. Mac terminal use needs no
 Omarchy, Quickshell, tmux, Python runtime or Zig compiler.
 
@@ -113,7 +117,6 @@ If Homebrew is unavailable, download `SHA256SUMS` and the matching archive from
 | `uname -m` | Bundle |
 | --- | --- |
 | `arm64` | `omagma-VERSION-macos-arm64.tar.gz` |
-| `x86_64` | `omagma-VERSION-macos-x86_64.tar.gz` |
 
 `VERSION` is the release number without `v`. Mac binaries target macOS 13.0 and
 later and use system libraries. A deployment target is not evidence of testing
@@ -150,8 +153,7 @@ ln -s "$omagma_release_dir/omagma/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
 Inspect an existing `omagma` command or symlink before changing it. Ensure
 `$HOME/.local/bin` is on PATH or invoke the verified executable by its absolute
 path. The archive includes the audited source/docs tree; its Linux QML and
-systemd files do not need installing on a Mac. Raw `omagma-macos-arm64` and
-`omagma-macos-x86_64` executables are also available with `LICENSES.txt`.
+systemd files do not need installing on a Mac. The raw `omagma-macos-arm64` executable is also available with `LICENSES.txt`.
 
 ## Accounts and Chrome
 

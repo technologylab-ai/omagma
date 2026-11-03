@@ -9,6 +9,7 @@ import io
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -51,6 +52,22 @@ def verify(data):
 
 
 class Qualification(unittest.TestCase):
+    def test_three_platform_release_preserves_all_retained_platform_gates(self):
+        self.assertEqual(policy.PLATFORMS, {
+            "Linux x86_64 qualification": "release-linux-x86_64",
+            "Linux arm64 qualification": "release-linux-arm64",
+            "macOS arm64 qualification": "release-macos-arm64",
+        })
+        self.assertEqual(len(policy.COMPILE_JOBS), 3)
+        self.assertEqual(len(policy.GATE_JOBS), 33)
+        for platform in policy.PLATFORMS:
+            self.assertEqual(sum(owner == platform for owner in policy.GATE_JOBS.values()), 11)
+        for name in ("release.yml", "macos-native.yml"):
+            self.assertNotIn("macos-15-intel", (ROOT/".github/workflows"/name).read_text())
+        publish = (ROOT/".github/workflows/publish-qualified.yml").read_text()
+        self.assertNotIn("SHA256SUMS-macos-x86_64", publish)
+        self.assertIn("cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-arm64 > SHA256SUMS", publish)
+
     def test_superseded_qualification_cancels_but_publication_is_protected(self):
         qualification = (ROOT / ".github/workflows/release.yml").read_text()
         promotion = (ROOT / ".github/workflows/publish-qualified.yml").read_text()
@@ -100,7 +117,7 @@ class Qualification(unittest.TestCase):
         self.assertIn("needs: [version, build, macos-build]", prepared)
         self.assertIn("name: Compile ${{ matrix.platform }}", prepared)
         self.assertIn("gate: compile", prepared)
-        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", prepared)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64]", prepared)
         self.assertIn("uses: ./.github/workflows/native-gate.yml", prepared)
         self.assertNotIn("continue-on-error", prepared)
         self.assertIn("needs: [version, build, macos-build, compile]", gates)
@@ -109,7 +126,7 @@ class Qualification(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/native-gate.yml", gates)
         self.assertIn("name: Gate ${{ matrix.platform }} ${{ matrix.gate }}", gates)
         self.assertNotIn("continue-on-error", gates)
-        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", gates)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64]", gates)
         matrix_gates = [line.strip().removeprefix("gate: [").removesuffix("]").split(", ")
                         for line in gates.splitlines() if line.strip().startswith("gate: [")]
         self.assertEqual(len(matrix_gates), 1)
@@ -276,7 +293,7 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
     def test_exact_candidate_produces_only_fixed_provenance_outputs(self):
         result = verify(fixture())
         self.assertEqual(result, {"run_id": RUN_ID, "head_sha": SHA, "run_attempt": 2,
-                                 "workflow_id": 321, "artifact_ids": "200,201,202,203"})
+                                 "workflow_id": 321, "artifact_ids": "200,201,202"})
 
     def test_whole_run_and_trusted_same_repository_main_source_required(self):
         mutations = (
@@ -325,7 +342,7 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
             verify(data)
 
     def test_artifacts_must_be_unique_live_and_bound_to_successful_attempt(self):
-        for index in range(4):
+        for index in range(len(policy.PLATFORMS)):
             for field, value in (("expired", True), ("expired", "false"), ("size_in_bytes", 0),
                                  ("expires_at", "2026-10-09T18:59:59Z"),
                                  ("created_at", "2026-10-09T17:59:59Z"),
@@ -362,7 +379,7 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
     def test_failed_final_gate_rejects_artifacts_already_uploaded(self):
         data = fixture()
         data[0]["conclusion"] = "failure"
-        # All four archives and even all four success jobs are insufficient.
+        # All three archives and even all three success jobs are insufficient.
         with self.assertRaisesRegex(policy.QualificationError, "complete qualification run"):
             verify(data)
 
@@ -381,19 +398,19 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
         for job in data[2]:
             job["run_attempt"] = 1
         # One resource gate failed in the original attempt; all other work,
-        # including the four exact package artifacts, remains valid.
+        # including the three exact package artifacts, remains valid.
         previous = deepcopy(data[2][-1])
         previous["id"] += 10000
         previous["conclusion"] = "failure"
         data[2][-1]["run_attempt"] = 2
         data[2].append(previous)
-        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202")
         # GitHub's list order is not a provenance ordering contract.
         data[2].reverse()
-        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202")
 
     def test_latest_failed_execution_cannot_fall_back_to_an_old_success(self):
-        for index in (0, 4, len(fixture()[2]) - 1):
+        for index in (0, len(policy.PLATFORMS), len(fixture()[2]) - 1):
             for conclusion in ("failure", "cancelled", "skipped", "neutral"):
                 with self.subTest(index=index, conclusion=conclusion):
                     data = fixture()
@@ -420,7 +437,7 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
         # cannot qualify the rebuilt candidate.
         for field, value in (("run_attempt", 1), ("started_at", "2026-10-09T18:19:59Z")):
             data = fixture()
-            data[2][4][field] = value
+            data[2][len(policy.PLATFORMS)][field] = value
             with self.assertRaisesRegex(policy.QualificationError, "predates"):
                 verify(data)
 
@@ -436,17 +453,17 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
         # A compile retry and its fresh gates can keep the same already-tested
         # package; only rerunning the package preflight requires a new artifact.
         data = fixture()
-        for job in data[2][:4]:
+        for job in data[2][:len(policy.PLATFORMS)]:
             job["run_attempt"] = 1
         old_compile = deepcopy(next(job for job in data[2] if job["name"] == compile_name))
         old_compile.update(id=9999, run_attempt=1, conclusion="failure")
         data[2].append(old_compile)
-        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202")
 
     def test_historical_job_cannot_introduce_a_foreign_source_or_duplicate_metadata(self):
         for field, value in (("head_sha", "b" * 40), ("run_id", RUN_ID + 1), ("id", 100)):
             data = fixture()
-            old = deepcopy(data[2][4])
+            old = deepcopy(data[2][len(policy.PLATFORMS)])
             old.update(id=9999, run_attempt=1)
             old[field] = value
             data[2].append(old)
@@ -456,7 +473,7 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
     def test_verification_receipts_do_not_become_publishable_artifacts(self):
         data = fixture()
         data[3].append({"id": 500, "name": "verification-linux-x86_64", "expired": True})
-        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202")
 
 
 class ApiPolicy(unittest.TestCase):
@@ -531,6 +548,58 @@ class ApiPolicy(unittest.TestCase):
 
 
 class ExistingPublisherGuards(unittest.TestCase):
+    def test_new_release_publishes_exactly_the_three_platform_inventory(self):
+        import hashlib
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import publish_release
+        version = "0.2.18"
+        names = {"LICENSES.txt"} | {
+            name for os_name, arch in (("linux", "x86_64"), ("linux", "arm64"), ("macos", "arm64"))
+            for name in (f"omagma-{os_name}-{arch}", f"omagma-{version}-{os_name}-{arch}.tar.gz")}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root/"dist").mkdir()
+            for name in names:
+                (root/"dist"/name).write_bytes(name.encode())
+            sums = "".join(hashlib.sha256(name.encode()).hexdigest()+"  "+name+"\n" for name in sorted(names))
+            (root/"dist/SHA256SUMS").write_text(sums)
+            with patch.object(sys, "argv", ["publish_release.py"]), \
+                    patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": SHA}), \
+                    patch.object(publish_release, "ROOT", root), \
+                    patch.object(publish_release, "package_versions", return_value=(version, "0.17.0")), \
+                    patch.object(publish_release, "find_release", return_value=None), \
+                    patch.object(publish_release, "api", return_value=None), \
+                    patch.object(publish_release.subprocess, "run") as upload:
+                publish_release.main()
+            command = upload.call_args.args[0]
+            files = [Path(arg).name for arg in command if arg.startswith(str(root/"dist")+"/")]
+            self.assertCountEqual(files, names | {"SHA256SUMS"})
+            self.assertEqual(len(files), 8)
+
+    def test_pages_accepts_complete_current_assets_and_stops_for_a_missing_platform(self):
+        import json
+        spec = importlib.util.spec_from_file_location("pages_ready", ROOT/".github/pages_release_ready.py")
+        pages = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pages)
+        names = {"LICENSES.txt", "SHA256SUMS"} | {
+            name for os_name, arch in (("linux", "x86_64"), ("linux", "arm64"), ("macos", "arm64"))
+            for name in (f"omagma-{os_name}-{arch}", f"omagma-0.2.18-{os_name}-{arch}.tar.gz")}
+        for missing in (None, "omagma-0.2.18-macos-arm64.tar.gz"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root/"build.zig.zon").write_text('.version = "0.2.18"')
+                release = dict(draft=False, prerelease=False, tag_name="v0.2.18",
+                               assets=[dict(name=name) for name in names if name != missing])
+                opener = unittest.mock.Mock()
+                opener.open.return_value = io.BytesIO(json.dumps(release).encode())
+                output = root/"output"
+                with patch.object(pages, "ROOT", root), \
+                        patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "GH_TOKEN": "synthetic", "GITHUB_OUTPUT": str(output)}), \
+                        patch.object(pages.urllib.request, "build_opener", return_value=opener), \
+                        patch.object(sys, "stdout", new_callable=io.StringIO):
+                    pages.main()
+                self.assertEqual(output.read_text(), "ready="+str(missing is None).lower()+"\n")
+
     def test_existing_version_qualification_is_read_only_and_opt_in(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         import publish_release

@@ -75,7 +75,7 @@ jobs:
       matrix:
         # GitHub-hosted runner labels identify the actual native architecture.
         # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:

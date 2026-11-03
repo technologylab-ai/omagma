@@ -325,11 +325,6 @@ jobs:
             machine: arm64
             target: aarch64-macos.13.0
             job_timeout: 90
-          - arch: x86_64
-            runner: macos-15-intel
-            machine: x86_64
-            target: x86_64-macos.13.0
-            job_timeout: 90
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.job_timeout }}
     steps:
@@ -525,7 +520,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]
+        platform: [linux-x86_64, linux-arm64, macos-arm64]
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
@@ -542,11 +537,6 @@ jobs:
             target: aarch64-macos.13.0
             os: macos
             arch: arm64
-          - platform: macos-x86_64
-            runner: macos-15-intel
-            target: x86_64-macos.13.0
-            os: macos
-            arch: x86_64
     uses: ./.github/workflows/native-gate.yml
     with:
       platform: ${{ matrix.platform }}
@@ -564,7 +554,7 @@ jobs:
       fail-fast: false
       matrix:
         gate: [history-files-plain, history-files-vault, history-sends-plain, history-sends-vault, history-calendar, send, unit-main, unit-extra, unit-memory, adapters, resources]
-        platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]
+        platform: [linux-x86_64, linux-arm64, macos-arm64]
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
@@ -581,11 +571,6 @@ jobs:
             target: aarch64-macos.13.0
             os: macos
             arch: arm64
-          - platform: macos-x86_64
-            runner: macos-15-intel
-            target: x86_64-macos.13.0
-            os: macos
-            arch: x86_64
     uses: ./.github/workflows/native-gate.yml
     with:
       platform: ${{ matrix.platform }}
@@ -610,6 +595,6 @@ jobs:
           from pathlib import Path
           repo, run, commit = (os.environ[name] for name in ('GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_SHA'))
           version = os.environ['QUALIFIED_VERSION']
-          summary = f"## Candidate {version} qualified\n\nAll four native preflights and all 44 independent Safe gates passed. No release has been published.\n\nCommit: `{commit}`\n\nQualification run: [{run}](https://github.com/{repo}/actions/runs/{run})\n\nAfter explicit approval, run **Publish qualified release** with this run ID. The verified artifacts are retained for 30 days; a changed revision needs fresh qualification.\n"
+          summary = f"## Candidate {version} qualified\n\nAll three native preflights and all 33 independent Safe gates passed. No release has been published.\n\nCommit: `{commit}`\n\nQualification run: [{run}](https://github.com/{repo}/actions/runs/{run})\n\nAfter explicit approval, run **Publish qualified release** with this run ID. The verified artifacts are retained for 30 days; a changed revision needs fresh qualification.\n"
           Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary)
           PY

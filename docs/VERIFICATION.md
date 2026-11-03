@@ -51,7 +51,7 @@ Python 3 and Node.js are needed for the harnesses; UI checks also need Quickshel
 `tests/meet_native_http.py --probe zig-out/bin/meet_http_probe` checks the native Meet wire policy; `tests/terminal_meet_notes.py` and `tests/terminal_meet_notes_tui.py` cover new-event notes through CLI and owned PTYs. The HTTPS checks make an unauthenticated Google request expecting an unauthorized response; they do not read a mailbox or use OAuth credentials. Run keyring probes only with a separate session bus and temporary synthetic keyring, as in the [release workflow](../.github/workflows/release.yml), rather than against the desktop's account credentials.
 
 Release CI first builds each native Safe bundle and runs the complete applicable
-short CLI/TUI, fixture, integration and first-use suites. Only after all four
+short CLI/TUI, fixture, integration and first-use suites. Only after all three
 preflights pass does each platform prime its shared history executable, followed
 by independent correctness, growing-mail, retained-history and resource jobs.
 Unique test executables compile in parallel in their owning jobs. An offline policy test enforces that dependency order.
@@ -153,7 +153,7 @@ correctness checks supplement the fixed browsing workloads; they do not impose
 the browsing heap ceiling on an explicitly expanded native compose operation.
 The complete 21-stage growing-store chain runs separately with
 `zig build test-native-send-stress -Doptimize=safe --test-timeout 300s -Dtest-watchdog=true`,
-in Safe on all four release platforms. Its dedicated deadline
+in Safe on all three release platforms. Its dedicated deadline
 keeps the full chain intact on slower native runners; ordinary correctness
 tests retain their existing 120-second timeout.
 

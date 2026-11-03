@@ -86,7 +86,7 @@ jobs:
               if not match or tuple(map(int, match[1].split('.'))) > tuple(map(int, version.split('.'))):
                   raise SystemExit('Refusing an unknown formula version or a tap downgrade')
           PY
-          # The generator downloads published checksums and verifies all four
+          # The generator downloads published checksums and verifies all three
           # full bundles, including backend/manifest identity, before writing.
           python3 scripts/homebrew_formula.py --version "$TAP_VERSION" --output "$OMAGMA_TAP_FORMULA"
           ruby -c "$OMAGMA_TAP_FORMULA"

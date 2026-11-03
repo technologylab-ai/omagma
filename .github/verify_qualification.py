@@ -22,7 +22,6 @@ PLATFORMS = {
     "Linux x86_64 qualification": "release-linux-x86_64",
     "Linux arm64 qualification": "release-linux-arm64",
     "macOS arm64 qualification": "release-macos-arm64",
-    "macOS x86_64 qualification": "release-macos-x86_64",
 }
 GATES = (
     "unit-main", "unit-extra", "unit-memory", "adapters", "send",
@@ -121,7 +120,7 @@ def verify(run, workflow, jobs, artifacts, *, repository, expected_sha, run_id, 
             if name not in latest_jobs or job_attempt > latest_jobs[name]["run_attempt"]:
                 latest_jobs[name] = job
     require(set(latest_jobs) == required_jobs,
-            "All four native preflights, compile jobs and every qualification gate are required")
+            "All three native preflights, compile jobs and every qualification gate are required")
     selected_jobs = {}
     for name, job in latest_jobs.items():
         require(job.get("status") == "completed" and job.get("conclusion") == "success",
@@ -164,7 +163,7 @@ def verify(run, workflow, jobs, artifacts, *, repository, expected_sha, run_id, 
         require(started <= timestamp(artifact.get("created_at"), "artifact creation") <= completed,
                 "Release artifact was not created during the latest successful platform attempt")
         by_name[name] = artifact_id
-    require(set(by_name) == set(PLATFORMS.values()), "All four unexpired release artifacts are required")
+    require(set(by_name) == set(PLATFORMS.values()), "All three unexpired release artifacts are required")
     return {"run_id": run_id, "head_sha": expected_sha, "run_attempt": attempt,
             "workflow_id": workflow["id"],
             "artifact_ids": ",".join(str(by_name[name]) for name in PLATFORMS.values())}

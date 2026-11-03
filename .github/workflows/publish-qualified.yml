@@ -82,7 +82,7 @@ jobs:
       - name: Combine and verify the qualified checksums
         working-directory: dist
         run: |
-          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-x86_64 SHA256SUMS-macos-arm64 > SHA256SUMS
+          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-arm64 > SHA256SUMS
           sha256sum LICENSES.txt >> SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Publish the verified package without replacing a release or tag

@@ -31,6 +31,44 @@ def metadata():
 
 
 class FormulaTests(unittest.TestCase):
+    def test_current_release_drops_only_intel_mac_and_preserves_historical_inventory(self):
+        version = "0.2.18"
+        expected = {"LICENSES.txt", "SHA256SUMS"} | {
+            name for os_name, arch in (("linux", "x86_64"), ("linux", "arm64"), ("macos", "arm64"))
+            for name in (f"omagma-{os_name}-{arch}", f"omagma-{version}-{os_name}-{arch}.tar.gz")}
+        self.assertEqual(formula.names_for(version) | {"SHA256SUMS"}, expected)
+        self.assertEqual(len(expected), 8)
+        self.assertIn("omagma-macos-x86_64", formula.names_for("0.2.17"))
+        self.assertNotIn(("macos", "x86_64"), formula.platforms_for("0.2.18-rc.1"))
+        self.assertIn(("macos", "x86_64"), formula.platforms_for("0.2.17-rc.1"))
+        rows = {name: hashlib.sha256(name.encode()).hexdigest() for name in expected - {"SHA256SUMS"}}
+        raw = "".join(f"{digest}  {name}\n" for name, digest in rows.items()).encode()
+        self.assertEqual(formula.parse_checksums(raw, version), rows)
+        published = metadata()
+        published.update(tag_name="v" + version,
+                         html_url=f"https://github.com/technologylab-ai/omagma/releases/tag/v{version}",
+                         assets=[dict(name=name, size=123, browser_download_url=
+                                      f"https://github.com/technologylab-ai/omagma/releases/download/v{version}/{name}")
+                                 for name in expected])
+        self.assertEqual(set(formula.published_assets(published, version)), expected)
+        for name in expected:
+            incomplete = dict(published, assets=[asset for asset in published["assets"] if asset["name"] != name])
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                formula.published_assets(incomplete, version)
+        with self.assertRaises(ValueError):
+            formula.parse_checksums(raw + b"f" * 64 + b"  omagma-macos-x86_64\n", version)
+        rendered = formula.render_formula(version, rows)
+        self.assertEqual(rendered.count('      url "'), 3)
+        mac = rendered.split("  on_macos do", 1)[1].split("  on_linux do", 1)[0]
+        self.assertIn("depends_on arch: :arm64", mac)
+        self.assertNotIn("on_intel", mac)
+        self.assertIn("on_intel", rendered.split("  on_linux do", 1)[1])
+        self.assertEqual(formula.formula_revision(version, rows, rendered), 0)
+        changed = dict(rows, **{f"omagma-{version}-linux-x86_64.tar.gz": "f" * 64})
+        self.assertEqual(formula.formula_revision(version, changed, rendered), 1)
+        result = subprocess.run(["ruby", "-c"], input=rendered, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_read_token_never_follows_redirects_or_asset_requests(self):
         with patch.dict("os.environ", {"GH_TOKEN": "synthetic-read-token", "GITHUB_TOKEN": ""}), \
                 patch.object(formula.urllib.request, "urlopen") as open_url:

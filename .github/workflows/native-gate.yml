@@ -81,7 +81,6 @@ jobs:
           case "$RELEASE_OS:$RELEASE_ARCH" in
             linux:x86_64) test "$(uname -s):$(uname -m)" = Linux:x86_64 ;;
             linux:arm64) test "$(uname -s):$(uname -m)" = Linux:aarch64 ;;
-            macos:x86_64) test "$(uname -s):$(uname -m)" = Darwin:x86_64 ;;
             macos:arm64) test "$(uname -s):$(uname -m)" = Darwin:arm64 ;;
             *) exit 1 ;;
           esac

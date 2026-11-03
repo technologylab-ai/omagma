@@ -141,10 +141,10 @@ python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --b
   --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-safe.json
 ```
 
-Omit `--suite` for all 20 suites. The release workflow requires the full runner
+Omit `--suite` for the complete suite. The release workflow requires the full runner
 against the packaged Safe executable on native Linux x86_64/arm64 and macOS
-x86_64/arm64 before any expensive qualification gates start. The native macOS
-pull-request workflow also runs it in Safe on Linux x86_64 and both Mac architectures. Existing
+Apple Silicon before any expensive qualification gates start. The native macOS
+pull-request workflow also runs it in Safe on Linux x86_64 and Apple Silicon. Existing
 correctness, lifecycle and resource gates remain required; receipts are uploaded
 even after failure. Local equivalent commands are:
 
@@ -152,7 +152,7 @@ even after failure. Local equivalent commands are:
 python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe --output tests/results/workflows-all-safe.json
 ```
 
-The `probes` build also installs `calendar_http_probe`. All four native release
+The `probes` build also installs `calendar_http_probe`. All three native release
 platforms run `tests/calendar_native_http.py --probe PATH` in Safe to
 check Calendar HTTP methods, conditional updates, error mapping and no-replay
 behavior. Linux x86_64 additionally runs `terminal_html_compatibility.py` against

@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 
 from release import ROOT, package_versions
+from homebrew_formula import platforms_for
 
 
 def api(repo, endpoint):
@@ -58,7 +59,7 @@ def release_notes(version, zig, repo, root=ROOT):
     else:
         highlights = (
             "Linux x86_64/arm64 static musl backends and complete Omarchy plugin bundles, "
-            "plus native macOS Apple Silicon/Intel CLI and TUI bundles. The Omarchy bar is Linux-only; "
+            "plus native macOS Apple Silicon CLI and TUI bundles. The Omarchy bar is Linux-only; "
             "macOS binaries use system libraries and frameworks.\n\n"
             "Includes the account-separated bar, **experimental** Vim-oriented terminal mail client "
             "(`omagma tui`) and bounded JSONL agent CLI (`omagma cli`). Cached mail, formatted HTML-only "
@@ -108,7 +109,7 @@ def main():
     reference = api(repo, "git/ref/tags/" + tag)
     if reference:
         raise ValueError("Version tag already exists; refusing to retarget it")
-    names = [name for system in ("linux", "macos") for arch in ("x86_64", "arm64")
+    names = [name for system, arch in platforms_for(version)
              for name in (f"omagma-{system}-{arch}", f"omagma-{version}-{system}-{arch}.tar.gz")]
     names.extend(("LICENSES.txt", "SHA256SUMS"))
     files = {name: ROOT / "dist" / name for name in names}
