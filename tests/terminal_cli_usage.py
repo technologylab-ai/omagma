@@ -26,7 +26,8 @@ CANARY = "fictional-private-argument-canary"
 LEGACY_MODES = ("daemon", "auth", "status")
 FAMILIES = {
     "calendar": ("list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile",
-                 "event-review", "event-apply", "event-reconcile", "open", "event-open", "event-retry", "event-abandon", "event-pending"),
+                 "event-review", "event-apply", "event-reconcile", "open", "event-open", "event-retry", "event-abandon", "event-pending",
+                 "meet-event-review", "meet-event-apply", "meet-event-reconcile", "meet-event-pending"),
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
@@ -319,6 +320,7 @@ calendar.list calendar.agenda calendar.event calendar.freebusy calendar.invitati
 calendar.review calendar.apply calendar.import calendar.update calendar.cancel calendar.reconcile
 calendar.event-review calendar.event-apply calendar.event-reconcile calendar.open calendar.event-open
 calendar.event-retry calendar.event-abandon calendar.event-pending
+calendar.meet-event-review calendar.meet-event-apply calendar.meet-event-reconcile calendar.meet-event-pending
 """.split())
 
 
@@ -345,7 +347,9 @@ def discovery(runner):
     for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply",
                     "calendar.agenda", "calendar.review", "calendar.event-review", "calendar.event-apply",
                     "calendar.event-reconcile", "calendar.open", "calendar.event-open", "calendar.event-retry",
-                    "calendar.event-abandon", "calendar.event-pending", "draft.gmail-save", "reminder.set"):
+                    "calendar.event-abandon", "calendar.event-pending", "calendar.meet-event-review",
+                    "calendar.meet-event-apply", "calendar.meet-event-reconcile", "calendar.meet-event-pending",
+                    "draft.gmail-save", "reminder.set"):
         result = runner.run(["cli", "--config", str(runner.invalid_config), "--schema", command], without_home=True)
         require(result.returncode == 0 and not result.stderr, "command schema loaded private configuration")
         selected = json.loads(result.stdout)
