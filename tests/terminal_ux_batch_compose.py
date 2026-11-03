@@ -180,7 +180,8 @@ def countdown_cancel(binary, directory, capture_dir=None):
                 "countdown staged a different local draft")
         capture(terminal, capture_dir, "ux-default-send-countdown")
         terminal.send(b"\x1a")
-        terminal.until(lambda: not countdown_active(terminal) and "Subject:" in terminal.text())
+        terminal.until(lambda: not countdown_active(terminal) and "Subject:" in terminal.text()
+                       and "Send cancelled · draft retained" in terminal.text())
         no_writes(binary, directory, extra)
         require(queue_entries(binary, directory, extra)[0]["state"] == "canceled",
                 "Ctrl+Z hid countdown without canceling its durable queued intent")
@@ -194,9 +195,12 @@ def countdown_cancel(binary, directory, capture_dir=None):
         send_review(terminal)
         activate_button(terminal, "[y Send]")
         terminal.until(lambda: countdown_active(terminal))
+        require("Send cancelled · draft retained" not in terminal.text(),
+                "stale cancel status would mask the Undo durable ack")
         undo = next(label for label in ("[Undo Ctrl+Z]", "[Undo]", "[Undo send]") if label in terminal.text())
         activate_button(terminal, undo)
-        terminal.until(lambda: not countdown_active(terminal) and "Subject:" in terminal.text())
+        terminal.until(lambda: not countdown_active(terminal) and "Subject:" in terminal.text()
+                       and "Send cancelled · draft retained" in terminal.text())
         no_writes(binary, directory, extra)
         require(all(entry["state"] == "canceled" for entry in queue_entries(binary, directory, extra)),
                 "focused Undo left an active queued intent")
