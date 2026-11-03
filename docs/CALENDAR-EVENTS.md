@@ -64,8 +64,10 @@ access is lost. `Enter` applies the pending choice; `Esc` cancels it.
 
 Week marks the current time with a red line across today’s column, using the
 displayed time zone. The line stays visible beneath meeting titles and selected
-events, and advances on the existing clock ticks. Monochrome uses an uncoloured
-line. It appears only when today and the current hour are visible; it does not
+events, and advances on the existing clock ticks. A red `now` label in the time
+gutter identifies the line, replacing an hour label on that row when needed.
+Monochrome uses an uncoloured line and label. They appear only when today and
+the current hour are visible; the indicator does not
 scroll the calendar or change the events shown. Its position is limited by the
 terminal’s row resolution.
 

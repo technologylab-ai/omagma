@@ -18549,6 +18549,11 @@ const App = struct {
         try self.line(win, 1, "all", .muted);
         try self.line(win, 2, "day", .muted);
         for (0..slots) |slot| try self.line(win, bands.grid_start + plan.offsets[slot], try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + slot))}), .muted);
+        if (now_row) |row| {
+            const gutter = win.child(.{ .y_off = @intCast(row), .width = 6, .height = 1 });
+            gutter.fill(.{ .style = self.style(.text) });
+            try self.line(gutter, 0, "now", .warning);
+        }
         var actually_shown: [calendar_sources.max_events]bool = @splat(false);
         for (0..days) |column| {
             const day = first + @as(i64, @intCast(column));
@@ -31711,6 +31716,12 @@ test "calendar now line: selected long titles and badges retain text colors and 
             app.mouse_hits.clear();
             try app.drawCalendarWeekAt(win, first * 86400000 + 12 * 3600000 + @as(i64, @intCast(minute)) * 60000);
             const row = hour_row + minute * (next_row - hour_row) / 60;
+            for (0..6) |x| {
+                const label_cell = screen.readCell(@intCast(x), @intCast(row)).?;
+                try std.testing.expectEqualStrings(if (x < 3) "now"[x .. x + 1] else " ", label_cell.char.grapheme);
+                if (x < 3) try std.testing.expectEqual(if (mono) vaxis.Color.default else vaxis.Color{ .rgb = app.palette.red }, label_cell.style.fg);
+                try std.testing.expectEqual(vaxis.Cell.Style.Underline.off, label_cell.style.ul_style);
+            }
             for (0..screen.height) |y| for (0..screen.width) |x| {
                 const cell = screen.readCell(@intCast(x), @intCast(y)).?;
                 const marked = y == row and x >= 6 and x < 6 + cell_width;
