@@ -118,7 +118,7 @@ pub const Host = struct {
     fn compact(state: *StateFile) void {
         for (state.entries) |*entry| {
             if (entry.review) |review| {
-                if (review.ordinary_event != null) entry.ordinary = true;
+                if (review.journaledEvent()) entry.ordinary = true;
                 if (entry.state.operation) |operation| if (operation.state != .unknown and operation.intent.eql(review.intent)) {
                     entry.receipt_hash = review.review_hash;
                     entry.review = null;
@@ -307,8 +307,10 @@ pub const Host = struct {
             const operation = entry.state.operation orelse continue;
             if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
             const review = entry.review orelse continue;
-            if (review.ordinary_event == null) continue;
-            if (if (event_id.len == 0) operation.intent.kind != .insert_event else !std.mem.eql(u8, event_id, operation.intent.event_id)) continue;
+            if (!review.journaledEvent()) continue;
+            // A series action is also found from the occurrence it was chosen on.
+            const selected = if (review.event_action) |prepared| prepared.selected_event_id else "";
+            if (if (event_id.len == 0) operation.intent.kind != .insert_event else !std.mem.eql(u8, event_id, operation.intent.event_id) and !std.mem.eql(u8, event_id, selected)) continue;
             return try clone(svc.Pending, out, .{ .review = review, .operation = operation });
         }
         return null;
@@ -348,7 +350,7 @@ pub const Host = struct {
             state.history = try history.append(&store, state.history, &.{previous});
         };
         current.review = review;
-        current.ordinary = review.ordinary_event != null;
+        current.ordinary = review.journaledEvent();
         try archiveSettled(&store, a, &state, review.intent.identity);
         try fit(&state, review.intent.identity);
         try admitClaim(a, state, review.intent);
@@ -387,7 +389,7 @@ pub const Host = struct {
         // Another process may have completed an action after Service.apply's
         // read/lookup but before this locked claim. Recheck the durable target
         // and version here; only this transaction can grant fresh dispatch.
-        if (review.ordinary_event != null) {
+        if (review.journaledEvent()) {
             if (current.state.tracked) |tracked| if (intent.kind == .insert_event or !std.mem.eql(u8, intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
         } else if (current.state.tracked) |tracked| {
             if (intent.kind == .import_event or (if (review.response_only) intent.version.order(tracked.version) == .lt else intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
@@ -471,7 +473,7 @@ pub const Host = struct {
             return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = false };
         if (next_attempt != operation.attempt + 1) return error.InvalidCalendarRetry;
         const review = entry.review orelse return error.CalendarReviewNotFound;
-        if (review.ordinary_event == null or !review.intent.eql(intent)) return error.OperationConflict;
+        if (!review.journaledEvent() or !review.intent.eql(intent)) return error.OperationConflict;
         operation.attempt = next_attempt;
         entry.state.operation = operation;
         entry.receipt_reserved = true;

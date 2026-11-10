@@ -252,7 +252,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "color", color);
         } else if (eq(arg, "--queue-id") or eq(arg, "--blob-id") or eq(arg, "--mime-type") or eq(arg, "--scope")) {
             const key = if (eq(arg, "--queue-id")) "queueId" else if (eq(arg, "--blob-id")) "blobId" else if (eq(arg, "--mime-type")) "mimeType" else "scope";
-            if (eq(arg, "--scope") and !eq(v, "message") and !eq(v, "conversation")) return error.InvalidTriageScope;
+            // Calendar actions choose one event or its series; mail triage a
+            // message or its conversation.
+            if (eq(arg, "--scope") and eq(mode, "calendar")) {
+                if (!eq(v, "event") and !eq(v, "series")) return error.InvalidCalendarScope;
+            } else if (eq(arg, "--scope") and !eq(v, "message") and !eq(v, "conversation")) return error.InvalidTriageScope;
             try req.object.put(sa, key, .{ .string = v });
         } else if (eq(arg, "--send-delay") or eq(arg, "--delay-seconds")) {
             if (interactive or jsonl) return error.SendDelayRequiresSend;
@@ -531,7 +535,7 @@ fn failed(status: u8) error{CommandFailed} {
 pub fn exitStatus() u8 {
     return if (exit_status == 0) 3 else exit_status;
 }
-const authorization_codes = [_][]const u8{ "PermissionDenied", "NotConnected", "InvalidGrant", "OAuthClientRequired", "WrongAccount", "GrantClientMismatch", "KeyringUnavailable", "KeyringLocked", "CredentialStorageAccessDenied", "VaultLocked", "BackendRequired", "DriveNotConnected", "DriveAccessExpired", "CalendarPermissionRequired", "MeetSettingsPermissionRequired" };
+const authorization_codes = [_][]const u8{ "PermissionDenied", "NotConnected", "InvalidGrant", "OAuthClientRequired", "WrongAccount", "GrantClientMismatch", "KeyringUnavailable", "KeyringLocked", "CredentialStorageAccessDenied", "VaultLocked", "BackendRequired", "DriveNotConnected", "DriveAccessExpired", "CalendarPermissionRequired", "CalendarReadPermissionRequired", "CalendarWritePermissionRequired", "MeetSettingsPermissionRequired" };
 /// Commands whose ok:true reply is a send or RSVP receipt: success depends on
 /// its outcome/state, not on ok alone.
 fn sendCommand(command: []const u8) bool {
@@ -564,6 +568,12 @@ fn errorStatus(command: []const u8, failure: j.Value) u8 {
     return 3;
 }
 fn outcomeStatus(command: []const u8, data: j.Value) u8 {
+    if (calendarWriteCommand(command) and data == .object) {
+        const state = j.text(data, "state");
+        if (eq(state, "unknown")) return 6;
+        if (eq(state, "rejected")) return 3;
+        return 0;
+    }
     if (!sendCommand(command) or data != .object) return 0;
     if (j.boolean(data, "dryRun", false) catch false) {
         // A dry run of an identity with a recorded receipt replays it.
@@ -716,7 +726,13 @@ fn draftSourceCommand(command: []const u8) bool {
 /// One-shot commands whose --dry-run is the executor's JSONL dryRun plan:
 /// saved-draft sends and label changes (spam/unspam become mail.batch).
 fn plannedCommand(command: []const u8) bool {
-    for ([_][]const u8{ "draft.send", "draft.queue", "mail.archive", "mail.trash", "mail.restore", "mail.mark", "mail.batch", "mail.spam", "mail.unspam" }) |name| if (eq(command, name)) return true;
+    for ([_][]const u8{ "draft.send", "draft.queue", "mail.archive", "mail.trash", "mail.restore", "mail.mark", "mail.batch", "mail.spam", "mail.unspam", "calendar.event-delete-review", "calendar.event-respond-review", "calendar.event-apply" }) |name| if (eq(command, name)) return true;
+    return false;
+}
+/// Calendar writes whose ok:true reply carries a durable state that decides
+/// the exit status (unknown 6, rejected 3), as for sends.
+fn calendarWriteCommand(command: []const u8) bool {
+    for ([_][]const u8{ "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry" }) |name| if (eq(command, name)) return true;
     return false;
 }
 fn eq(a: []const u8, b: []const u8) bool {
@@ -760,6 +776,7 @@ fn calendarField(arg: []const u8) ?[]const u8 {
         .{ .flag = "--review-hash", .key = "reviewHash" },
         .{ .flag = "--send-updates", .key = "sendUpdates" },
         .{ .flag = "--meet-ai-notes", .key = "meetAiNotes" },
+        .{ .flag = "--response", .key = "response" },
     };
     for (fields) |field| if (eq(arg, field.flag)) return field.key;
     return null;
@@ -891,6 +908,16 @@ test "cli process: every documented exit status row is derived from the reply" {
         .{ .command = "mail.read", .reply = "{\"ok\":false,\"error\":{\"code\":\"Timeout\",\"retryable\":true}}", .status = 7 },
         .{ .command = "labels.create", .reply = "{\"ok\":false,\"error\":{\"code\":\"Timeout\",\"retryable\":true}}", .status = 7 },
         .{ .command = "mail.list", .reply = "{\"ok\":false,\"error\":{\"code\":\"RateLimited\",\"retryable\":true}}", .status = 7 },
+        // Calendar writes: the durable state decides, as for sends.
+        .{ .command = "calendar.event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"applied\"}}", .status = 0 },
+        .{ .command = "calendar.event-apply", .reply = "{\"ok\":true,\"data\":{\"dryRun\":true,\"state\":\"not_sent\"}}", .status = 0 },
+        .{ .command = "calendar.event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"rejected\",\"errorCode\":\"CalendarVersionConflict\"}}", .status = 3 },
+        .{ .command = "calendar.event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\"}}", .status = 6 },
+        .{ .command = "calendar.event-reconcile", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\",\"retryPossible\":true}}", .status = 6 },
+        .{ .command = "calendar.event-abandon", .reply = "{\"ok\":true,\"data\":{\"state\":\"archived\"}}", .status = 0 },
+        .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarWritePermissionRequired\"}}", .status = 4 },
+        .{ .command = "calendar.event-respond-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarOrganizerCannotRespond\"}}", .status = 3 },
+        .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarNotFound\"}}", .status = 5 },
     }) |row| {
         const frame = try std.json.parseFromSliceLeaky(j.Value, a, row.reply, .{});
         std.testing.expectEqual(row.status, replyStatus(row.command, frame)) catch |err| {

@@ -10,6 +10,7 @@ const agenda_builder = @import("calendar_agenda.zig");
 const timezone = @import("timezone.zig");
 const j = @import("json.zig");
 const ordinary = @import("calendar_event.zig");
+const action = @import("calendar_event_action.zig");
 
 pub const Grants = struct {
     account: []const u8,
@@ -107,10 +108,38 @@ pub const Review = struct {
     rsvp_response: ?p.RsvpResponse = null,
     response_only: bool = false,
     ordinary_event: ?ordinary.Prepared = null,
+    /// A reviewed delete or attendee response on an existing event. It uses
+    /// the ordinary-event journal: receipts, reconcile, retry and archive.
+    event_action: ?action.Prepared = null,
 
     pub fn confirmation(self: Review) Confirmation {
         return .{ .target = self.intent.identity.target, .operation_id = self.intent.operation_id, .review_hash = self.review_hash };
     }
+    /// Ordinary event writes (create/edit/delete/respond) share one durable
+    /// journal contract, distinct from invitation imports.
+    pub fn journaledEvent(self: Review) bool {
+        return self.ordinary_event != null or self.event_action != null;
+    }
+};
+/// A delete or respond request as the caller chose it. `expected_etag` binds
+/// the version the caller saw; only a dry run may omit it.
+pub const ActionRequest = struct {
+    action: action.Action,
+    scope: action.Scope,
+    send_updates: ordinary.UpdatePolicy,
+    response: ?action.Response = null,
+    event_id: []const u8,
+    expected_etag: []const u8 = "",
+    dry_run: bool = false,
+};
+/// `review` is null only for a dry-run response plan that chose no answer.
+pub const ActionReview = struct {
+    prepared: action.Prepared,
+    /// Null when rendered from a saved review rather than fresh reads.
+    options: ?action.Options,
+    calendar: t.Calendar,
+    target_etag: []const u8,
+    review: ?Review = null,
 };
 pub const Receipt = struct { operation: planner.Operation, review_hash: [32]u8, ordinary: bool = true };
 pub const Pending = struct { review: Review, operation: planner.Operation };
@@ -326,6 +355,97 @@ pub const Service = struct {
         return self.grants.canWrite(calendar) and ordinary.canEdit(calendar, document_value);
     }
 
+    /// Prepare one exact delete or attendee response from fresh strict reads.
+    /// No provider mutation and no journal claim; the caller preserves the
+    /// returned review unless this is a dry run. A recurring occurrence is
+    /// answered or deleted alone unless the series scope is chosen; the
+    /// series master is then re-read and its own ETag bound.
+    pub fn prepareEventActionReview(self: Service, calendar: t.Calendar, request: ActionRequest, operation_id: []const u8) !ActionReview {
+        try self.requireRead(calendar);
+        try self.requireWrite(calendar);
+        if (request.expected_etag.len == 0 and !request.dry_run) return error.CalendarExpectedEtagRequired;
+        if (request.action == .delete and request.response != null) return error.InvalidCalendarRequest;
+        if (request.action == .respond and request.response == null and !request.dry_run) return error.CalendarResponseRequired;
+        // An uncertain earlier write to this event is resolved first (reads
+        // only, then an explicit decision), never overtaken by a new one.
+        try self.requireNoPending(calendar.target, request.event_id, operation_id);
+        const selected = try self.document(calendar, request.event_id);
+        if (request.expected_etag.len != 0 and !std.mem.eql(u8, selected.event.etag, request.expected_etag)) return error.CalendarReviewStale;
+        const master_selected = action.isSeries(selected);
+        const occurrence = selected.event.recurring_event_id.len != 0;
+        var options: action.Options = .{};
+        var master: ?p.EventDocument = if (master_selected) selected else null;
+        if (occurrence and (request.dry_run or request.scope == .series)) {
+            master = self.document(calendar, selected.event.recurring_event_id) catch |err| blk: {
+                if (request.scope == .series or err == error.OutOfMemory) return err;
+                options.series.reason = @errorName(err);
+                break :blk null;
+            };
+        }
+        if (master) |value| {
+            if (action.check(request.action, calendar, value, self.grants.account)) |found| {
+                options.series = .{ .available = true, .eventId = value.event.id, .etag = value.event.etag, .summary = value.event.summary, .guestCount = found.guest_count, .response = found.response };
+            } else |err| options.series.reason = @errorName(err);
+        } else if (!occurrence) options.series.reason = "not_recurring";
+        const target = switch (request.scope) {
+            .event => if (master_selected) return error.CalendarSeriesScopeRequired else selected,
+            .series => master orelse return error.CalendarNotRecurring,
+        };
+        if (!std.mem.eql(u8, target.event.id, selected.event.id)) try self.requireNoPending(calendar.target, target.event.id, operation_id);
+        // A locked or cancelled occurrence is no basis for its series either.
+        const selected_facts = try action.check(request.action, calendar, selected, self.grants.account);
+        const facts = if (request.scope == .series) try action.check(request.action, calendar, target, self.grants.account) else selected_facts;
+        options.notify = switch (request.action) {
+            .delete => if (facts.role != .organizer) .{ .reason = "not_organizer" } else if (facts.guest_count == 0 and !facts.guests_omitted) .{ .reason = "no_guests" } else .{ .available = true, .recipients = "guests" },
+            .respond => .{ .available = true, .recipients = "organizer" },
+        };
+        if (request.send_updates == .all and !options.notify.available) return error.CalendarNotificationUnavailable;
+        if (request.response) |response| if (std.mem.eql(u8, facts.response, action.wire(response))) return error.CalendarResponseUnchanged;
+        const prepared: action.Prepared = .{
+            .action = request.action,
+            .scope = request.scope,
+            .send_updates = request.send_updates,
+            .response = request.response,
+            .role = facts.role,
+            .attendee = facts.attendee,
+            .previous_response = facts.response,
+            .selected_event_id = selected.event.id,
+            .selected_etag = selected.event.etag,
+            .target_event_id = target.event.id,
+            .summary = target.event.summary,
+            .start = selected.event.start,
+            .end = selected.event.end,
+            .recurring = occurrence or master_selected,
+            .guest_count = facts.guest_count,
+            .guests_omitted = facts.guests_omitted,
+            .organizer = facts.organizer,
+        };
+        var result: ActionReview = .{ .prepared = prepared, .options = options, .calendar = calendar, .target_etag = target.event.etag };
+        if (prepared.response == null and request.action == .respond) return result;
+        const source_bytes = try std.json.Stringify.valueAlloc(self.a, prepared, .{});
+        if (source_bytes.len > t.Limits.source_bytes) return error.CalendarTooLarge;
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source_bytes, &hash, .{});
+        const identity: planner.Identity = .{ .target = calendar.target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{target.event.id}) };
+        const version: t.Version = .{ .sequence = target.event.sequence, .dtstamp_ms = 0 };
+        const source: t.Invitation = .{ .account = calendar.target.account, .source = source_bytes, .unfolded = source_bytes, .source_hash = hash, .method = .request, .uid = identity.uid, .organizer = calendar.target.account, .attendee = calendar.target.account, .version = version, .summary = target.event.summary };
+        var intent: planner.Intent = .{ .operation_id = operation_id, .identity = identity, .version = version, .kind = if (request.action == .delete) .cancel_event else .update_event, .source_hash = hash, .payload_hash = @splat(0), .event_id = target.event.id, .expected_etag = target.event.etag };
+        const request_value = switch (request.action) {
+            .delete => try action.prepareDelete(self.a, intent, request.send_updates),
+            .respond => try action.prepareRespond(self.a, intent, target, facts.attendee, prepared.response.?, request.send_updates),
+        };
+        intent = try request_value.bindIntent(intent);
+        var review: Review = .{ .calendar = calendar, .source = source, .span = null, .intent = intent, .request = request_value, .review_hash = undefined, .previous = target.event, .event_action = prepared };
+        review.review_hash = try reviewHash(self.a, review);
+        result.review = review;
+        return result;
+    }
+    fn requireNoPending(self: Service, target: t.Target, event_id: []const u8, operation_id: []const u8) !void {
+        const store = self.persistence orelse return;
+        const state = try store.load(self.a, .{ .target = target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{event_id}) });
+        if (state.operation) |operation| if (operation.state == .unknown and !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return error.CalendarOperationPending;
+    }
+
     pub fn invitationPlan(self: Service, calendar: t.Calendar, raw: []const u8, verified_aliases: []const []const u8, bindings: Bindings) !InvitationPlan {
         try self.requireRead(calendar);
         const source = try invitation.parseForCalendar(self.a, raw, self.grants.account, verified_aliases);
@@ -406,6 +526,14 @@ pub const Service = struct {
     /// claiming or dispatching a mutation. Existing operations are returned
     /// for their caller to reconcile; this never repeats a provider write.
     pub fn preflight(self: Service, review: Review, confirmation: Confirmation) !?planner.Operation {
+        return self.preflightMode(review, confirmation, true);
+    }
+    /// The same fresh checks as apply, without saving or claiming anything.
+    /// A dry run reports what would be sent; no provider write follows it.
+    pub fn check(self: Service, review: Review, confirmation: Confirmation) !?planner.Operation {
+        return self.preflightMode(review, confirmation, false);
+    }
+    fn preflightMode(self: Service, review: Review, confirmation: Confirmation, persist: bool) !?planner.Operation {
         try self.validateReview(review, confirmation);
         try self.requireWrite(review.calendar);
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
@@ -417,10 +545,10 @@ pub const Service = struct {
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
-        if (review.ordinary_event == null and review.source.method != .cancel and review.source.attendee.len == 0) {
+        if (!review.journaledEvent() and review.source.method != .cancel and review.source.attendee.len == 0) {
             if (!review.calendar.primary or review.intent.kind != .import_event or !std.ascii.eqlIgnoreCase(try p.importedOrganizer(self.a, review.request), self.grants.account)) return error.CalendarReviewStale;
         }
-        if (review.ordinary_event == null) {
+        if (!review.journaledEvent()) {
             if (state.tracked) |tracked| {
                 if (review.intent.kind == .import_event or (if (review.response_only) review.intent.version.order(tracked.version) == .lt else review.intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, review.intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
             } else if (review.intent.kind != .import_event and !review.response_only) return error.CalendarReviewStale;
@@ -433,6 +561,11 @@ pub const Service = struct {
                 const current = try self.event(review.calendar, review.intent.event_id);
                 if (!sameEventIdentity(current, review.source) or current.cancelled or current.locked or !std.mem.eql(u8, current.etag, review.intent.expected_etag) or current.sequence > review.intent.version.sequence) return error.CalendarReviewStale;
             }
+        } else if (review.event_action) |prepared| {
+            // The exact reviewed version must still be current and eligible.
+            const current = try self.document(review.calendar, review.intent.event_id);
+            if (!std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;
+            _ = action.check(prepared.action, review.calendar, current, self.grants.account) catch return error.CalendarReviewStale;
         } else if (review.intent.kind == .insert_event) {
             // The stable client-generated ID is the exact recovery address.
             // A pre-existing record never authorizes inserting over it.
@@ -443,7 +576,7 @@ pub const Service = struct {
             const current = try self.document(review.calendar, review.intent.event_id);
             if (!ordinary.canEdit(review.calendar, current) or !std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;
         }
-        try store.preserveFn(store.context, review);
+        if (persist) try store.preserveFn(store.context, review);
         return null;
     }
 
@@ -461,7 +594,7 @@ pub const Service = struct {
     pub fn retry(self: Service, review: Review, confirmation: Confirmation, next_attempt: u32) !Applied {
         try self.validateReview(review, confirmation);
         try self.requireWrite(review.calendar);
-        if (review.ordinary_event == null) return error.CalendarReviewMismatch;
+        if (!review.journaledEvent()) return error.CalendarReviewMismatch;
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         const state = try store.load(self.a, review.intent.identity);
         const operation = state.operation orelse return error.CalendarOperationNotFound;
@@ -479,7 +612,7 @@ pub const Service = struct {
     /// asserts the event was not saved and never issues a provider request.
     pub fn archive(self: Service, review: Review, confirmation: Confirmation) !Applied {
         try self.validateReview(review, confirmation);
-        if (review.ordinary_event == null) return error.CalendarReviewMismatch;
+        if (!review.journaledEvent()) return error.CalendarReviewMismatch;
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         const state = try store.load(self.a, review.intent.identity);
         var operation = state.operation orelse return error.CalendarOperationNotFound;
@@ -488,7 +621,11 @@ pub const Service = struct {
         operation.state = .archived;
         operation.error_code = "UncertaintyArchived";
         try store.journal.record(operation);
-        return .{ .operation = operation, .recovery_reason = "The event may still appear in Calendar" };
+        const outcome: []const u8 = if (review.event_action) |prepared| switch (prepared.action) {
+            .delete => "The event may already be deleted in Calendar",
+            .respond => "Your answer may already be saved in Calendar",
+        } else "The event may still appear in Calendar";
+        return .{ .operation = operation, .recovery_reason = outcome };
     }
 
     fn dispatchClaimed(self: Service, review: Review, claimed: planner.Operation, retrying: bool) !Applied {
@@ -511,7 +648,7 @@ pub const Service = struct {
         } else {
             const document_value = p.decodeDocument(self.a, review.calendar.target, response.body) catch return .{ .operation = operation };
             const expected_organizer = if (review.intent.kind == .import_event and review.source.attendee.len == 0) try p.importedOrganizer(self.a, review.request) else review.source.organizer;
-            if (!(if (review.ordinary_event != null) ordinary.receiptProof(document_value.event, review.intent) else provesWrite(document_value.event, review, expected_organizer)) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
+            if (!(if (review.event_action) |prepared| action.respondProof(document_value, review.intent, prepared) else if (review.ordinary_event != null) ordinary.receiptProof(document_value.event, review.intent) else provesWrite(document_value.event, review, expected_organizer)) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
             result_event = document_value.event;
             operation.provider_id = document_value.event.id;
         }
@@ -534,6 +671,27 @@ pub const Service = struct {
         if (pending.state != .unknown) return .{ .operation = pending };
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         var match: ?t.Event = null;
+        if (review.event_action) |prepared| {
+            // Reads only. A missing event is not proof of deletion (access can
+            // be lost too); an unchanged version may receive the identical
+            // conditional request again only after explicit confirmation.
+            const document_value = self.document(review.calendar, pending.intent.event_id) catch |err| return .{ .operation = pending, .recovery_reason = if (err == error.CalendarNotFound) "EventNotVisible" else @errorName(err) };
+            const current = document_value.event;
+            const proven = switch (prepared.action) {
+                .delete => action.deleteProof(current, pending.intent),
+                .respond => action.respondProof(document_value, pending.intent, prepared),
+            };
+            if (!proven) {
+                const eligible = if (action.check(prepared.action, review.calendar, document_value, self.grants.account)) |_| true else |_| false;
+                const possible = !current.cancelled and eligible and std.mem.eql(u8, current.etag, pending.intent.expected_etag) and pending.attempt < 1000000;
+                return .{ .operation = pending, .retry_possible = possible, .recovery_reason = if (possible) @as([]const u8, "SavedVersionStillCurrent") else if (current.cancelled) "EventDeletedWithoutReceipt" else "EventChangedWithoutReceipt" };
+            }
+            var resolved = pending;
+            resolved.state = .applied;
+            resolved.provider_id = current.id;
+            try store.journal.record(resolved);
+            return .{ .operation = resolved, .event = current, .reconciled = true };
+        }
         if (review.ordinary_event != null) {
             const document_value = self.document(review.calendar, pending.intent.event_id) catch |err| return .{ .operation = pending, .retry_possible = pending.intent.kind == .insert_event and err == error.CalendarNotFound and pending.attempt < 1000000, .recovery_reason = @errorName(err) };
             const current = document_value.event;
@@ -616,7 +774,14 @@ pub const Service = struct {
         var actual_source: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(review.source.source, &actual_source, .{});
         if (!std.mem.eql(u8, &actual_source, &review.intent.source_hash) or !std.mem.eql(u8, &review.source.source_hash, &actual_source) or review.source.version.order(review.intent.version) != .eq or !std.mem.eql(u8, review.source.uid, review.intent.identity.uid) or !std.ascii.eqlIgnoreCase(review.source.account, review.intent.identity.target.account)) return error.CalendarReviewMismatch;
-        if (review.ordinary_event) |prepared| {
+        if (review.event_action) |prepared| {
+            const serialized = try std.json.Stringify.valueAlloc(self.a, prepared, .{});
+            const kind_matches = switch (prepared.action) {
+                .delete => review.intent.kind == .cancel_event,
+                .respond => review.intent.kind == .update_event and prepared.response != null,
+            };
+            if (!std.mem.eql(u8, serialized, review.source.source) or !kind_matches or review.ordinary_event != null or review.response_only or review.rsvp_response != null or !std.mem.eql(u8, prepared.target_event_id, review.intent.event_id)) return error.CalendarReviewMismatch;
+        } else if (review.ordinary_event) |prepared| {
             const serialized = try std.json.Stringify.valueAlloc(self.a, prepared, .{});
             if (!std.mem.eql(u8, serialized, review.source.source) or (review.intent.kind != .insert_event and review.intent.kind != .update_event)) return error.CalendarReviewMismatch;
         } else if (review.intent.kind == .insert_event) return error.CalendarReviewMismatch;
@@ -635,13 +800,13 @@ pub const Service = struct {
 };
 
 fn reviewHash(a: std.mem.Allocator, review: Review) ![32]u8 {
-    const bytes = if (review.ordinary_event != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .ordinary_event = review.ordinary_event, .previous = review.previous }, .{}) else if (review.rsvp_response != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous, .rsvp_response = review.rsvp_response, .response_only = review.response_only }, .{}) else try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous }, .{});
+    const bytes = if (review.event_action != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .event_action = review.event_action, .previous = review.previous }, .{}) else if (review.ordinary_event != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .ordinary_event = review.ordinary_event, .previous = review.previous }, .{}) else if (review.rsvp_response != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous, .rsvp_response = review.rsvp_response, .response_only = review.response_only }, .{}) else try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous }, .{});
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     return hash;
 }
 fn legacyInvitationReview(review: Review) bool {
-    if (review.ordinary_event != null) return false;
+    if (review.journaledEvent()) return false;
     const previous = review.previous orelse return false;
     return previous.event_type.len == 0 and previous.attendees.len == 0 and !previous.attendees_omitted and previous.attendee_count == 0 and previous.conference_status.len == 0 and !previous.conference_present;
 }

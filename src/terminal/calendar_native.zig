@@ -67,7 +67,7 @@ pub fn capabilitiesForCommand(command: []const u8) ![]const []const u8 {
     if (std.mem.eql(u8, command, "calendar.list")) return &.{ "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy" };
     if (std.mem.eql(u8, command, "calendar.freebusy")) return &.{"calendar-freebusy"};
     for ([_][]const u8{ "calendar.agenda", "calendar.event", "calendar.invitation-plan", "calendar.reconcile", "calendar.event-reconcile", "calendar.event-pending", "calendar.event-abandon" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-read", "calendar-write-owned", "calendar-write-shared" };
-    for ([_][]const u8{ "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-review", "calendar.event-apply", "calendar.event-retry" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-write-owned", "calendar-write-shared" };
+    for ([_][]const u8{ "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-review", "calendar.event-apply", "calendar.event-retry", "calendar.event-delete-review", "calendar.event-respond-review" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-write-owned", "calendar-write-shared" };
     return error.UnsupportedCalendarCommand;
 }
 
