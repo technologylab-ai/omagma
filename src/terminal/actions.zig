@@ -122,6 +122,23 @@ pub const entries = [_]Entry{
     .{ .id = .updates, .name = "Updates", .detail = "Check releases and see upgrade instructions for this installation", .keys = ":updates" },
 };
 
+/// Command-prompt names for palette actions: ":archive" runs Archive.
+pub const commands = [_]struct { name: []const u8, id: Id }{
+    .{ .name = "archive", .id = .archive },
+    .{ .name = "trash", .id = .trash },
+    .{ .name = "star", .id = .star },
+    .{ .name = "unread", .id = .unread },
+    .{ .name = "compose", .id = .compose },
+    .{ .name = "reply", .id = .reply },
+    .{ .name = "reply-all", .id = .reply_all },
+    .{ .name = "forward", .id = .forward },
+    .{ .name = "help", .id = .help },
+};
+pub fn command(name: []const u8) ?Id {
+    for (commands) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.id;
+    return null;
+}
+
 pub const Matches = struct {
     indices: [entries.len]usize = undefined,
     len: usize = 0,

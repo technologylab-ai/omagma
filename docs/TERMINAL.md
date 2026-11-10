@@ -35,6 +35,12 @@ A compact **New mail** card appears at the top right of the main mailbox screen.
 
 `gg` jumps to the first mail in the entire cached mailbox or cached result set, including from a later window; on the main screen it works from either the list or reader. In expanded reading, `gg` scrolls the current body to its start. Home scrolls a focused reader to the top; in the mail list it selects the first row of the current window, keeping that window.
 
+Gmail-style jumps open a mailbox directly: `g i` Inbox, `g s` Sent, `g d`
+Drafts, `g a` All Mail and `g t` Trash (they also clear an active search).
+Without an active `:find`, `n`/`N` move to the next/previous unread cached mail.
+Escape steps back one view but never quits; only `q`, `:q` or an idle Ctrl+C
+leave the TUI.
+
 The list holds at most 32 messages at a time. Move past its last row with `j`, Down, the wheel or PageDown to load the next window and select the adjacent older message. Move above its first row with `k`, Up, the wheel or PageUp to return to adjacent newer cached mail. Existing mail remains readable while another window loads. Repeated boundary input requests one window.
 
 After the cached tail, ordinary forward movement can fetch one older Gmail page. Backward movement uses cached metadata; a selected body that is missing can still be fetched read-only. `/` cache searches never fetch missing bodies or older provider results. `[` and `]` remain explicit page controls; `[` selects the previous window's first row.
@@ -48,11 +54,19 @@ In send review, the mouse wheel scrolls the content three rows per notch without
 Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Drag across the received message body to select text, then press `y` or choose **Copy**. Your terminal's selection modifier, or `--no-mouse`, also retains ordinary terminal text selection.
 
 Unread subjects are bold and marked `●`; read subjects use normal weight.
-Stars appear as `⭐` on the sender row, independently of unread or bulk
-selection marks. Messages with known attachments show `📎` beside the subject.
-A highlighted row identifies your selection without changing
-its read status. The reader header shows read/starred state and readable label
-names for that account, including custom labels.
+A fixed flag column before the date shows `★` for starred mail, `⊕` for known
+attachments and `◔` for a local follow-up date, in both densities. Bulk-selected
+rows are tinted and ticked `✓`. In the focused pane the selected row has an
+accent bar `▌` and a clear background; an unfocused pane marks its selected row
+with a thin `▏` only, without changing read status. Dates always fit: the time
+for today, the weekday within the past week, `Nov 7` this year and an ISO date
+for older mail. Sent mail shows `To: recipient` instead of your own name.
+
+The reader header aligns its From, To, Cc and Date keys and shows labels as
+chips in their Gmail colours (system labels use readable names such as Inbox
+and Updates). `● Unread` and `★ Starred` appear only when set. In short or
+narrow panes the compact header puts the date before the sender so it is never
+cut off. `p`, `H`, `Q` and `S` also act on the previewed message from the list.
 
 In dialogs, Tab/Shift+Tab moves through fields, lists and action buttons;
 Enter activates the focused button. Lists retain their selected row when you
@@ -178,7 +192,10 @@ Use `c` for a new message, `r` for reply and `R` for reply-all. `f`/`F` forwards
 When the original contains HTML, reply, reply-all and forward open a mode
 chooser. **Keep formatting** (`k`) is selected initially: write your own note
 above the original HTML, retaining its tables, styling and embedded images.
-**Text quote** (`t`) puts a plain-text quotation in the editable body.
+**Text quote** (`t`) puts a plain-text quotation in the editable body, below an
+`On <date>, <name> <address> wrote:` line (the reader folds both with `Q`). In a
+Markdown draft only characters that would otherwise become markup are escaped,
+so ordinary punctuation in the quote stays readable.
 Forward also offers **Attach original (.eml)** (`e`), which attaches the
 complete original message and leaves the body ready for your note.
 Tab/Shift+Tab selects a choice, Enter or a click activates it, and Escape/`q`
@@ -323,7 +340,7 @@ continues to switch the inline preview.
 
 `e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. In a Keep formatting draft, the editor receives only your note; the retained original and embedded images remain read-only. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
-Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review;
+`q` saves and leaves normal compose; Escape only leaves insertion. Ctrl+S or `:send` opens review;
 explicit `y` or Enter on the deliberately focused **Send** button starts the
 local send countdown.
 Review starts with **Back** focused. It shows the account, selected From alias,
@@ -503,8 +520,11 @@ definition; ordinary membership stays unchanged. Color choices require the
 same `mail-modify` capability and remain separate from assigning labels.
 
 Space selects mail, Ctrl+A selects the window, and actions apply to that set or
-the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo`
-reverses the last completed account action. Changing mailbox/search context
+the focused message. Escape/`q` clears a selection first; Ctrl+Z (or `:undo`)
+reverses the last completed account action. The status names what happened
+(`Archived 1 · Ctrl+Z Undo`, `Moved 2 to Trash · Ctrl+Z Undo`, `Starred`,
+`Undone: archive (1 restored)`). `U` restores only mail in Trash; elsewhere it
+says `Not in Trash`. Changing mailbox/search context
 clears its previous selection.
 Bulk actions can have partial outcomes; uncertain items are not replayed.
 `:scope message` selects the normal single-message scope. `:scope thread`
@@ -723,7 +743,9 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+P in mailbox / :actions | Discover account/view actions |
 | :updates / Ctrl+P Updates | Release status, upgrade guide and daily/manual checks |
 | :find TEXT, n/N, Escape | Current-message find, next/previous match, done |
-| :next-unread / :previous-unread | Adjacent unread cached mail in the current view |
+| n / N, :next-unread / :previous-unread | Adjacent unread cached mail in the current view (when no find is active) |
+| g i / g s / g d / g a / g t | Go to Inbox / Sent / Drafts / All Mail / Trash |
+| :archive :trash :star :unread :compose :reply :forward :inbox :help :q | Command-prompt forms of the mailbox actions; names ignore case |
 | :search-history / :saved-searches / :save-search NAME | Reuse or save account-specific queries |
 | v / z | Reader layout / expand |
 | V in the reader | Move a text cursor to your chosen starting point |
@@ -766,11 +788,13 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | :save-all DIRECTORY | Save focused-message files to a new private destination set |
 | a / I | Contacts / invitation reply |
 | T / :theme | Preview and choose the TUI theme |
-| Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit |
+| Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit (Escape never quits) |
 
-`q` backs out of readers, search, contacts, help and draft review before quitting the mailbox. It remains text in insertion and path fields. `?` shows the full, scrollable help for the current interface.
+`q` backs out of readers, search, contacts, help and draft review before quitting the mailbox; Escape backs out the same way but stays in the mailbox. It remains text in insertion and path fields. `?` shows the full, scrollable help for the current interface, starting with an ESSENTIALS section; it fills the area between the status rows.
 
-The mailbox footer exposes labels and themes alongside the main mail actions.
+An empty `:` prompt cancels. An unknown command says `Unknown command · Ctrl+P lists actions`, suggesting the nearest known command (`did you mean :archive?`).
+
+One footer style shows keys in bold and their labels muted, separated by ` · `. When the terminal is narrow, decoration such as `T Theme` drops first; navigation, Enter, compose, search, archive/Trash, help and back/quit stay longest.
 Normal compose shows `e` for `$EDITOR`; the original-message preview shows its
 `L`/`B` link and attachment actions when space permits. Help also covers text
 editing (`Ctrl+A/E` for line start/end), list navigation and review controls.

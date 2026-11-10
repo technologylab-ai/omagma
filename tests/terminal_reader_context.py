@@ -192,7 +192,7 @@ def search_case(binary, directory):
                        and reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         require(reader_contains(terminal.screen, "READER-AUTHORED-TEXT"), "body-aware cache search lost cached reader")
         terminal.send(b"/body:never-present-fixture-term\r")
-        terminal.until(lambda: "No rows in cached subset" in terminal.text() or "No matching messages" in terminal.text())
+        terminal.until(lambda: "No matches in downloaded mail" in terminal.text())
         terminal.send(b"a")
         terminal.until(lambda: "Contacts" in terminal.text() and "Alex Personal Fixture" in terminal.text())
         terminal.send(b"q")

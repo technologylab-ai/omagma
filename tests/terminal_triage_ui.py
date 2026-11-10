@@ -26,20 +26,20 @@ def check(binary, directory):
                              environment={"COLORTERM": "truecolor", "NO_COLOR": None})
     try:
         terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002)
-        terminal.until(lambda: 'From: Fixture account <personal@example.com>' in terminal.text() and 'Ready' in terminal.text())
+        terminal.until(lambda: 'Fixture account <personal@example.com>' in terminal.text() and 'Ready' in terminal.text())
         terminal.until(lambda: terminal.screen.locate('Projects') is not None)
         with Client(binary, directory) as client:
             before = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
         terminal.send(b'  ')
         terminal.until(lambda: '2 selected' in terminal.text() and terminal.text().count('✓') >= 2)
         terminal.send(b'x')
-        terminal.until(lambda: 'Mail action:' in terminal.text())
+        terminal.until(lambda: 'Archived 2' in terminal.text())
         with Client(binary, directory) as client:
             after = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
             changed = [identifier for identifier, labels in before.items() if after.get(identifier) != labels]
             require(len(changed) == 2 and all('INBOX' not in after[m] for m in changed), 'bulk archive changed wrong IDs')
         terminal.send(b':undo\r')
-        terminal.until(lambda: 'Undo:' in terminal.text())
+        terminal.until(lambda: 'Undone: archive' in terminal.text())
         with Client(binary, directory) as client:
             restored = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
             require(all(restored[m] == before[m] for m in changed), 'TUI undo did not restore exact previous labels')
@@ -53,7 +53,7 @@ def check(binary, directory):
             require(staged == restored, 'staging a label changed mail before Apply')
         reach(terminal, '[Apply 1]')
         activate(terminal)
-        terminal.until(lambda: 'Mail action:' in terminal.text() and 'Labels · staged changes' not in terminal.text())
+        terminal.until(lambda: 'Labels updated on' in terminal.text() and 'Labels · staged changes' not in terminal.text())
         click(terminal, *sidebar_point(terminal, 'Projects'))
         terminal.until(lambda: 'Projects' in terminal.text().splitlines()[0]
                        and 'Synthetic personal' in terminal.text())

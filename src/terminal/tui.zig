@@ -78,7 +78,7 @@ const FileFocus = enum { path, parent, home, hidden, listing, confirm, cancel };
 const ComposeView = enum { rendered, original, plain };
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, label_manager, attachment, theme };
 const LabelManagerPage = enum { list, create, rename, delete };
-const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
+const Tone = enum { text, subject, sender, muted, border, star, accent, selected, warning, fetching, current, offline };
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
 const meet_ui = @import("calendar_meet_ui.zig");
@@ -341,15 +341,198 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "ProviderRejected", .label = "Provider rejected the request" },
         .{ .code = "PathAlreadyExists", .label = "File already exists · choose another path" },
         .{ .code = "OperationPending", .label = "Wait for the current operation" },
+        .{ .code = "CacheNavigationOnly", .label = "Unread navigation uses downloaded mail · q clears the Gmail search" },
+        .{ .code = "MessageRequired", .label = "Select a message first" },
+        .{ .code = "ReaderMessageChanging", .label = "Message is still loading · try again" },
         .{ .code = "OutOfMemory", .label = "Not enough memory for this operation" },
     };
     for (labels) |label| if (same(code, label.code)) return label.label;
     return "Operation failed";
 }
 
+/// The leading key of a footer segment ("j/k", "Ctrl+S", "Esc/q", "INSERT"),
+/// or zero when the segment is plain context ("Cache subset").
+fn hintKeyEnd(segment: []const u8) usize {
+    const end = std.mem.indexOfScalar(u8, segment, ' ') orelse segment.len;
+    const token = segment[0..end];
+    if (token.len == 0) return 0;
+    if (token.len <= 2 or std.mem.indexOfAny(u8, token, "/+^") != null) return end;
+    for ([_][]const u8{ "Enter", "Esc", "Tab", "Space", "Home", "End", "PageDown", "PageUp", "Up", "Down", "1–3", "Backspace", "Delete" }) |name| if (same(token, name)) return end;
+    // Upper-case mode words (INSERT, MOVE, CHAR, LINE) read as keys too.
+    if (token.len >= 4) {
+        for (token) |byte| if (!std.ascii.isUpper(byte)) return 0;
+        return end;
+    }
+    return 0;
+}
+/// Narrow footers keep navigation, Enter, the main triage actions, compose,
+/// search, help and back/quit; decoration such as Theme drops first.
+fn hintPriority(segment: []const u8) u8 {
+    const key = segment[0..hintKeyEnd(segment)];
+    if (key.len == 0) return 10;
+    const ranks = [_]struct { rank: u8, keys: []const []const u8 }{
+        .{ .rank = 10, .keys = &.{ "j/k", "?", "q", "Esc", "Esc/q", "Enter", "y", "Ctrl+S", "i" } },
+        .{ .rank = 9, .keys = &.{ "x", "D", "c", "/", "^V" } },
+        .{ .rank = 8, .keys = &.{ "r/R", "r", "f", "Tab", "J/K", "h/l", "z/q", "n/N", "+", "-", "l/Esc/q", "n/Esc/q", "Tab/Shift+Tab" } },
+        .{ .rank = 7, .keys = &.{ "\\", "Ctrl+Z", "Space" } },
+        .{ .rank = 2, .keys = &.{ "T", "Ctrl+T", "Ctrl+G", "1–3", "Ctrl+D/U", "Ctrl+A/E", "v", "o", "e", "V", "L", "B", "H", "Q", "S", "I", "b", "Ctrl+R", "Ctrl+N/P" } },
+    };
+    for (ranks) |entry| for (entry.keys) |candidate| if (same(key, candidate)) return entry.rank;
+    // Upper-case mode words (INSERT) stay with the essentials.
+    if (key.len >= 4 and std.ascii.isUpper(key[0]) and std.ascii.isUpper(key[key.len - 1])) return 10;
+    return 5;
+}
+fn hintWidth(raw: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(raw) catch raw.len;
+}
+/// Split hints at " · " or wider gaps, drop the lowest-priority (rightmost
+/// first) segments until they fit, and join them with one separator style.
+fn fitHints(buffer: []u8, raw: []const u8, width: u16) []const u8 {
+    var segments: [40][]const u8 = undefined;
+    var keep: [40]bool = @splat(true);
+    var count: usize = 0;
+    var rest = std.mem.trim(u8, raw, " ");
+    while (rest.len > 0 and count < segments.len) {
+        const dot = std.mem.indexOf(u8, rest, " · ");
+        const gap = std.mem.indexOf(u8, rest, "  ");
+        const cut: ?usize = if (dot != null and gap != null) @min(dot.?, gap.?) else dot orelse gap;
+        const segment = std.mem.trim(u8, if (cut) |at| rest[0..at] else rest, " ");
+        rest = if (cut) |at| rest[at..] else "";
+        while (true) {
+            if (std.mem.startsWith(u8, rest, " ")) rest = rest[1..] else if (std.mem.startsWith(u8, rest, "·")) rest = rest["·".len..] else break;
+        }
+        if (segment.len == 0) continue;
+        segments[count] = segment;
+        count += 1;
+    }
+    var total: usize = 1;
+    for (segments[0..count], 0..) |segment, index| total += hintWidth(segment) + @as(usize, if (index > 0) 3 else 0);
+    var kept = count;
+    while (total > width and kept > 1) {
+        var victim: ?usize = null;
+        var index = count;
+        while (index > 0) {
+            index -= 1;
+            if (!keep[index]) continue;
+            if (victim == null or hintPriority(segments[index]) < hintPriority(segments[victim.?])) victim = index;
+        }
+        const drop = victim orelse break;
+        keep[drop] = false;
+        kept -= 1;
+        total -= hintWidth(segments[drop]) + 3;
+    }
+    // The renderer supplies the one-column indent the total accounted for.
+    var writer = Io.Writer.fixed(buffer);
+    var written: usize = 0;
+    for (segments[0..count], keep[0..count]) |segment, kept_segment| if (kept_segment) {
+        if (written > 0) writer.writeAll(" · ") catch break;
+        writer.writeAll(segment) catch break;
+        written += 1;
+    };
+    return writer.buffered();
+}
+/// The mailbox key a palette action or :command shares.
+fn actionKey(id: action_palette.Id) ?u21 {
+    return switch (id) {
+        .compose => 'c',
+        .reply => 'r',
+        .reply_all => 'R',
+        .forward => 'f',
+        .archive => 'x',
+        .trash => 'D',
+        .star => 's',
+        .unread => 'u',
+        .labels => 'm',
+        .files => 'B',
+        else => null,
+    };
+}
+/// Command names the prompt accepts, for "did you mean" suggestions.
+const command_names = [_][]const u8{ "actions", "add-contact", "attachments", "bind", "calendar", "calendar-import", "cancel-send", "copy-message", "density", "detach", "discard-draft", "find", "follow-up", "follow-ups", "gmail-draft", "headers", "inbox", "labels", "layout", "links", "meeting", "next-unread", "paste-image", "preview-browser", "previous-unread", "q", "quit", "receipt", "received", "reload-draft", "resolve-draft", "resume-send", "save-all", "save-attachment", "save-copy", "save-search", "saved-searches", "scope", "search-history", "send", "send-grace", "sender", "spam", "split", "theme", "thread-newer", "thread-older", "unbind", "undo", "unspam", "updates", "version", "view-editor" };
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len > 32 or b.len > 32) return std.math.maxInt(usize);
+    var previous: [33]usize = undefined;
+    var current: [33]usize = undefined;
+    for (0..b.len + 1) |index| previous[index] = index;
+    for (a, 0..) |left, row| {
+        current[0] = row + 1;
+        for (b, 0..) |right, column| current[column + 1] = @min(@min(previous[column + 1] + 1, current[column] + 1), previous[column] + @intFromBool(left != right));
+        @memcpy(previous[0 .. b.len + 1], current[0 .. b.len + 1]);
+    }
+    return previous[b.len];
+}
+/// The closest known command: a unique-enough prefix or a small typo.
+fn nearestCommand(name: []const u8) ?[]const u8 {
+    if (name.len == 0 or name.len > 32) return null;
+    var best: ?[]const u8 = null;
+    var best_distance: usize = @max(@as(usize, 1), name.len / 3) + 1;
+    for (command_names ++ comptime blk: {
+        var names: [action_palette.commands.len][]const u8 = undefined;
+        for (action_palette.commands, 0..) |entry, index| names[index] = entry.name;
+        break :blk names;
+    }) |candidate| {
+        if (name.len >= 3 and std.mem.startsWith(u8, candidate, name)) return candidate;
+        const distance = editDistance(name, candidate);
+        if (distance < best_distance) {
+            best = candidate;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+/// Gmail-style jumps after g: i Inbox, s Sent, d Drafts, a All Mail, t Trash.
+fn goFolder(key: Key) ?usize {
+    for ([_]u21{ 'i', 's', 'd', 'a', 't' }, [_]usize{ 0, 1, 2, 6, 4 }) |letter, folder| if (key.matches(letter, .{})) return folder;
+    return null;
+}
+/// p, H, Q and S change only how the previewed message is shown.
+fn readerViewKey(key: Key) bool {
+    return key.matches('p', .{}) or key.matches('H', .{}) or key.matches('h', .{ .shift = true }) or key.matches('Q', .{}) or key.matches('q', .{ .shift = true }) or key.matches('S', .{}) or key.matches('s', .{ .shift = true });
+}
+fn plural(count: usize, one: []const u8, many: []const u8) []const u8 {
+    return if (count == 1) one else many;
+}
+
+/// Triage feedback names its action from the submitted mail.batch request.
+fn batchNotice(a: Allocator, request: Value, applied_count: i64) ![]const u8 {
+    const count: usize = @intCast(@max(applied_count, 0));
+    const action = text(get(request, "action"));
+    if (same(action, "archive")) return std.fmt.allocPrint(a, "Archived {d}", .{count});
+    if (same(action, "trash")) return std.fmt.allocPrint(a, "Moved {d} to Trash", .{count});
+    if (same(action, "restore")) return std.fmt.allocPrint(a, "Restored {d} from Trash", .{count});
+    if (same(action, "spam")) return std.fmt.allocPrint(a, "Marked {d} as spam", .{count});
+    if (same(action, "unspam")) return std.fmt.allocPrint(a, "Moved {d} out of Spam", .{count});
+    const starred = get(request, "starred");
+    const unread = get(request, "unread");
+    const state: ?[]const u8 = if (starred == .bool) (if (starred.bool) @as([]const u8, "Starred") else "Unstarred") else if (unread == .bool) (if (unread.bool) @as([]const u8, "Marked unread") else "Marked read") else null;
+    if (state) |done| return if (count == 1) done else std.fmt.allocPrint(a, "{s} {d}", .{ done, count });
+    if (get(request, "addLabels") != .null or get(request, "removeLabels") != .null) return std.fmt.allocPrint(a, "Labels updated on {d}", .{count});
+    return std.fmt.allocPrint(a, "Updated {d}", .{count});
+}
+fn batchUndoLabel(request: Value) []const u8 {
+    const action = text(get(request, "action"));
+    for ([_][]const u8{ "archive", "trash", "restore", "spam" }) |known| if (same(action, known)) return known;
+    if (same(action, "unspam")) return "not spam";
+    const starred = get(request, "starred");
+    if (starred == .bool) return if (starred.bool) "star" else "unstar";
+    const unread = get(request, "unread");
+    if (unread == .bool) return if (unread.bool) "mark unread" else "mark read";
+    if (get(request, "addLabels") != .null or get(request, "removeLabels") != .null) return "labels";
+    return "mail action";
+}
+
 fn validDiagnosticCode(code: []const u8) bool {
     if (code.len == 0 or code.len > 64) return false;
     for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
+    return true;
+}
+
+/// Backend error frames carry fixed English sentences (never provider text).
+/// Accept only a bounded, printable sentence that says more than its code.
+fn diagnosticSentence(code: []const u8, message: []const u8) bool {
+    if (message.len < 12 or message.len > 240 or same(message, code) or std.mem.indexOfScalar(u8, message, ' ') == null) return false;
+    if (!std.unicode.utf8ValidateSlice(message)) return false;
+    for (message) |byte| if (byte < 0x20 or byte == 0x7f) return false;
     return true;
 }
 
@@ -464,6 +647,34 @@ fn isoPrefixDay(value: []const u8) ?i64 {
     const day = timezone.dateDay(value[0..10]) catch return null;
     return @as(i64, day);
 }
+const short_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+const short_weekdays = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+/// Mail list dates that always fit (at most 10 cells): HH:MM today, the
+/// weekday within the past week, "Nov 7" this year, ISO for older mail.
+/// Both instants use the loaded display zone's civil dates.
+fn shortDate(allocator: Allocator, zone: *const timezone.Zone, received: i64, now: i64) ![]const u8 {
+    const stamp = try zone.format(allocator, received);
+    if (stamp.len < 16) return stamp;
+    const current = try zone.format(allocator, now);
+    if (current.len < 16) return stamp[0..10];
+    const day = timezone.dateDay(stamp[0..10]) catch return stamp[0..10];
+    const today = timezone.dateDay(current[0..10]) catch return stamp[0..10];
+    if (day == today) return stamp[11..16];
+    // 1970-01-01 (day 0) was a Thursday.
+    if (day < today and today - day < 7) return short_weekdays[@intCast(@mod(day + 3, 7))];
+    if (!same(current[0..4], stamp[0..4])) return stamp[0..10];
+    const month = std.fmt.parseInt(u8, stamp[5..7], 10) catch return stamp[0..10];
+    const day_of_month = std.fmt.parseInt(u8, stamp[8..10], 10) catch return stamp[0..10];
+    if (month == 0 or month > 12) return stamp[0..10];
+    return std.fmt.allocPrint(allocator, "{s} {d}", .{ short_months[month - 1], day_of_month });
+}
+/// Reader dates keep the time beside the short day ("Sat 09:00").
+fn readerDate(allocator: Allocator, zone: *const timezone.Zone, received: i64, now: i64) ![]const u8 {
+    const day = try shortDate(allocator, zone, received, now);
+    const stamp = try zone.format(allocator, received);
+    if (stamp.len < 16 or same(day, stamp[11..16])) return day;
+    return std.fmt.allocPrint(allocator, "{s} {s}", .{ day, stamp[11..16] });
+}
 const HumanDay = struct { weekday: []const u8, day: u8, month: []const u8, year: []const u8 };
 fn humanDay(a: Allocator, day: i64) !HumanDay {
     const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -525,30 +736,14 @@ const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH", "SPA
 const HelpFeature = enum { always, native, files, attachments, editor, clipboard, aliases, updates, durable_drafts, send_queue, preferences, mail_changes, contacts_write, invitations, open_urls, session_drafts };
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "", requires: HelpFeature = .always };
 const help_rows = [_]HelpRow{
-    .{ .keys = "b / :follow-up", .action = "Set a local follow-up date for the focused message · Today, Tomorrow or YYYY-MM-DD", .requires = .native },
-    .{ .keys = "g · Continue in Gmail · :gmail-draft", .action = "Review a Gmail handoff, then explicitly upload once and pause local edits; check status or take back while keeping Gmail's copy. Requires mail-drafts (gmail.compose) or mail-modify permission", .requires = .native },
-    .{ .keys = "g in Review send after Gmail takeback", .action = "Check Gmail Drafts and Sent, then acknowledge the kept copy before sending locally. Any edit requires a fresh acknowledgement", .requires = .native },
-    .{ .keys = ":follow-ups · Navigation Follow-ups", .action = "View this account's due and upcoming reminders · j/k Choose · Enter Open · b Edit · d Done", .requires = .native },
-    .{ .keys = "Tab / Enter · Ctrl+S in Follow up", .action = "Choose a preset or save the date · Esc Cancel · Done removes only the local reminder; Gmail is unchanged", .requires = .native },
-    .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions", .requires = .updates },
-    .{ .keys = "Tab / Shift+Tab on Upgrade available", .action = "Focus Dismiss or How to update without moving the selected mail; Enter activates", .requires = .updates },
-    .{ .keys = "Tab / Enter in Updates · Esc/q Back", .action = "Copy commands, open guides, check again, choose daily/manual checks or copy an agent request", .requires = .updates },
-    .{ .keys = "j/k · Ctrl+U/D · Ctrl+G in Updates", .action = "Scroll the upgrade guide, move half a page or return to its top", .requires = .updates },
-    .{ .keys = "Ctrl+P / :actions", .action = "Search the actions available in this view" },
-    .{ .keys = ":version", .action = "Show the Omagma version this open TUI is running; restart it after an upgrade to use the new one" },
-    .{ .keys = ":find TEXT · n / N", .action = "Find within the visible message and visit the next or previous match" },
-    .{ .keys = ":next-unread / :previous-unread", .action = "Navigate unread cached mail in the current view" },
-    .{ .keys = ":search-history / :saved-searches / :save-search NAME", .action = "Recall or save account-specific cache and Gmail searches" },
-    .{ .keys = ":scope message / :scope thread", .action = "Choose one message or an explicitly reviewed conversation", .requires = .mail_changes },
-    .{ .keys = "Space · + / - · Ctrl+S in labels", .action = "Stage checked or mixed labels; Apply submits all staged changes; Cancel keeps labels", .requires = .mail_changes },
-    .{ .keys = "c Color in Manage labels", .action = "Choose a custom label's Gmail-compatible background and text colors", .requires = .mail_changes },
-    .{ .keys = "Ctrl+Z / Ctrl+Y in composer", .action = "Undo and redo native text edits, preserving cursor position" },
-    .{ .keys = "f / :sender in composer", .action = "Choose a verified From identity without cycling blindly", .requires = .aliases },
-    .{ .keys = "P · Preview in browser · :preview-browser", .action = "Save editable draft fields and open a private sandboxed browser preview; protected or Gmail-paused drafts preview the saved local copy", .requires = .open_urls },
-    .{ .keys = "Space in attachment file list", .action = "Select several files across folders before attaching once", .requires = .files },
-    .{ .keys = ":save-all DIRECTORY", .action = "Save received attachments privately without overwriting existing files", .requires = .files },
-    .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions", .requires = .mail_changes },
-    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses", .requires = .send_queue },
+    .{ .section = "ESSENTIALS" },
+    .{ .keys = "j / k · Enter", .action = "Move, then open mail or the focused item" },
+    .{ .keys = "r / R · f", .action = "Reply, reply all or forward" },
+    .{ .keys = "c", .action = "Compose a new message" },
+    .{ .keys = "x / D", .action = "Archive, or review moving mail to Trash", .requires = .mail_changes },
+    .{ .keys = "/ · \\", .action = "Search downloaded mail · search Gmail" },
+    .{ .keys = "Ctrl+Z", .action = "Undo the last mail action for this account", .requires = .mail_changes },
+    .{ .keys = "? · q", .action = "This help · go back; q quits from the mailbox and Esc never quits" },
     .{ .section = "NAVIGATION" },
     .{ .keys = "C / :calendar", .action = "Open native Calendar · 1/2/3 Agenda/Day/Week · g Choose calendar", .requires = .native },
     .{ .keys = "A / :calendar-import", .action = "Review Add / Update / Cancel in the selected calendar; I remains RSVP", .requires = .native },
@@ -556,6 +751,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
     .{ .keys = "Up / Down in sidebar", .action = "Choose accounts, mailboxes, Contacts, Calendar, Follow-ups and Labels in their visible order; Enter opens", .requires = .native },
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
+    .{ .keys = "g i / s / d / a / t", .action = "Go to Inbox, Sent, Drafts, All Mail or Trash" },
+    .{ .keys = "n / N", .action = "Next or previous unread mail; while :find is active, its next or previous match" },
     .{ .keys = ":", .action = "Open the command prompt; Enter runs, Esc cancels" },
     .{ .keys = "gg", .action = "First mail in the entire cached mailbox; expanded reader starts at top" },
     .{ .keys = "gg / G", .action = "Go to the start/end; Home/End are optional aliases" },
@@ -565,8 +762,30 @@ const help_rows = [_]HelpRow{
     .{ .keys = "1 / 2 / 3", .action = "Switch account" },
     .{ .keys = "Ctrl+1 / Ctrl+2 / Ctrl+3", .action = "Alternative mailbox account-switch shortcuts" },
     .{ .keys = "Click · wheel", .action = "Choose an item or scroll the pointed pane" },
-    .{ .keys = "Esc / q", .action = "Go back one view; native terminals quit from the mailbox" },
+    .{ .keys = "Esc / q", .action = "Go back one view; only q or :q quits from the mailbox" },
     .{ .keys = "?", .action = "Open or close this help" },
+    .{ .section = "COMMANDS & ACTIONS" },
+    .{ .keys = "Ctrl+P / :actions", .action = "Search the actions available in this view" },
+    .{ .keys = ":archive · :trash · :star · :unread", .action = "Act on the focused mail like x, D, s and u", .requires = .mail_changes },
+    .{ .keys = ":compose · :reply · :forward", .action = "Start a new message, reply or forward" },
+    .{ .keys = ":inbox · :help · :q", .action = "Go to the Inbox, open this help or quit; commands ignore case" },
+    .{ .keys = ":version", .action = "Show the Omagma version this open TUI is running; restart it after an upgrade to use the new one" },
+    .{ .keys = ":find TEXT · n / N", .action = "Find within the visible message and visit the next or previous match" },
+    .{ .keys = ":next-unread / :previous-unread", .action = "Navigate unread cached mail in the current view" },
+    .{ .keys = ":search-history / :saved-searches / :save-search NAME", .action = "Recall or save account-specific cache and Gmail searches" },
+    .{ .keys = ":scope message / :scope thread", .action = "Choose one message or an explicitly reviewed conversation", .requires = .mail_changes },
+    .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions", .requires = .mail_changes },
+    .{ .section = "FOLLOW-UPS & GMAIL DRAFTS", .requires = .native },
+    .{ .keys = "b / :follow-up", .action = "Set a local follow-up date for the focused message · Today, Tomorrow or YYYY-MM-DD", .requires = .native },
+    .{ .keys = ":follow-ups · Navigation Follow-ups", .action = "View this account's due and upcoming reminders · j/k Choose · Enter Open · b Edit · d Done", .requires = .native },
+    .{ .keys = "Tab / Enter · Ctrl+S in Follow up", .action = "Choose a preset or save the date · Esc Cancel · Done removes only the local reminder; Gmail is unchanged", .requires = .native },
+    .{ .keys = "g · Continue in Gmail · :gmail-draft", .action = "Review a Gmail handoff, then explicitly upload once and pause local edits; check status or take back while keeping Gmail's copy. Requires mail-drafts (gmail.compose) or mail-modify permission", .requires = .native },
+    .{ .keys = "g in Review send after Gmail takeback", .action = "Check Gmail Drafts and Sent, then acknowledge the kept copy before sending locally. Any edit requires a fresh acknowledgement", .requires = .native },
+    .{ .section = "UPDATES", .requires = .updates },
+    .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions", .requires = .updates },
+    .{ .keys = "Tab / Shift+Tab on Upgrade available", .action = "Focus Dismiss or How to update without moving the selected mail; Enter activates", .requires = .updates },
+    .{ .keys = "Tab / Enter in Updates · Esc/q Back", .action = "Copy commands, open guides, check again, choose daily/manual checks or copy an agent request", .requires = .updates },
+    .{ .keys = "j/k · Ctrl+U/D · Ctrl+G in Updates", .action = "Scroll the upgrade guide, move half a page or return to its top", .requires = .updates },
     .{ .section = "SEARCH & READING" },
     .{ .keys = "/", .action = "Search retained mail in the local cache" },
     .{ .keys = "Ctrl+G in mail search", .action = "Switch Cache / Gmail while keeping the query; Enter searches" },
@@ -575,7 +794,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "q after a search", .action = "Clear the search and return to the mailbox" },
     .{ .keys = "J / K in the reader", .action = "Next or previous mail" },
     .{ .keys = "{ / } · t", .action = "Previous/next thread message; fold its body" },
-    .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature in the reader" },
+    .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature; also from the mail list" },
     .{ .keys = "Q in a reply composer", .action = "Reply without original / include it again; the exact original remains saved for Undo and restart" },
     .{ .keys = "z in composer or review", .action = "Fold or expand retained original / long trailing quote in the preview; outgoing bytes are unchanged" },
     .{ .keys = "L / B", .action = "Choose a URL or received attachment", .requires = .files },
@@ -589,22 +808,26 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":copy-message · Ctrl+P Copy message", .action = "Explicitly copy this message's decoded envelope and full plaintext body to the terminal clipboard", .requires = .clipboard },
     .{ .action = "Reader text selection excludes headers, UI controls, pane borders and other messages. Normal v still changes reader layout.", .requires = .clipboard },
     .{ .keys = "v", .action = "Place the reader on the right or below" },
-    .{ .keys = "p in the reader · :received plain/formatted/auto", .action = "Choose the current message's plain or formatted alternative. Formatted mail uses the safe local semantic reader; remote resources stay unloaded." },
-    .{ .keys = "H in the reader · :headers", .action = "Expand or collapse the full envelope and status of the current message" },
+    .{ .keys = "p · :received plain/formatted/auto", .action = "Choose the previewed message's plain or formatted alternative, from the reader or mail list. Formatted mail uses the safe local semantic reader; remote resources stay unloaded." },
+    .{ .keys = "H · :headers", .action = "Expand or collapse the full envelope and status of the previewed message" },
     .{ .keys = ":density compact/comfortable", .action = "Compact mail uses one-line rows and smaller reader headers; the density preference is saved" },
     .{ .keys = "[ / ] · :thread-older / :thread-newer", .action = "Long conversations: load an older or newer 20-message window. Braces select a card; t opens its body. Counts show bodies still on demand and messages outside this window." },
     .{ .keys = "z", .action = "Expand or shrink the reader" },
     .{ .keys = "o", .action = "Open mail in this account's browser profile", .requires = .open_urls },
     .{ .keys = ":save-attachment N /path", .action = "Save attachment N to a new file", .requires = .files },
+    .{ .keys = ":save-all DIRECTORY", .action = "Save received attachments privately without overwriting existing files", .requires = .files },
     .{ .section = "MAIL ACTIONS" },
-    .{ .keys = "Space / Ctrl+A", .action = "Select a message / the current page" },
+    .{ .keys = "Space / Ctrl+A", .action = "Select a message / the current page; selected rows are tinted and ticked" },
     .{ .keys = "Ctrl+Z / :undo", .action = "Undo the last completed action for this account", .requires = .mail_changes },
+    .{ .keys = "★ · ⊕ · ◔ in the list", .action = "Starred · has attachments · local follow-up date" },
     .{ .keys = "c / r / R · f", .action = "Compose, reply, reply-all or forward; review includes any omitted files" },
     .{ .keys = "x / D / U", .action = "Archive, review Trash or restore mail", .requires = .mail_changes },
     .{ .keys = "s / u", .action = "Toggle starred or unread", .requires = .mail_changes },
     .{ .keys = "m", .action = "Choose labels; + adds, - removes; / filters; Tab controls", .requires = .mail_changes },
     .{ .keys = ":labels · click LABELS", .action = "Manage custom label definitions; n New, r Rename, d Delete, o Open", .requires = .mail_changes },
     .{ .keys = "Tab / Shift+Tab · Enter in label manager", .action = "Reach every label control; / filters; Ctrl+R refreshes or checks the receipt", .requires = .mail_changes },
+    .{ .keys = "Space · + / - · Ctrl+S in labels", .action = "Stage checked or mixed labels; Apply submits all staged changes; Cancel keeps labels", .requires = .mail_changes },
+    .{ .keys = "c Color in Manage labels", .action = "Choose a custom label's Gmail-compatible background and text colors", .requires = .mail_changes },
     .{ .keys = "I", .action = "Review a calendar invitation reply", .requires = .invitations },
     .{ .keys = "Ctrl+R", .action = "Refresh mail" },
     .{ .keys = "Ctrl+L", .action = "Reload theme and redraw the screen" },
@@ -616,6 +839,7 @@ const help_rows = [_]HelpRow{
     .{ .section = "COMPOSE & SEND" },
     .{ .keys = "Tab / Shift+Tab · j / k", .action = "Choose a draft field in normal mode" },
     .{ .keys = "i / Enter · Esc", .action = "Start editing; Esc returns to normal mode" },
+    .{ .keys = "Ctrl+Z / Ctrl+Y in composer", .action = "Undo and redo native text edits, preserving cursor position" },
     .{ .keys = "e", .action = "Edit the body source with $EDITOR", .requires = .editor },
     .{ .keys = "Ctrl+T", .action = "Compose: switch Markdown / plain; source stays unchanged" },
     .{ .keys = "Ctrl+G", .action = "Compose: jump to the top of the body" },
@@ -625,7 +849,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "a", .action = "Choose a recipient from contacts" },
     .{ .keys = "Ctrl+N / Ctrl+P · Enter", .action = "Choose a cached recipient suggestion while typing" },
     .{ .keys = "Ctrl+Space in To/Cc/Bcc", .action = "Open recent recipients; when no local match exists, search contacts and replace this token" },
-    .{ .keys = "f · click From", .action = "Choose a verified sending identity in normal mode", .requires = .aliases },
+    .{ .keys = "f · click From · :sender", .action = "Choose a verified sending identity in normal mode without cycling blindly", .requires = .aliases },
+    .{ .keys = "P · Preview in browser · :preview-browser", .action = "Save editable draft fields and open a private sandboxed browser preview; protected or Gmail-paused drafts preview the saved local copy", .requires = .open_urls },
     .{ .keys = "A · click Add", .action = "Attach a file using its literal path", .requires = .files },
     .{ .keys = ":detach N · click [x]", .action = "Remove attachment N; wheel scrolls the list", .requires = .attachments },
     .{ .keys = "x in compose buttons", .action = "Remove the focused outgoing file; Enter also activates its removal", .requires = .attachments },
@@ -634,12 +859,13 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+V", .action = "paste image: inline at cursor (Markdown body), else attach", .requires = .files },
     .{ .keys = ":paste-image", .action = "same as Ctrl+V", .requires = .files },
     .{ .keys = "y in send review", .action = "Explicitly send; Esc / q returns to the draft" },
+    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses", .requires = .send_queue },
     .{ .keys = "n in send or Trash review", .action = "Cancel the review without submitting" },
     .{ .keys = "o in normal reply/forward", .action = "Open the original mail in this account's browser profile", .requires = .open_urls },
     .{ .keys = "L / B in Original preview", .action = "Normal compose: choose original links or received files", .requires = .files },
     .{ .keys = ":receipt", .action = "Inspect the current draft's operation receipts" },
     .{ .keys = "p in a protected draft", .action = "Open the saved draft's HTML preview; no edit, upload or resend", .requires = .open_urls },
-    .{ .keys = "Esc / q in normal mode", .action = "Save the draft and go back" },
+    .{ .keys = "q in normal mode", .action = "Save the draft and go back; Esc only leaves insertion" },
     .{ .keys = "d in normal compose", .action = "Review discarding this draft; Cancel keeps it" },
     .{ .keys = "Ctrl+C", .action = "Cancel work; idle drafts save/back, native mailbox quits" },
     .{ .action = "Draft changes autosave locally after a short pause.", .requires = .durable_drafts },
@@ -651,6 +877,7 @@ const help_rows = [_]HelpRow{
     .{ .action = "In a text field, q is text." },
     .{ .section = "FILE BROWSER", .requires = .files },
     .{ .keys = "Ctrl+F / Ctrl+Shift+F", .action = "Complete a literal path; cycle matches forward or backward", .requires = .files },
+    .{ .keys = "Space in attachment file list", .action = "Select several files across folders before attaching once", .requires = .files },
     .{ .keys = "Ctrl+U", .action = "Clear the file path; printable letters remain filename text", .requires = .files },
     .{ .keys = "Ctrl+O / Ctrl+G / Ctrl+T", .action = "Parent folder, Home or toggle hidden files", .requires = .files },
     .{ .keys = "Ctrl+N / Ctrl+P · arrows", .action = "Choose next or previous file; j/k also works in the file list", .requires = .files },
@@ -736,6 +963,12 @@ const calendar_help_rows = [_]HelpRow{
 const TextPosition = text_layout.Position;
 fn positionAfter(win: vaxis.Window, clean: []const u8) TextPosition {
     return text_layout.after(clean, win.width, win.screen.width_method, .{});
+}
+fn cellWidth(win: vaxis.Window, clean: []const u8) usize {
+    var columns: usize = 0;
+    var iterator = vaxis.unicode.graphemeIterator(clean);
+    while (iterator.next()) |gr| columns += @max(win.gwidth(gr.bytes(clean)), 1);
+    return columns;
 }
 fn horizontalStart(win: vaxis.Window, clean: []const u8, available: usize) usize {
     var cells: usize = 0;
@@ -1462,6 +1695,8 @@ const App = struct {
     reader_newer_messages: usize = 0,
     reader_deferred_messages: usize = 0,
     reader_hint_buffer: [768]u8 = undefined,
+    /// The footer after priority fitting: one " · " style, one leading space.
+    hint_fit_buffer: [1024]u8 = undefined,
     reader_choices: [32]?ReaderChoice = @splat(null),
     reader_choice_next: usize = 0,
     reader_cards: [types.Limits.page]bool = @splat(true),
@@ -1730,8 +1965,14 @@ const App = struct {
     folder: usize = 0,
     custom_label: Field = .{},
     mail_selection: selection.Selection = .{},
+    /// Per-frame list date column: the widest short date among visible rows.
+    mail_date_width: u16 = 0,
+    mail_flags: bool = false,
+    mail_now: i64 = 0,
     action_notice: bool = false,
     undo_token: Field = .{},
+    /// Static wording of the action the retained undo token reverses.
+    undo_label: []const u8 = "mail action",
     undo_account: Field = .{},
     labels: []const Value = &.{},
     label_arena: ?std.heap.ArenaAllocator = null,
@@ -3144,7 +3385,7 @@ const App = struct {
                 try self.mail_selection.toggle(id);
                 try self.move(true, 1);
             }
-            self.say(false, "{d} selected · x Archive · D Trash · m Label · :undo", .{self.mail_selection.count});
+            self.say(false, "{d} selected · x Archive · D Trash · m Labels · Esc Clear", .{self.mail_selection.count});
             return true;
         }
         if (key.matches('a', .{ .ctrl = true }) and self.focus == .list and !self.drafts_list and !self.follow_ups_list) {
@@ -3176,6 +3417,10 @@ const App = struct {
             return true;
         }
         if (key.matches('U', .{}) or key.matches('u', .{ .shift = true })) {
+            if (self.folder != 5 and !self.restorableTarget()) {
+                self.say(false, "Not in Trash · U restores mail from Trash", .{});
+                return true;
+            }
             try self.batchMail(if (self.folder == 5) @as([]const u8, "unspam") else "restore", null, null, null, null);
             return true;
         }
@@ -3194,6 +3439,18 @@ const App = struct {
         return false;
     }
 
+    /// Restore applies to Trash. Selected IDs outside the loaded window are
+    /// unknown here, so the backend decides for them.
+    fn restorableTarget(self: *App) bool {
+        if (self.mail_selection.count == 0) return if (self.focusedMessage()) |message| messageHasLabel(message, "TRASH") else false;
+        for (self.mail_selection.ids[0..self.mail_selection.count]) |*identifier| {
+            const message = for (self.messages) |candidate| {
+                if (same(text(get(candidate, "id")), identifier.slice())) break candidate;
+            } else return true;
+            if (messageHasLabel(message, "TRASH")) return true;
+        }
+        return false;
+    }
     fn userLabelCount(self: *App) usize {
         var count: usize = 0;
         for (self.labels) |label_value| {
@@ -3587,6 +3844,21 @@ const App = struct {
         if (validDiagnosticCode(code)) self.say(true, "{s} · {s} · {s}", .{ prefix, humanError(code), code }) else self.say(true, "{s} · {s}", .{ prefix, humanError(code) });
         self.diagnostic(code);
         if (same(code, "UnknownOutcome")) self.status_kind = .unknown;
+    }
+    /// A code the shared table cannot word may arrive with the backend's own
+    /// fixed diagnostic sentence (an unknown cache operator, for example).
+    /// Show that sentence; the stable code remains available in Help.
+    fn sayRejection(self: *App, code: []const u8, message: []const u8) bool {
+        if (!same(humanError(code), "Operation failed") or !diagnosticSentence(code, message)) return false;
+        self.say(true, "{s}", .{message});
+        self.diagnostic(code);
+        return true;
+    }
+    /// Input/worker errors reach one top-level reporter. A rejected response
+    /// has already published its own wording; never replace it generically.
+    fn reportFailure(self: *App, err: anyerror) void {
+        if (err == error.OperationRejected) return;
+        self.sayError(@errorName(err));
     }
     fn sayAction(self: *App, warning: bool, comptime format: []const u8, args: anytype) void {
         self.say(warning, format, args);
@@ -4303,20 +4575,7 @@ const App = struct {
         self.closeUx();
         if (kind == .actions) {
             const action = action_palette.entries[index].id;
-            const key: ?u21 = switch (action) {
-                .compose => 'c',
-                .reply => 'r',
-                .reply_all => 'R',
-                .forward => 'f',
-                .archive => 'x',
-                .trash => 'D',
-                .star => 's',
-                .unread => 'u',
-                .labels => 'm',
-                .files => 'B',
-                else => null,
-            };
-            if (key) |letter| return self.onKey(.{ .codepoint = letter });
+            if (actionKey(action)) |letter| return self.onKey(.{ .codepoint = letter });
             switch (action) {
                 .calendar => try self.openCalendar(false),
                 .follow_up => try self.editFollowUp(),
@@ -4789,7 +5048,9 @@ const App = struct {
             self.openReaderAttachments();
             return true;
         }
-        if (self.focus != .reader and !self.expanded) return false;
+        // Reader view toggles also act on the previewed message from the list.
+        const previewing = self.focus == .list and !self.drafts_list and !self.follow_ups_list and self.thread.len > 0;
+        if (self.focus != .reader and !self.expanded and !(previewing and readerViewKey(key))) return false;
         if (key.matches('[', .{}) or key.matches(']', .{})) {
             try self.loadThreadWindow(key.matches(']', .{}));
             return true;
@@ -5063,7 +5324,7 @@ const App = struct {
             try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} {d}/{d}", .{ label, if (progress.phase == .metadata) @as([]const u8, "metadata") else "bodies", progress.completed, progress.total })
         else
             label;
-        const checked = if (status.last_sync_at > 0) try std.fmt.allocPrint(self.frame.allocator(), "Synced {s}", .{try timestamp(self.frame.allocator(), &self.zone, .{ .integer = status.last_sync_at })}) else if (self.zone.unavailable) "UTC fallback · local timezone unavailable" else if (status.cache_ready) "Sync time unknown" else "No cached mail";
+        const checked = if (status.last_sync_at > 0) try std.fmt.allocPrint(self.frame.allocator(), "Synced {s}", .{try timestamp(self.frame.allocator(), &self.zone, .{ .integer = status.last_sync_at })}) else if (self.zone.unavailable) "UTC fallback · local timezone unavailable" else if (status.cache_ready) "Sync time unknown" else "nothing downloaded yet";
         return std.fmt.allocPrint(self.frame.allocator(), " {s} · {s}{s}{s}{s}{s}{s}", .{ progress_label, checked, if (status.error_len > 0) " · " else "", if (status.error_len > 0) humanError(status.error_code[0..status.error_len]) else "", if (self.cache_busy or self.reader_cache_busy) " · cache read busy" else "", if (self.preferences_warning) " · UI prefs fallback" else "", if (self.theme_warning) " · theme fallback" else "" });
     }
     fn syncTone(self: *const App) Tone {
@@ -5145,10 +5406,12 @@ const App = struct {
     }
     fn listTitle(self: *App) ![]const u8 {
         if (self.follow_ups_list) return std.fmt.allocPrint(self.frame.allocator(), " Follow-ups · {d} due · {d} total ", .{ self.followUpDueCount(), self.messages.len });
-        if (self.messages.len == 0) return if (self.loadingActive()) " Mail · Loading " else " Mail · Empty ";
+        if (self.messages.len == 0) return if (self.loadingActive()) " Mail · Loading " else if (self.query.value().len > 0) std.fmt.allocPrint(self.frame.allocator(), " Mail · Empty · {s} “{s}” ", .{ if (self.query_scope == .cache) @as([]const u8, "/") else "\\", try safe(self.frame.allocator(), self.query.value(), false) }) else " Mail · Empty ";
         const before = self.has_more_cached_before orelse (self.previous_cursor.value().len > 0 or self.previous_cursors.items.len > 0);
         const after = (self.has_more_cached_after orelse false) or self.next_cursor.value().len > 0 or self.remote_cursor.value().len > 0;
-        return std.fmt.allocPrint(self.frame.allocator(), " Mail · {d}/{d} {s}{s} ", .{ @min(self.selected + 1, self.messages.len), self.messages.len, if (before) @as([]const u8, "↑") else "", if (after) @as([]const u8, "↓") else "" });
+        // An active search names its query (and scope) in the title.
+        const query = if (self.query.value().len == 0) "" else try std.fmt.allocPrint(self.frame.allocator(), "· {s} “{s}” ", .{ if (self.query_scope == .cache) @as([]const u8, "/") else "\\", try safe(self.frame.allocator(), self.query.value(), false) });
+        return std.fmt.allocPrint(self.frame.allocator(), " Mail · {d}/{d} {s}{s} {s}", .{ @min(self.selected + 1, self.messages.len), self.messages.len, if (before) @as([]const u8, "↑") else "", if (after) @as([]const u8, "↓") else "", query });
     }
     fn clearReader(self: *App) void {
         self.closeReaderOverlay();
@@ -5308,8 +5571,9 @@ const App = struct {
         }
     }
     fn resumeMailboxReader(self: *App) !void {
-        if (self.drafts_list or self.thread.len == 0) return;
-        if (same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId())) return;
+        if (self.drafts_list) return;
+        // A new message has no reader context; its row still needs a preview.
+        if (self.thread.len > 0 and same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId())) return;
         // A composer may deliberately retain its original context across a
         // cache merge. Once it closes, the mailbox reader must match its row.
         self.clearReader();
@@ -5366,7 +5630,7 @@ const App = struct {
         const parsed = try std.json.parseFromSliceLeaky(Value, allocator, response, .{ .allocate = .alloc_always, .max_value_len = limit });
         if (get(parsed, "ok") == .bool and !truth(get(parsed, "ok"))) {
             const code = text(get(get(parsed, "error"), "code"));
-            self.sayError(if (code.len == 0) "OperationRejected" else code);
+            if (!self.sayRejection(code, text(get(get(parsed, "error"), "message")))) self.sayError(if (code.len == 0) "OperationRejected" else code);
             return error.OperationRejected;
         }
         return if (get(parsed, "data") != .null) get(parsed, "data") else parsed;
@@ -5412,7 +5676,7 @@ const App = struct {
                     self.cache_busy = false;
                     return error.PermissionDenied;
                 }
-                self.sayFailure("Cache unavailable", code);
+                if (!self.sayRejection(code, text(get(get(envelope, "error"), "message")))) self.sayFailure("Cache unavailable", code);
                 allocator.free(response);
                 return error.OperationRejected;
             }
@@ -5540,7 +5804,8 @@ const App = struct {
         if (!retain_reader) self.clearReader();
         if (retain_reader and truth(get(result, "cached")) and self.readerNeedsCacheRefresh()) self.pending_cached_reader_refresh = true;
         if (kind != .drafts and kind != .follow_up_list) self.syncMetadata(self.account_index, result);
-        if (!self.compose_active and !self.background_merge) self.say(false, "{s}", .{if (messages.len == 0 and self.list_cached and self.list_partial) "No rows in cached subset · Ready" else if (messages.len == 0) "No messages match this mailbox" else "Ready"});
+        // An empty list explains itself in the list pane; the status stays quiet.
+        if (!self.compose_active and !self.background_merge) self.say(false, "Ready", .{});
     }
     fn replaceReader(self: *App, full_thread: bool, response: []const u8, cached_view: bool) !void {
         _ = try self.replaceReaderImpl(full_thread, response, cached_view, false);
@@ -6321,7 +6586,12 @@ const App = struct {
                 }
                 self.syncFailed(index, failure_code);
                 if (same(failure_code, "ExternalRefreshWaitTimedOut") or same(failure_code, "ExternalRefreshStatusUnavailable")) self.sync[index].state = .cached;
-                if (index == self.account_index and !self.compose_active) self.sayFailure("Refresh failed · cached mail retained", failure_code);
+                if (index == self.account_index and !self.compose_active) {
+                    // One coherent notice: the sync row names the cause; the
+                    // stable code stays in Help rather than in the UI rows.
+                    self.say(true, "Refresh failed · {s} · Ctrl+R Retry", .{if (self.sync[index].cache_ready) @as([]const u8, "showing downloaded mail") else "no downloaded mail yet"});
+                    self.diagnostic(failure_code);
+                }
             }
         } else if (self.compose_source_probe and self.job.kind == .read) {
             self.compose_source_probe = false;
@@ -6677,7 +6947,7 @@ const App = struct {
                     try self.label_memberships.add(text(get(item, "id")), @intCast(applied));
                 }
                 self.label_memberships.ready = true;
-                self.say(false, "Labels for {d} messages · Space Toggle · Apply commits", .{self.pinned_targets.count});
+                self.say(false, "Labels for {d} {s} · Space Toggle · Apply commits", .{ self.pinned_targets.count, plural(self.pinned_targets.count, "message", "messages") });
             },
             .triage_scope => {
                 const result = try self.data(self.job_arena.allocator(), response);
@@ -6689,7 +6959,7 @@ const App = struct {
                 if (self.pinned_targets.count == 0 or integer(get(result, "count")) != self.pinned_targets.count) return error.IncompleteConversation;
                 if (self.triage_for_labels) self.pending_label_state = true else {
                     try self.beginUx(.triage_review, " Review conversation action ");
-                    const summary = try std.fmt.allocPrint(self.frame.allocator(), "{d} messages · exact targets pinned", .{self.pinned_targets.count});
+                    const summary = try std.fmt.allocPrint(self.frame.allocator(), "{d} {s} · exact targets pinned", .{ self.pinned_targets.count, plural(self.pinned_targets.count, "message", "messages") });
                     try self.uxRow(.{ .label = summary, .detail = "New arrivals are excluded from this change" });
                     try self.uxRow(.{ .label = self.triage_subject.value() });
                 }
@@ -6861,16 +7131,21 @@ const App = struct {
             .label_write, .label_receipt, .label_color => try self.applyManagerLabel(response),
             .batch, .undo => {
                 const result_value = try self.data(self.job_arena.allocator(), response);
-                if (kind == .batch and text(get(result_value, "undoToken")).len > 0) {
+                const request = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), self.job.request, .{}) catch Value.null;
+                const undoable = kind == .batch and text(get(result_value, "undoToken")).len > 0;
+                if (undoable) {
                     try self.undo_token.set(self.allocator, text(get(result_value, "undoToken")));
                     try self.undo_account.set(self.allocator, self.account());
+                    self.undo_label = batchUndoLabel(request);
                 }
                 self.mail_selection.clear();
                 self.mode = .browse;
-                self.say(truth(get(result_value, "partial")), "{s}: {d} applied, {d} restored{s} · :undo", .{
-                    if (kind == .undo) "Undo" else "Mail action", integer(get(result_value, "appliedCount")), integer(get(result_value, "restoredCount")),
-                    if (truth(get(result_value, "partial"))) " · some outcomes need review" else "",
-                });
+                // Name what happened and how to reverse it.
+                const notice = if (kind == .undo)
+                    try std.fmt.allocPrint(self.frame.allocator(), "Undone: {s} ({d} restored)", .{ self.undo_label, integer(get(result_value, "restoredCount")) })
+                else
+                    try batchNotice(self.frame.allocator(), request, integer(get(result_value, "appliedCount")));
+                self.say(truth(get(result_value, "partial")), "{s}{s}{s}", .{ notice, if (truth(get(result_value, "partial"))) @as([]const u8, " · some outcomes need review") else "", if (undoable) @as([]const u8, " · Ctrl+Z Undo") else "" });
                 self.generation +%= 1;
                 self.action_notice = true;
                 self.status_kind = .action;
@@ -7228,7 +7503,7 @@ const App = struct {
             },
             .contacts => {
                 try self.replaceContacts(response, false);
-                self.say(false, "{d} contacts available", .{self.contacts.len});
+                self.say(false, "{d} {s} available", .{ self.contacts.len, plural(self.contacts.len, "contact", "contacts") });
             },
             .contact_write => {
                 _ = self.data(self.job_arena.allocator(), response) catch |err| {
@@ -8433,7 +8708,7 @@ const App = struct {
         const field = &self.compose.fields[4];
         const previous = self.compose.signature.value();
         const body = field.value();
-        var insert_at = std.mem.indexOf(u8, body, "\n\n> ") orelse std.mem.indexOf(u8, body, "\n\n---------- Forwarded message ----------") orelse body.len;
+        var insert_at = @import("conversation_draft.zig").quoteStart(body) orelse std.mem.indexOf(u8, body, "\n\n---------- Forwarded message ----------") orelse body.len;
         var suffix_at = insert_at;
         if (previous.len > 0) {
             const marker = try std.fmt.allocPrint(self.frame.allocator(), "\n\n-- \n{s}\n\n", .{previous});
@@ -10588,6 +10863,20 @@ const App = struct {
         self.say(false, "{s}", .{self.sendStatusLabel()});
         self.send_pinned.announced = self.drive_progress.snapshot().phase;
     }
+    /// "Sent to Alex" or "Sent to Alex +2", read before the composer closes.
+    fn sentNotice(self: *App) []const u8 {
+        const a = self.frame.allocator();
+        var total: usize = 0;
+        var first: ?types.Address = null;
+        for (self.compose.fields[0..3]) |*field| {
+            const parsed = Compose.addresses(a, field.value()) catch continue;
+            if (first == null and parsed.len > 0) first = parsed[0];
+            total += parsed.len;
+        }
+        const who = first orelse return "Sent";
+        const name = if (who.name.len > 0) who.name else who.address;
+        return (if (total > 1) std.fmt.allocPrint(a, "Sent to {s} +{d}", .{ name, total - 1 }) else std.fmt.allocPrint(a, "Sent to {s}", .{name})) catch "Sent";
+    }
     fn applyGraceResult(self: *App, response: []const u8) !void {
         const result = try self.data(self.job_arena.allocator(), response);
         const state = text(get(result, "state"));
@@ -10607,9 +10896,10 @@ const App = struct {
         }
         if (same(state, "applied")) {
             self.compose.unknown_outcome = false;
+            const notice = self.sentNotice();
             self.closeComposer();
             self.mode = .browse;
-            self.sayAction(false, "Send complete · provider accepted", .{});
+            self.sayAction(false, "{s}", .{notice});
             try self.resumeMailboxReader();
         } else if (same(state, "canceled")) {
             self.grace_recovery = false;
@@ -11055,6 +11345,43 @@ const App = struct {
             return;
         }
         if (self.capabilities.quit) self.quit = true else self.say(false, "Mail retained in this session · close the tab to exit", .{});
+    }
+    /// Esc steps back exactly like q, but never quits: only q, :q and an idle
+    /// Ctrl+C leave the application.
+    fn escapeBack(self: *App) !void {
+        if (!self.capabilities.quit or self.follow_ups_list or self.expanded or self.focus != .list or self.query.value().len > 0) return self.browseBack();
+        self.say(false, "Esc stays in the mailbox · q quits", .{});
+    }
+    /// g i/s/d/a/t: open a mailbox directly, leaving any search or
+    /// Follow-ups view, exactly as choosing it in the sidebar.
+    fn jumpFolder(self: *App, index: usize) !void {
+        if (self.follow_ups_list and self.job.future != null and !readOnlyJob(self.job.kind)) return error.OperationPending;
+        if (self.query.value().len > 0) {
+            try self.query.set(self.allocator, "");
+            self.query_scope = .cache;
+            self.input_query_scope = .cache;
+            self.search_saved_valid = false;
+        }
+        self.expanded = false;
+        self.navigation = self.accounts.len + index;
+        self.focus = .navigation;
+        try self.enter();
+        self.say(false, "{s}", .{folders[index]});
+    }
+    /// :archive, :reply, :help… run exactly what their Ctrl+P action runs.
+    fn runCommandAction(self: *App, id: action_palette.Id, previous_mode: Mode) anyerror!void {
+        self.mode = previous_mode;
+        if (id == .help) return self.openHelp();
+        if (previous_mode != .browse) {
+            self.say(true, "Mail commands run from the mailbox", .{});
+            return;
+        }
+        const letter = actionKey(id) orelse return error.UnsupportedCommand;
+        return self.onKey(.{ .codepoint = letter });
+    }
+    fn sayUnknownCommand(self: *App, command: []const u8) void {
+        const name = command[0 .. std.mem.indexOfAny(u8, command, " \t") orelse command.len];
+        if (nearestCommand(name)) |suggestion| self.say(true, "Unknown command · did you mean :{s}? · Ctrl+P lists actions", .{suggestion}) else self.say(true, "Unknown command · Ctrl+P lists actions", .{});
     }
     fn editContact(self: *App, contact: ?Value) !void {
         if (!self.capabilities.contacts_write) return error.ContactWritesUnavailable;
@@ -11829,7 +12156,11 @@ const App = struct {
         }
         if (self.compose.gmailPaused()) {
             if (key.matches('p', .{})) return self.cycleComposePreview();
-            if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.saveDraft(.save_back);
+            if (key.matches('q', .{})) return self.saveDraft(.save_back);
+            if (key.matches(Key.escape, .{})) {
+                self.say(false, "Paused in Gmail · q goes back · g Status", .{});
+                return;
+            }
             if (key.matches(':', .{})) {
                 self.previous_mode = .compose;
                 self.mode = .command;
@@ -11944,7 +12275,8 @@ const App = struct {
             }
         }
         if (key.matches(Key.escape, .{})) {
-            if (self.compose.insert_mode) self.compose.insert_mode = false else try self.saveDraft(.save_back);
+            // Esc only leaves insertion; q saves and leaves the composer.
+            if (self.compose.insert_mode) self.compose.insert_mode = false else self.say(false, "Normal mode · q saves the draft and goes back", .{});
         } else if (key.matches(Key.tab, .{})) {
             if (self.compose.selected == 4) {
                 self.focusComposeAttachments(0);
@@ -12312,33 +12644,44 @@ const App = struct {
                 if (self.mode == .attachment) {
                     try self.attachFile(self.input.value());
                 } else if (self.mode == .command) {
-                    if (previous_mode == .contacts) {
+                    // Command names ignore case (arguments keep theirs); an
+                    // empty prompt cancels silently.
+                    var command_buffer: [4096]u8 = undefined;
+                    const typed = std.mem.trim(u8, self.input.value(), " \t");
+                    const name_end = std.mem.indexOfAny(u8, typed, " \t") orelse typed.len;
+                    @memcpy(command_buffer[0..typed.len], typed);
+                    _ = std.ascii.lowerString(command_buffer[0..name_end], typed[0..name_end]);
+                    const command = command_buffer[0..typed.len];
+                    if (command.len == 0) {} else if (previous_mode == .contacts) {
                         // Contacts runs only :version. Mailbox commands would
                         // act on the hidden mail selection, so none dispatch.
-                        if (same(self.input.value(), "version")) self.sayRunningVersion() else if (self.input.value().len > 0) self.say(true, "Only :version runs from Contacts · use mail commands from the mailbox", .{});
-                    } else if (same(self.input.value(), "theme") and previous_mode == .browse) {
+                        if (same(command, "version")) self.sayRunningVersion() else self.say(true, "Only :version runs from Contacts · use mail commands from the mailbox", .{});
+                    } else if (same(command, "theme") and previous_mode == .browse) {
                         self.openThemePicker();
-                    } else if (same(self.input.value(), "undo") and previous_mode == .browse) {
+                    } else if (same(command, "undo") and previous_mode == .browse) {
                         try self.undoMail();
-                    } else if (try self.onReaderCommand(self.input.value())) {} else if (same(self.input.value(), "layout right")) {
+                    } else if (try self.onReaderCommand(command)) {} else if (same(command, "layout right")) {
                         self.setReaderLayout(.right);
-                    } else if (same(self.input.value(), "layout below")) {
+                    } else if (same(command, "layout below")) {
                         self.setReaderLayout(.below);
-                    } else if (std.mem.startsWith(u8, self.input.value(), "save-attachment ") or std.mem.startsWith(u8, self.input.value(), "save-attachment\t")) {
-                        try self.saveIncomingAttachment(self.input.value()[16..]);
-                    } else if (same(self.input.value(), "receipt") and previous_mode == .compose) {
+                    } else if (std.mem.startsWith(u8, command, "save-attachment ") or std.mem.startsWith(u8, command, "save-attachment\t")) {
+                        try self.saveIncomingAttachment(command[16..]);
+                    } else if (same(command, "receipt") and previous_mode == .compose) {
                         try self.inspectDraftOperations();
-                    } else if (same(self.input.value(), "send") and previous_mode == .compose) try self.saveDraft(.save_review) else if (std.mem.startsWith(u8, self.input.value(), "detach ") and previous_mode == .compose) {
-                        const number = try std.fmt.parseInt(usize, std.mem.trim(u8, self.input.value()[7..], " \t"), 10);
+                    } else if (same(command, "send") and previous_mode == .compose) try self.saveDraft(.save_review) else if (std.mem.startsWith(u8, command, "detach ") and previous_mode == .compose) {
+                        const number = try std.fmt.parseInt(usize, std.mem.trim(u8, command[7..], " \t"), 10);
                         if (number == 0) return error.InvalidAttachment;
                         try self.detachAttachment(number - 1);
-                    } else if (same(self.input.value(), "q")) {
+                    } else if (same(command, "q") or same(command, "quit")) {
                         self.mode = previous_mode;
                         if (previous_mode == .compose) try self.saveDraft(.save_back) else if (previous_mode == .contacts) self.leaveContacts() else {
                             self.mode = .browse;
                             try self.browseBack();
                         }
-                    } else self.say(true, "Commands: :theme; :layout right|below; :save-attachment NUMBER /path; :send; :detach NUMBER; :q", .{});
+                    } else if (same(command, "inbox") and previous_mode == .browse) {
+                        self.mode = .browse;
+                        try self.jumpFolder(0);
+                    } else if (action_palette.command(command)) |id| try self.runCommandAction(id, previous_mode) else self.sayUnknownCommand(command);
                     if (self.mode == .command) self.mode = previous_mode;
                 } else if (self.mode == .labels) {
                     const raw_label = std.mem.trim(u8, self.input.value(), " \t");
@@ -12390,8 +12733,21 @@ const App = struct {
         }
         const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
         if (self.g_pending and now - self.g_at > 750) self.g_pending = false;
+        if (self.g_pending and self.mode == .browse) {
+            if (goFolder(key)) |folder| {
+                self.g_pending = false;
+                return self.jumpFolder(folder);
+            }
+            // Any other key ends the prefix before it acts on its own.
+            if (!key.matches('g', .{})) self.g_pending = false;
+        }
         if (try self.onReaderKey(key)) return;
         if (try self.onMailControls(key)) return;
+        if (self.mode == .browse and !self.drafts_list and !self.follow_ups_list) {
+            // Without an active :find, n/N walk unread mail like :next-unread.
+            if (key.matches('n', .{})) return self.navigateUnread(true);
+            if (key.matches('N', .{}) or key.matches('n', .{ .shift = true })) return self.navigateUnread(false);
+        }
         if (key.matches('f', .{}) or key.matches('F', .{}) or key.matches('f', .{ .shift = true })) return self.composeForward();
         if (key.matches('g', .{})) {
             if (self.g_pending) {
@@ -12467,8 +12823,10 @@ const App = struct {
             self.previous_mode = .browse;
             self.mode = .labels;
             try self.input.set(self.allocator, "");
-        } else if ((key.matches('I', .{}) or key.matches('i', .{ .shift = true })) and self.messageId().len > 0) try self.reviewInvitation() else if (key.matches('o', .{})) try self.openCurrentMail() else if (key.matches('q', .{}) or key.matches(Key.escape, .{})) {
+        } else if ((key.matches('I', .{}) or key.matches('i', .{ .shift = true })) and self.messageId().len > 0) try self.reviewInvitation() else if (key.matches('o', .{})) try self.openCurrentMail() else if (key.matches('q', .{})) {
             try self.browseBack();
+        } else if (key.matches(Key.escape, .{})) {
+            try self.escapeBack();
         } else for (0..self.accounts.len) |index| if ((key.matches(@intCast('1' + index), .{}) or key.matches(@intCast('1' + index), .{ .ctrl = true }))) {
             try self.chooseAccount(index);
             break;
@@ -12482,6 +12840,8 @@ const App = struct {
             .fg = .{ .rgb = switch (color) {
                 .text, .subject, .selected => self.palette.foreground,
                 .muted => self.palette.muted,
+                .border => self.palette.border,
+                .star => self.palette.yellow,
                 .accent => self.palette.accent,
                 .warning => self.palette.red,
                 .sender, .fetching => self.palette.cyan,
@@ -12530,8 +12890,25 @@ const App = struct {
         const shown = try std.fmt.allocPrint(self.frame.allocator(), "{s}▏{s}", .{ before[viewport_start..], after });
         _ = content.printSegment(.{ .text = shown, .style = self.style(color) }, .{ .wrap = .none });
     }
+    /// A wide grapheme just left of an overlay would be emitted over the
+    /// overlay's first column (the renderer skips the cell it covers), losing
+    /// the panel's left border. Narrow such a grapheme to a space first.
+    fn clearWideStraddle(win: vaxis.Window, x: u16, height: u16) void {
+        const left = @as(i32, win.x_off) + x;
+        if (left <= 0 or win.y_off < 0) return;
+        const column: u16 = @intCast(left - 1);
+        for (0..height) |row| {
+            const y = @as(i32, win.y_off) + @as(i32, @intCast(row));
+            if (y >= win.screen.height) break;
+            const cell = win.screen.readCell(column, @intCast(y)) orelse continue;
+            const cells = if (cell.char.width != 0) cell.char.width else win.gwidth(cell.char.grapheme);
+            if (cells > 1) win.screen.writeCell(column, @intCast(y), .{ .char = .{ .grapheme = " ", .width = 1 }, .style = cell.style });
+        }
+    }
     fn panel(self: *App, win: vaxis.Window, x: u16, width: u16, title: []const u8, selected_panel: bool) vaxis.Window {
-        const child = win.child(.{ .x_off = x, .width = width, .border = .{ .where = .all, .style = self.style(if (selected_panel) .accent else .muted) } });
+        clearWideStraddle(win, x, win.height);
+        // Unfocused borders stay quieter than their muted titles and text.
+        const child = win.child(.{ .x_off = x, .width = width, .border = .{ .where = .all, .style = self.style(if (selected_panel) .accent else .border) } });
         _ = win.child(.{ .x_off = x +| 2, .width = width -| 4, .height = 1 }).printSegment(.{ .text = title, .style = self.style(if (selected_panel) .accent else .muted) }, .{ .wrap = .none });
         return child.child(.{ .x_off = 1, .width = child.width -| 2 });
     }
@@ -12673,62 +13050,128 @@ const App = struct {
         if (same(text(get(link, "phase")), "unknown")) return "Gmail: check status";
         return if (truth(get(link, "paused"))) "In Gmail · paused" else "Gmail copy kept";
     }
+    const RowMark = enum { none, focused, inactive };
+    /// The focused pane's row carries the strong selection background. An
+    /// unfocused pane keeps only a thin marker; bulk-selected rows get a tint.
+    fn mailRowStyle(self: *App, tone: Tone, mark: RowMark, bulk: bool) vaxis.Style {
+        var result = self.style(tone);
+        if (mark == .focused) {
+            if (self.mono) result.reverse = true else result.bg = .{ .rgb = self.palette.selection };
+        } else if (bulk and !self.mono) result.bg = .{ .rgb = self.palette.selection_inactive };
+        return result;
+    }
+    fn mailRowMark(self: *const App, index: usize) RowMark {
+        if (index != self.selected) return .none;
+        return if (self.focus == .list and !self.expanded and self.mode == .browse) .focused else .inactive;
+    }
+    /// Sent mail names its recipients; the account's own name is redundant.
+    fn sentRow(self: *const App, message: Value) bool {
+        if (self.drafts_list) return false;
+        if (self.folder == 1 and self.custom_label.value().len == 0) return true;
+        return messageHasLabel(message, "SENT") and !messageHasLabel(message, "INBOX");
+    }
+    fn mailRowPerson(self: *App, message: Value) ![]const u8 {
+        if (self.drafts_list) return draftRowName(message);
+        if (self.sentRow(message)) {
+            const recipients_value = items(get(message, "to"));
+            if (recipients_value.len > 0) {
+                const first = recipients_value[0];
+                const name = if (text(get(first, "name")).len > 0) text(get(first, "name")) else text(get(first, "address"));
+                return if (recipients_value.len > 1) std.fmt.allocPrint(self.frame.allocator(), "To: {s} +{d}", .{ name, recipients_value.len - 1 }) else std.fmt.allocPrint(self.frame.allocator(), "To: {s}", .{name});
+            }
+        }
+        const sender = get(message, "from");
+        return if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
+    }
+    fn mailRowSubject(self: *App, message: Value) ![]const u8 {
+        const raw_subject = text(get(message, "subject"));
+        const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
+        if (subject.len > 0) return subject;
+        // A summary has recipient counts, not addresses; still say who it is for.
+        if (self.drafts_list) {
+            const counts = get(message, "summaryCounts");
+            const total = integer(get(counts, "to")) + integer(get(counts, "cc")) + integer(get(counts, "bcc"));
+            if (total > 0) return std.fmt.allocPrint(self.frame.allocator(), "(no subject · {d} {s})", .{ total, plural(@intCast(total), "recipient", "recipients") });
+        }
+        return "(no subject)";
+    }
+    /// ★ starred · ⊕ attachment · ◔ local follow-up, each in a fixed cell.
+    fn drawMailFlags(self: *App, item: vaxis.Window, x: u16, message: Value, mark: RowMark, bulk: bool) void {
+        const flags = [_]struct { on: bool, glyph: []const u8, tone: Tone }{
+            .{ .on = messageHasLabel(message, "STARRED") or truth(get(message, "starred")), .glyph = "★", .tone = .star },
+            .{ .on = rowHasAttachments(message), .glyph = "⊕", .tone = .muted },
+            .{ .on = !self.drafts_list and self.followUpEntry(text(get(message, "id"))) != null, .glyph = "◔", .tone = .accent },
+        };
+        for (flags, 0..) |flag, offset| if (flag.on and x + offset < item.width) {
+            _ = item.child(.{ .x_off = x + @as(u16, @intCast(offset)), .height = 1, .width = 1 }).printSegment(.{ .text = flag.glyph, .style = self.mailRowStyle(flag.tone, mark, bulk) }, .{ .wrap = .none });
+        };
+    }
+    /// Per frame: the widest visible short date, and whether any visible row
+    /// has a flag (the flag column is then stable for every row).
+    fn mailDateWidth(self: *App, win: vaxis.Window, now: i64) !u16 {
+        self.mail_flags = false;
+        var widest: u16 = 5;
+        const count = self.mailRows(win.height);
+        var index = self.top;
+        while (index < self.messages.len and index < self.top + count) : (index += 1) {
+            const message = self.messages[index];
+            const shown = try shortDate(self.frame.allocator(), &self.zone, integer(get(message, "receivedAt")), now);
+            widest = @max(widest, @as(u16, @intCast(@min(shown.len, 10))));
+            if (messageHasLabel(message, "STARRED") or truth(get(message, "starred")) or rowHasAttachments(message) or (!self.drafts_list and self.followUpEntry(text(get(message, "id"))) != null)) self.mail_flags = true;
+        }
+        return if (win.width < 30) 0 else widest;
+    }
     fn drawMailRow(self: *App, win: vaxis.Window, row: usize, index: usize) !void {
         if (self.follow_ups_list) return self.drawFollowUpRow(win, row, index);
         if (row >= win.height or index >= self.messages.len) return;
         const value_in = self.messages[index];
-        const sender = get(value_in, "from");
-        const sender_text = if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
-        const selected = index == self.selected;
-        if (self.ui_preferences.density == .compact) {
-            const item = win.child(.{ .y_off = @intCast(row), .height = 1 });
-            self.mouseArea(item, .mail, index);
-            item.fill(.{ .style = self.style(if (selected) .selected else .text) });
-            const stamp = try timestamp(self.frame.allocator(), &self.zone, get(value_in, "receivedAt"));
-            const date = if (stamp.len >= 16) stamp[5..16] else stamp;
-            const date_width: u16 = if (win.width >= 48) @intCast(date.len) else 0;
-            const content_width = win.width -| date_width -| @as(u16, if (date_width > 0) 1 else 0);
-            const raw_subject = text(get(value_in, "subject"));
-            const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
-            const shown_sender = try self.fitLine(win, if (self.drafts_list) draftRowName(value_in) else sender_text, @min(content_width / 3, 22));
-            const line_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s} {s} · {s}{s}", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " ", if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) @as([]const u8, "*") else " ", shown_sender, if (rowHasAttachments(value_in)) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
-            var appearance = self.listStyle(.subject, selected);
-            appearance.bold = messageUnread(value_in);
-            _ = item.child(.{ .width = content_width }).printSegment(.{ .text = try self.fitLine(win, line_text, content_width), .style = appearance }, .{ .wrap = .none });
-            if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_width, .width = date_width }).printSegment(.{ .text = date, .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
-            return;
-        }
-        const item = win.child(.{ .y_off = @intCast(row), .height = @min(@as(u16, 2), win.height -| @as(u16, @intCast(row))) });
+        const mark = self.mailRowMark(index);
+        const bulk = self.mail_selection.contains(text(get(value_in, "id")));
+        const unread = messageUnread(value_in);
+        const compact = self.ui_preferences.density == .compact;
+        const item = win.child(.{ .y_off = @intCast(row), .height = if (compact) 1 else @min(@as(u16, 2), win.height -| @as(u16, @intCast(row))) });
         self.mouseArea(item, .mail, index);
-        item.fill(.{ .style = self.style(if (selected) .selected else .text) });
-        const stamp = try timestamp(self.frame.allocator(), &self.zone, get(value_in, "receivedAt"));
-        const compact = if (stamp.len >= 16) stamp[5..16] else stamp;
-        const date_width: u16 = if (win.width >= 48) @intCast(compact.len) else 0;
-        const subject_width = win.width -| date_width -| @as(u16, if (date_width > 0) 1 else 0);
-        const raw_subject = text(get(value_in, "subject"));
-        const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
-        // Bulk selection, unread state and stars have independent positions;
-        // highlighting a read row must not make it look unread.
-        const gutter_width: u16 = @min(@as(u16, 3), win.width);
-        const gutter = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} ", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " " });
-        _ = item.child(.{ .height = 1, .width = gutter_width }).printSegment(.{ .text = gutter, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
-        const subject_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (rowHasAttachments(value_in)) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
-        var subject_style = self.listStyle(.subject, selected);
-        subject_style.bold = messageUnread(value_in);
-        subject_style.italic = false;
-        _ = item.child(.{ .x_off = gutter_width, .height = 1, .width = subject_width -| gutter_width }).printSegment(.{ .text = try self.fitLine(win, subject_text, subject_width -| gutter_width), .style = subject_style }, .{ .wrap = .none });
-        if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_width, .height = 1, .width = date_width }).printSegment(.{ .text = compact, .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
-        if (item.height < 2) return;
-        const sender_limit = @min((win.width -| gutter_width) / 2, 28);
-        const shown_sender = try self.fitLine(win, if (self.drafts_list) draftRowName(value_in) else sender_text, sender_limit);
-        if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) {
-            const star = if (item.gwidth("⭐") <= 2) "⭐" else "*";
-            _ = item.child(.{ .y_off = 1, .height = 1, .width = gutter_width }).printSegment(.{ .text = star, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
+        item.fill(.{ .style = self.mailRowStyle(.text, mark, bulk) });
+        // Gutter: selection bar, bulk ✓ and unread ● keep independent cells,
+        // so a highlighted read row never looks unread.
+        const gutter_width: u16 = @min(@as(u16, 4), win.width);
+        const bar: []const u8 = switch (mark) {
+            .focused => "▌",
+            .inactive => "▏",
+            .none => " ",
+        };
+        for (0..item.height) |line_index| _ = item.child(.{ .y_off = @intCast(line_index), .height = 1, .width = @min(@as(u16, 1), gutter_width) }).printSegment(.{ .text = bar, .style = self.mailRowStyle(if (mark == .focused) .accent else .muted, mark, bulk) }, .{ .wrap = .none });
+        if (gutter_width > 1) {
+            const marks = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (bulk) @as([]const u8, "✓") else " ", if (unread) @as([]const u8, "●") else " " });
+            _ = item.child(.{ .x_off = 1, .height = 1, .width = gutter_width - 1 }).printSegment(.{ .text = marks, .style = self.mailRowStyle(.accent, mark, bulk) }, .{ .wrap = .none });
         }
+        // Right edge: a stable flag column, then a short date that always fits.
+        const date_width = self.mail_date_width;
+        const date = if (date_width > 0) try shortDate(self.frame.allocator(), &self.zone, integer(get(value_in, "receivedAt")), self.mail_now) else "";
+        const flags_width: u16 = if (win.width >= 24 and self.mail_flags) 3 else 0;
+        const right_width = date_width + flags_width + @as(u16, if (date_width > 0) 1 else 0) + @as(u16, if (flags_width > 0) 1 else 0);
+        const content_width = win.width -| gutter_width -| right_width;
+        const subject = try self.mailRowSubject(value_in);
+        const person = try self.mailRowPerson(value_in);
+        var subject_style = self.mailRowStyle(.subject, mark, bulk);
+        subject_style.bold = unread;
+        subject_style.italic = false;
+        if (compact) {
+            const shown_person = try self.fitLine(win, person, @min(content_width / 3, 22));
+            const line_text = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ shown_person, subject });
+            _ = item.child(.{ .x_off = gutter_width, .height = 1, .width = content_width }).printSegment(.{ .text = try self.fitLine(win, line_text, content_width), .style = subject_style }, .{ .wrap = .none });
+        } else _ = item.child(.{ .x_off = gutter_width, .height = 1, .width = content_width }).printSegment(.{ .text = try self.fitLine(win, subject, content_width), .style = subject_style }, .{ .wrap = .none });
+        if (flags_width > 0) self.drawMailFlags(item, win.width - right_width + 1, value_in, mark, bulk);
+        // Dates are ASCII; right-align them inside the shared column.
+        const date_cells: u16 = @intCast(@min(date.len, date_width));
+        if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_cells, .height = 1, .width = date_cells }).printSegment(.{ .text = date, .style = self.mailRowStyle(if (unread) .text else .muted, mark, bulk) }, .{ .wrap = .none });
+        if (compact or item.height < 2) return;
+        const sender_limit = @min((win.width -| gutter_width) / 2, 28);
+        const shown_sender = try self.fitLine(win, person, sender_limit);
         const sender_line = item.child(.{ .x_off = gutter_width, .y_off = 1, .height = 1 });
-        const printed = sender_line.printSegment(.{ .text = shown_sender, .style = self.listStyle(.sender, selected) }, .{ .wrap = .none });
+        const printed = sender_line.printSegment(.{ .text = shown_sender, .style = self.mailRowStyle(.sender, mark, bulk) }, .{ .wrap = .none });
         var excerpt = self.searchExcerpt(value_in);
-        var waiting = selected and self.loadingActive() and (self.job.kind == .read or self.job.kind == .thread);
+        var waiting = index == self.selected and self.loadingActive() and (self.job.kind == .read or self.job.kind == .thread);
         if (self.loadingActive()) for (&self.job.loading_rows.slots) |*slot| {
             const received = slot.metadata() orelse continue;
             if (!same(received.id.value(), text(get(value_in, "id")))) continue;
@@ -12753,7 +13196,7 @@ const App = struct {
         if (printed.col +| 3 < sender_line.width) {
             const decoded = (try mail_display.decodePreview(self.frame.allocator(), excerpt)) orelse excerpt;
             const snippet = try self.fitLine(win, decoded, sender_line.width - printed.col - 3);
-            _ = sender_line.child(.{ .x_off = printed.col }).printSegment(.{ .text = try std.fmt.allocPrint(self.frame.allocator(), " — {s}", .{snippet}), .style = self.listStyle(if (waiting) .fetching else if (warning != null) .warning else .muted, selected) }, .{ .wrap = .none });
+            _ = sender_line.child(.{ .x_off = printed.col }).printSegment(.{ .text = try std.fmt.allocPrint(self.frame.allocator(), " — {s}", .{snippet}), .style = self.mailRowStyle(if (waiting) .fetching else if (warning != null) .warning else .muted, mark, bulk) }, .{ .wrap = .none });
         }
     }
     fn drawIncomingWindow(self: *App, win: vaxis.Window) !bool {
@@ -12777,9 +13220,8 @@ const App = struct {
             item.fill(.{ .style = self.style(.text) });
             if (self.job.loading_rows.slots[index].metadata()) |received| {
                 const subject = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (received.unread) @as([]const u8, "● ") else "  ", if (received.subject.value().len > 0) received.subject.value() else "(no subject)" });
-                const stamp = try timestamp(self.frame.allocator(), &self.zone, .{ .integer = received.received_at });
-                const compact = if (stamp.len >= 16) stamp[5..16] else stamp;
-                const date_width: u16 = if (item.width >= 48) @intCast(compact.len) else 0;
+                const compact = try shortDate(self.frame.allocator(), &self.zone, received.received_at, self.mail_now);
+                const date_width: u16 = if (item.width >= 30) @intCast(@min(compact.len, item.width)) else 0;
                 const subject_width = item.width -| date_width -| @as(u16, if (date_width > 0) 1 else 0);
                 _ = item.child(.{ .height = 1, .width = subject_width }).printSegment(.{ .text = try self.fitLine(item, subject, subject_width), .style = self.style(.subject) }, .{ .wrap = .none });
                 if (date_width > 0) _ = item.child(.{ .x_off = item.width - date_width, .height = 1, .width = date_width }).printSegment(.{ .text = compact, .style = self.style(.muted) }, .{ .wrap = .none });
@@ -12789,8 +13231,12 @@ const App = struct {
                 const second = try std.fmt.allocPrint(self.frame.allocator(), "{s} — {s}{s}{s}", .{ sender, detail, if (slot.bodyState() == 0) " · " else "", if (slot.bodyState() == 0) loading.frame(self.loading_frame) else "" });
                 try self.line(item, 1, try self.fitLine(item, second, item.width), if (slot.bodyState() == 1) .muted else .fetching);
             } else {
-                try self.line(item, 0, try std.fmt.allocPrint(self.frame.allocator(), " {s} Fetching metadata…", .{loading.frame(self.loading_frame)}), .fetching);
-                try self.line(item, 1, "   ▱▱▱▱▱▱▱▱▱▱▱▱  ▱▱▱▱▱▱▱▱", .muted);
+                // Rows without metadata share one animated line, not a
+                // stack of identical placeholders.
+                const remaining = if (known > index) known - index else 0;
+                const pending = if (remaining > 1) try std.fmt.allocPrint(self.frame.allocator(), " · {d} more", .{remaining}) else "";
+                try self.line(item, 0, try self.fitLine(item, try std.fmt.allocPrint(self.frame.allocator(), " {s} Fetching metadata…{s}", .{ loading.frame(self.loading_frame), pending }), item.width), .fetching);
+                break;
             }
         }
         return true;
@@ -12798,6 +13244,8 @@ const App = struct {
     fn listDraw(self: *App, win: vaxis.Window) !void {
         self.mail_page_size = self.mailRows(win.height);
         self.mouseArea(win, .mail_scroll, 0);
+        self.mail_now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+        self.mail_date_width = try self.mailDateWidth(win, self.mail_now);
         if (!self.follow_ups_list and try self.drawIncomingWindow(win)) return;
         const count = self.mail_page_size;
         if (self.selected < self.top) self.top = self.selected;
@@ -12808,11 +13256,25 @@ const App = struct {
                 return;
             }
             const state = self.sync[self.account_index].state;
-            try self.line(win, 1, if (state == .fetching) "Fetching mail…" else if (self.job.future != null and self.drafts_list) "Loading drafts…" else if (state == .failed or self.warning) "Mail unavailable; see status below" else if (self.list_cached and self.list_partial) "No rows in cached subset" else "No matching messages", if (state == .fetching) .fetching else .muted);
+            // Wrap rather than cut: the next useful key ends the sentence.
+            _ = try self.flowTone(win, try self.emptyListText(), 0, 1, if (state == .fetching) .fetching else .muted);
             return;
         }
         var index = self.top;
         while (index < self.messages.len and index < self.top + count) : (index += 1) try self.drawMailRow(win, (index - self.top) * self.mailRowStride(), index);
+    }
+    /// One explanation per empty view: what is empty and the next useful key.
+    fn emptyListText(self: *App) ![]const u8 {
+        const status = &self.sync[self.account_index];
+        if (status.state == .fetching) return "Fetching mail…";
+        if (self.job.future != null and self.drafts_list) return "Loading drafts…";
+        if (status.state == .failed) return if (status.cache_ready) "Mail unavailable · Ctrl+R Retry" else "No downloaded mail yet · Ctrl+R Retry";
+        if (self.cacheSearch()) return "No matches in downloaded mail · \\ searches Gmail · q clears";
+        if (self.query.value().len > 0) return "No matches in Gmail · q clears the search";
+        if (self.custom_label.value().len > 0) return "No mail with this label";
+        if (self.warning) return "Mail unavailable · see the status below";
+        if (self.list_cached and self.list_partial) return "No downloaded mail here yet · Ctrl+R checks Gmail";
+        return std.fmt.allocPrint(self.frame.allocator(), "No mail in {s}", .{self.mailboxTitle()});
     }
     fn mailRowStride(self: *const App) usize {
         return if (self.ui_preferences.density == .compact) 1 else 3;
@@ -13773,7 +14235,7 @@ const App = struct {
                     if (refused != null) try self.line(win, notice_end + 2, if (!self.capabilities.open_urls) "Snippet only · full body unavailable" else "Snippet only · o Open in Gmail", .muted);
                     _ = try self.flow(win, text(get(message, "snippet")), 0, notice_end + 3);
                 }
-            } else try self.line(win, 1, if (self.sync[self.account_index].state == .fetching) "Fetching mail · cached bodies appear here" else "Select mail · Enter opens the thread", .muted);
+            } else try self.line(win, 1, try self.fitLine(win, if (self.sync[self.account_index].state == .fetching) "Fetching mail · cached bodies appear here" else if (self.messages.len == 0) "No mail selected" else "Select mail · Enter opens the thread", win.width), .muted);
             if (find_rows > 0) try self.readerFindBar(outer);
             return;
         }
@@ -13947,11 +14409,133 @@ const App = struct {
         self.mouseRows(win, first - self.reader_scroll, @intCast(end - first), kind, index);
     }
     fn readerLabelName(self: *const App, identifier: []const u8) ?[]const u8 {
+        // Gmail lists system labels under their API names (INBOX); the
+        // friendly name wins before any account label lookup.
+        for ([_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "IMPORTANT", "CHAT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" }, [_][]const u8{ "Inbox", "Sent", "Drafts", "Trash", "Spam", "Important", "Chat", "Personal", "Social", "Promotions", "Updates", "Forums" }) |id, name| if (same(id, identifier)) return name;
         if (same(self.labels_account.value(), self.account())) for (self.labels) |label| {
             if (same(text(get(label, "id")), identifier) and text(get(label, "name")).len > 0) return text(get(label, "name"));
         };
-        for ([_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" }, [_][]const u8{ "Inbox", "Sent", "Drafts", "Trash", "Spam", "Important", "Personal", "Social", "Promotions", "Updates", "Forums" }) |id, name| if (same(id, identifier)) return name;
         return null;
+    }
+    /// Envelope rows align their keys in one muted column.
+    fn readerField(self: *App, win: vaxis.Window, row: usize, key: []const u8, value: []const u8, tone: Tone, fit: bool) !usize {
+        const key_width: u16 = 7;
+        if (win.width < key_width + 12) {
+            const joined = try std.fmt.allocPrint(self.frame.allocator(), "{s}: {s}", .{ key, value });
+            return self.flowTone(win, if (fit) try self.fitLine(win, joined, win.width) else joined, self.reader_scroll, row, tone);
+        }
+        const value_win = win.child(.{ .x_off = key_width, .width = win.width - key_width });
+        const end = try self.flowTone(value_win, if (fit) try self.fitLine(value_win, value, value_win.width) else value, self.reader_scroll, row, tone);
+        _ = try self.flowTone(win.child(.{ .width = key_width }), key, self.reader_scroll, row, .muted);
+        return @max(end, row + 1);
+    }
+    /// Gmail label colours when the account defines them; otherwise one
+    /// neutral chip. NO_COLOR uses reverse video.
+    fn chipStyle(self: *App, identifier: []const u8) vaxis.Style {
+        if (self.mono) return .{ .reverse = true };
+        if (same(self.labels_account.value(), self.account())) for (self.labels) |label| if (same(text(get(label, "id")), identifier)) {
+            const colored = self.labelColorStyle(label, false);
+            if (colored.bg == .rgb and !std.mem.eql(u8, &colored.bg.rgb, &self.palette.background)) return colored;
+            break;
+        };
+        return .{ .fg = .{ .rgb = self.palette.foreground }, .bg = .{ .rgb = self.palette.border } };
+    }
+    const ReaderChip = struct { label: []const u8, style: vaxis.Style };
+    /// Unread/star state only when set (never a bare "Read"), then labels as
+    /// chips behind an aligned key. Chips wrap within the value column.
+    fn readerLabelRow(self: *App, win: vaxis.Window, row: usize, message: Value) !usize {
+        const a = self.frame.allocator();
+        var status: [2]ReaderChip = undefined;
+        var status_count: usize = 0;
+        if (messageUnread(message)) {
+            status[status_count] = .{ .label = "● Unread", .style = self.style(.accent) };
+            status_count += 1;
+        }
+        if (messageHasLabel(message, "STARRED") or truth(get(message, "starred"))) {
+            status[status_count] = .{ .label = "★ Starred", .style = self.style(.star) };
+            status_count += 1;
+        }
+        var chips: [72]ReaderChip = undefined;
+        var count: usize = 0;
+        var unresolved: usize = 0;
+        for (items(get(message, "labels"))) |label| {
+            const id = text(label);
+            if (same(id, "UNREAD") or same(id, "STARRED") or id.len == 0) continue;
+            const name = self.readerLabelName(id) orelse {
+                unresolved += 1;
+                continue;
+            };
+            if (count == 64) break;
+            const clean = try safe(a, name, false);
+            var end = @min(clean.len, 256);
+            while (end > 0 and !std.unicode.utf8ValidateSlice(clean[0..end])) end -= 1;
+            chips[count] = .{ .label = try std.fmt.allocPrint(a, " {s} ", .{clean[0..end]}), .style = self.chipStyle(id) };
+            count += 1;
+        }
+        if (unresolved > 0) {
+            chips[count] = .{ .label = try std.fmt.allocPrint(a, "{d} awaiting names", .{unresolved}), .style = self.style(.muted) };
+            count += 1;
+        }
+        var next = row;
+        if (status_count > 0) next = try self.readerChips(win, next, "", status[0..status_count]);
+        if (count > 0) next = try self.readerChips(win, next, "Labels", chips[0..count]);
+        return next;
+    }
+    fn readerChips(self: *App, win: vaxis.Window, row: usize, key: []const u8, chips: []const ReaderChip) !usize {
+        const key_width: u16 = if (win.width >= 19) 7 else 0;
+        const area_width = win.width -| key_width;
+        if (area_width == 0) return row;
+        if (key_width > 0 and key.len > 0) _ = try self.flowTone(win.child(.{ .width = key_width }), key, self.reader_scroll, row, .muted);
+        var line_row = row;
+        var x: u16 = 0;
+        for (chips) |chip| {
+            if (cellWidth(win, chip.label) > area_width) {
+                // A label wider than the pane wraps on its own rows instead of
+                // being cut: every word of a custom label stays readable.
+                if (x > 0) line_row += 1;
+                x = 0;
+                var rest = chip.label;
+                while (rest.len > 0) {
+                    var iterator = vaxis.unicode.graphemeIterator(rest);
+                    var cells: u16 = 0;
+                    var end: usize = 0;
+                    while (iterator.next()) |gr| {
+                        const columns: u16 = @intCast(@max(win.gwidth(gr.bytes(rest)), 1));
+                        if (cells + columns > area_width) break;
+                        cells += columns;
+                        end = gr.start + gr.len;
+                    }
+                    if (end == 0) break;
+                    if (line_row >= self.reader_scroll and line_row - self.reader_scroll < win.height) {
+                        _ = win.child(.{ .x_off = key_width, .y_off = @intCast(line_row - self.reader_scroll), .width = cells, .height = 1 }).printSegment(.{ .text = rest[0..end], .style = chip.style }, .{ .wrap = .none });
+                    }
+                    rest = rest[end..];
+                    x = cells;
+                    if (rest.len > 0) line_row += 1;
+                }
+                continue;
+            }
+            const shown = try self.cellLine(win, chip.label);
+            const width: u16 = @intCast(@min(cellWidth(win, shown), area_width));
+            if (x > 0 and x + 1 + width > area_width) {
+                line_row += 1;
+                x = 0;
+            } else if (x > 0) x += 1;
+            if (line_row >= self.reader_scroll and line_row - self.reader_scroll < win.height) {
+                _ = win.child(.{ .x_off = key_width + x, .y_off = @intCast(line_row - self.reader_scroll), .width = width, .height = 1 }).printSegment(.{ .text = shown, .style = chip.style }, .{ .wrap = .none });
+            }
+            x += width;
+        }
+        return line_row + 1;
+    }
+    /// A full-width, faint rule between messages.
+    fn readerRule(self: *App, win: vaxis.Window, row: usize) usize {
+        const rule_row = row + 1;
+        if (rule_row >= self.reader_scroll and rule_row - self.reader_scroll < win.height) {
+            var x: u16 = 0;
+            while (x < win.width) : (x += 1) win.writeCell(x, @intCast(rule_row - self.reader_scroll), .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.border) });
+        }
+        return row + 3;
     }
     fn readerLabels(self: *App, message: Value) ![]const u8 {
         var result: std.ArrayList(u8) = .empty;
@@ -13995,9 +14579,9 @@ const App = struct {
             self.reader_card_rows[message_index] = row;
             const from = get(message, "from");
             if (self.thread.len > 1) {
-                const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
+                const stamp = try readerDate(self.frame.allocator(), &self.zone, integer(get(message, "receivedAt")), Io.Timestamp.now(self.io, .real).toMilliseconds());
                 const partial = metadataWarning(message) != null or bodyRefusal(message) != null;
-                const heading = try std.fmt.allocPrint(self.frame.allocator(), "{s} {d}/{d} {s}{s}{s} · {s}", .{ if (self.reader_cards[message_index]) "▾" else "▸", message_index + 1, self.thread.len, if (partial) @as([]const u8, "Warning · ") else "", if (truth(get(message, "unread"))) "● " else "", if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address")), if (stamp.len >= 16) stamp[5..16] else stamp });
+                const heading = try std.fmt.allocPrint(self.frame.allocator(), "{s} {d}/{d} {s}{s}{s} · {s}", .{ if (self.reader_cards[message_index]) "▾" else "▸", message_index + 1, self.thread.len, if (partial) @as([]const u8, "Warning · ") else "", if (truth(get(message, "unread"))) "● " else "", if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address")), stamp });
                 const block_start = row;
                 row = try self.flowTone(win, try self.fitLine(win, heading, win.width), self.reader_scroll, row, if (partial) .warning else if (message_index == self.reader_card) .accent else .sender);
                 self.readerMouseRows(win, block_start, row - block_start, .reader_thread, message_index);
@@ -14021,32 +14605,36 @@ const App = struct {
             const subject = text(get(message, "subject"));
             const shown_subject = if (subject.len == 0) "(no subject)" else subject;
             const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
+            const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+            const short_stamp = try readerDate(self.frame.allocator(), &self.zone, integer(get(message, "receivedAt")), now);
+            const sender_name = text(get(from, "name"));
+            const sender_address = text(get(from, "address"));
             if (single_header) {
-                const who = if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address"));
-                const header = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} · {s} · H Details", .{ who, if (stamp.len >= 16) stamp[5..16] else stamp, shown_subject });
+                const who = if (sender_name.len > 0) sender_name else sender_address;
+                const header = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} · {s} · H Details", .{ who, short_stamp, shown_subject });
                 row = try self.flowTone(win, try self.fitLine(win, header, win.width), self.reader_scroll, row, .subject);
             } else row = try self.flowTone(win, if (compact) try self.fitLine(win, shown_subject, win.width) else shown_subject, self.reader_scroll, row, .subject);
             if (!single_header and (!compact or self.thread.len == 1)) {
-                const sender_line = try std.fmt.allocPrint(self.frame.allocator(), "From: {s} <{s}>{s}{s}", .{ text(get(from, "name")), text(get(from, "address")), if (compact and stamp.len > 0) " · " else "", if (compact) (if (stamp.len >= 16) stamp[5..16] else stamp) else "" });
-                row = try self.flowTone(win, if (compact) try self.fitLine(win, sender_line, win.width) else sender_line, self.reader_scroll, row, .sender);
+                // Compact rows lead with the date, so fitting the row to the
+                // pane can shorten the name or address but never the date.
+                const sender_value = if (!compact)
+                    try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}<{s}>", .{ sender_name, if (sender_name.len > 0) @as([]const u8, " ") else "", sender_address })
+                else if (sender_name.len > 0)
+                    try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} <{s}>", .{ short_stamp, sender_name, sender_address })
+                else
+                    try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ short_stamp, sender_address });
+                row = try self.readerField(win, row, "From", sender_value, .sender, compact);
             }
             if (single_header) {
                 // Full recipients and status remain available through H.
             } else if (compact) {
-                if (to.len > 0 or cc.len > 0) {
-                    const envelope = try std.fmt.allocPrint(self.frame.allocator(), "To: {s}{s}{s}", .{ to, if (cc.len > 0) " · Cc: " else "", cc });
-                    row = try self.flowTone(win, try self.fitLine(win, envelope, win.width), self.reader_scroll, row, .muted);
-                }
+                if (to.len > 0 or cc.len > 0) row = try self.readerField(win, row, "To", try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}", .{ to, if (cc.len > 0) " · Cc: " else "", cc }), .muted, true);
             } else {
-                const envelope = if (self.thread.len > 1) (if (cc.len > 0) try std.fmt.allocPrint(self.frame.allocator(), "To: {s}\nCc: {s}", .{ to, cc }) else try std.fmt.allocPrint(self.frame.allocator(), "To: {s}", .{to})) else try readerEnvelope(self.frame.allocator(), to, cc, stamp);
-                row = try self.flowTone(win, envelope, self.reader_scroll, row, .muted);
+                row = try self.readerField(win, row, "To", to, .muted, false);
+                if (cc.len > 0) row = try self.readerField(win, row, "Cc", cc, .muted, false);
+                if (self.thread.len == 1) row = try self.readerField(win, row, "Date", stamp, .muted, false);
             }
-            if (!single_header) {
-                const status = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (messageUnread(message)) @as([]const u8, "● Unread") else "Read", if (messageHasLabel(message, "STARRED") or truth(get(message, "starred"))) @as([]const u8, " · ⭐ Starred") else "" });
-                row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
-                const labels = try self.readerLabels(message);
-                if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
-            }
+            if (!single_header) row = try self.readerLabelRow(win, row, message);
             if (bodyRefusal(message)) |code| {
                 const notice = try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s} ({s})", .{ decodeWarningLabel(code), code });
                 row = try self.flowTone(win, notice, self.reader_scroll, row, .warning);
@@ -14054,7 +14642,7 @@ const App = struct {
                 // record still carries text or HTML beside its diagnostic.
                 self.reader_body_bounds[message_index] = .{ .start = row, .end = row };
                 attachment_number += items(get(message, "attachments")).len;
-                row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
+                row = self.readerRule(win, row);
                 continue;
             }
             if (self.reader_progressive and !truth(get(message, "bodyCached"))) {
@@ -14142,7 +14730,7 @@ const App = struct {
                 }
                 if (self.capabilities.files) self.readerMouseRows(win, block_start, row - block_start, .reader_attachment, attachment_number - 1);
             }
-            if (self.ui_preferences.density != .compact) row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
+            if (self.ui_preferences.density != .compact) row = self.readerRule(win, row);
         }
         return row;
     }
@@ -14670,10 +15258,10 @@ const App = struct {
                 .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
                 .contacts => " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back",
                 .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Ctrl+G Gmail · Enter Search cached subset · Esc Back" else " Ctrl+G Cache · Enter Search Gmail · Esc Back",
-                .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Return",
+                .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Back",
                 .theme => " j/k Choice · Tab Controls · Enter Activate · Esc/q Back",
-                .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
-                .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and self.focus == .list and !self.expanded) " j/k Mail · Space Select · m Labels · s Star · u Unread · x Archive · D Trash · Ctrl+Z Undo · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and (self.focus == .reader or self.expanded)) " j/k Scroll · r/R Reply · f Forward · m Labels · s Star · u Unread · q List · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c Compose · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c Compose · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c Compose · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
+                .trash_confirm => " Tab Controls · Enter Activate · y Move to Trash · n/Esc/q Cancel",
+                .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and self.focus == .list and !self.expanded) " j/k Mail · Space Select · m Labels · s Star · u Unread · x Archive · D Trash · Ctrl+Z Undo · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and (self.focus == .reader or self.expanded)) " j/k Scroll · r/R Reply · f Forward · m Labels · s Star · u Unread · q List · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c New · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c New · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c New · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
                 else => " Esc Back",
             };
         }
@@ -14695,10 +15283,11 @@ const App = struct {
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
             .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else if (self.canPasteImage()) " INSERT · ^V image · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help" else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
-            .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
-            .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
+            .theme => " j/k Preview · Tab Controls · Enter Activate · Esc/q Cancel",
+            .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Back",
+            .trash_confirm => " Tab Controls · Enter Activate · y Move to Trash · n/Esc/q Cancel",
             .invitation => if (self.invitation_calendar_blocked) " Tab Controls · Enter Activate · a/t Retry · s RSVP only · A Calendar · Esc/q Cancel" else if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
-            .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  1–3 Accounts  a Contacts  T Theme  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  m Labels  s Star  u Unread  x Archive  D Trash  a Contacts  T Theme  / Cache  \\ Gmail  ? Help  q Quit",
+            .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate · Enter Choose · l/Esc/q Mail · 1–3 Accounts · a Contacts · T Theme · ? Help" else if (self.cacheSearch()) " Cache subset · j/k Mail · r Reply · f Forward · c New · m Labels · / Search · \\ Gmail · q Clear search · T Theme · ? Help" else if (self.query.value().len > 0) " Gmail search · j/k Mail · r Reply · f Forward · c New · m Labels · / Search · \\ Gmail · q Clear search · T Theme · ? Help" else " j/k Mail · Enter Read · c New · / Search · x Archive · D Trash · f Forward · r/R Reply · m Labels · s Star · u Unread · n/N Next unread · a Contacts · \\ Gmail · T Theme · ? Help · q Quit",
             else => " Esc Back",
         };
     }
@@ -14726,7 +15315,7 @@ const App = struct {
                 labels[count] = "B Files";
                 count += 1;
             }
-            labels[count] = "H Headers";
+            labels[count] = "H Details";
             count += 1;
             if (self.capabilities.clipboard) {
                 labels[count] = "V Select";
@@ -14741,7 +15330,7 @@ const App = struct {
         count += 1;
         labels[count] = "J/K Mail";
         count += 1;
-        labels[count] = "q Back";
+        labels[count] = if (self.expanded) "z/q Shrink" else "q Back";
         count += 1;
         var length: usize = 0;
         var columns: usize = 0;
@@ -14761,7 +15350,38 @@ const App = struct {
         @memcpy(self.reader_hint_buffer[length..][0..ending.len], ending);
         return self.reader_hint_buffer[0 .. length + ending.len];
     }
+    /// Every footer passes one fitter: segments keep their order, the least
+    /// important ones drop first, and the result uses one separator style.
     fn fittedHints(self: *App, width: u16) []const u8 {
+        return fitHints(&self.hint_fit_buffer, self.rawHints(width), width);
+    }
+    /// Keys in bold foreground, labels muted, separators muted.
+    fn drawHints(self: *App, win: vaxis.Window, row: u16, hints: []const u8) !void {
+        if (row >= win.height or win.width < 2) return;
+        const line_win = win.child(.{ .y_off = row, .height = 1 });
+        var key_style = self.style(.text);
+        key_style.bold = true;
+        const label_style = self.style(.muted);
+        var x: u16 = 1;
+        var segments = std.mem.splitSequence(u8, std.mem.trim(u8, hints, " "), " · ");
+        var first = true;
+        while (segments.next()) |segment| {
+            if (segment.len == 0) continue;
+            if (!first) x = self.hintText(line_win, x, " · ", label_style);
+            first = false;
+            const split = hintKeyEnd(segment);
+            x = self.hintText(line_win, x, segment[0..split], if (split > 0) key_style else label_style);
+            x = self.hintText(line_win, x, segment[split..], label_style);
+        }
+    }
+    fn hintText(self: *App, win: vaxis.Window, x: u16, raw: []const u8, appearance: vaxis.Style) u16 {
+        if (raw.len == 0 or x >= win.width) return x;
+        const clean = safe(self.frame.allocator(), raw, false) catch return x;
+        const shown = self.fitLine(win, clean, win.width - x) catch return x;
+        const printed = win.child(.{ .x_off = x, .width = win.width - x }).printSegment(.{ .text = shown, .style = appearance }, .{ .wrap = .none });
+        return x +| @as(u16, @intCast(@min(printed.col, std.math.maxInt(u16))));
+    }
+    fn rawHints(self: *App, width: u16) []const u8 {
         if (self.ux_overlay == .gmail_draft) return if (width < 66) "Tab Choose · Enter · Ctrl+D/U · Esc Back" else self.contextHints();
         if (self.ux_overlay == .none and self.mode == .compose and self.compose.gmailPaused()) return if (width < 66) "Paused in Gmail · g Status · q Back" else self.contextHints();
         if (self.ux_overlay == .follow_up) return self.contextHints();
@@ -14777,7 +15397,7 @@ const App = struct {
                 .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
                 .review => if (self.deliveryBlocksSend()) " Tab · Enter Activate · j/k Scroll · Esc Back" else " Tab · Enter Activate · y Send · Esc Back",
                 .contacts => " Enter Choose · / Search · Ctrl+R Refresh · q Back",
-                .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Cache · \\ Gmail · ? Help",
+                .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Search · \\ Gmail · ? Help",
                 else => self.contextHints(),
             };
         }
@@ -14790,19 +15410,13 @@ const App = struct {
         if (self.fileDialogActive()) return self.fileDialogHints(width);
         if (self.label_picker and width < 60) return "+ Add  - Remove  Esc/q Back";
         if (self.mode == .contacts and width < 60) return if (!self.capabilities.contacts_write) "Enter Choose  / Search  q Back" else "n New  e Edit  ? Help  q Back";
-        if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep Esc Clear q is text" else "/ Find n/N Match Esc/q Back";
-        if (self.mode == .browse and self.reader_overlay == .none and !self.label_picker and self.focus != .navigation and self.query.value().len == 0) {
-            if (width < 48) return if (self.focus == .reader or self.expanded) " V Select  e Editor  ? Help" else " m Labels  T Theme  ? Help";
-            if (width < 80) return if (self.focus == .reader or self.expanded) " V Select  e Editor  f Forward  ? Help" else " j/k Mail  f Forward  m Labels  T Theme  ? Help";
-            if (width < 110) return if (self.focus == .reader or self.expanded) " V Select  e Editor  r/R Reply  f Forward  m Labels  L Links  B Files  q Back  ? Help" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  T Theme  ? Help  q Quit";
-            if (width < 160) return if (self.focus == .reader or self.expanded) " V Select  e Editor  j/k Scroll  J/K Mail  r/R Reply  f Forward  m Labels  L Links  B Files  o Gmail  z View  ? Help  q Back" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  T Theme  / Cache  \\ Gmail  ? Help  q Quit";
-        }
-        if (self.mode == .browse and self.focus == .navigation and width < 60) return " j/k Move  a Contacts  ? Help";
+        if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep · Esc Clear · q is text" else "/ Find · n/N Match · Esc/q Back";
+        // Mailbox footers are priority-fitted by fittedHints, not width tiers.
         if (self.mode == .attachment) return " Tab Controls · Ctrl+F Complete · Enter Attach · Esc Back · Ctrl+U Clear";
-        if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview j/k Scroll q Back" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back";
+        if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview · j/k Scroll · q Back" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back";
         if (self.mode == .compose and self.compose.attachment_focus) return if (width < 90) " Tab Buttons · Enter Activate · x Remove · A Add · Esc Body" else self.contextHints();
         if (self.mode == .compose and !self.compose.insert_mode and !self.compose.unknown_outcome) {
-            if (width < 50) return if (self.canPasteImage()) "^V image Ctrl+S Review ? Help" else "e Editor Ctrl+S Review ? Help";
+            if (width < 50) return if (self.canPasteImage()) "^V image · Ctrl+S Review · ? Help" else "e Editor · Ctrl+S Review · ? Help";
             if (width < 80) return if (self.canPasteImage()) " ^V image  A Files  Ctrl+S Review  q Back  ? Help" else " e Editor  A Files  Ctrl+S Review  q Back  ? Help";
             if (width < 100) return if (self.canPasteImage()) " i Edit · ^V image · A Files · p Preview · Ctrl+S Review · q Back · ? Help" else " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · q Back · ? Help";
             if (width < 145) return if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back" else " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
@@ -14842,22 +15456,25 @@ const App = struct {
         const row: usize = inner.height -| 2;
         const x = try self.actionButton(inner, row, 2, "[Apply]", self.dialog_focus.index == 1, true, .theme_action, 1);
         _ = try self.actionButton(inner, row, x, "[Cancel]", self.dialog_focus.index == 2, true, .theme_action, 2);
-        const hint: []const u8 = if (self.theme_save_failed) "Not saved · Esc Cancel" else if (self.mono) "NO_COLOR · Tab · Enter · Esc" else if (inner.width < 30) "Tab · Enter Apply · Esc" else "j/k Preview · Tab · Enter Apply · Esc";
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, hint, inner.width), if (self.theme_save_failed) .warning else .muted);
+        // Keys live in the footer; the dialog keeps only an explicit failure
+        // or the NO_COLOR explanation.
+        if (self.theme_save_failed) try self.line(inner, inner.height - 1, try self.fitLine(inner, "Not saved · Esc Cancel", inner.width), .warning) else if (self.mono) try self.line(inner, inner.height - 1, try self.fitLine(inner, "NO_COLOR · terminal colors", inner.width), .muted);
     }
     fn overlay(self: *App, win: vaxis.Window, title: []const u8, body: []const u8) !void {
         self.dialog_focus.ensure(.trash, 0);
         self.mouse_hits.clear();
-        const width = @min(win.width, 78);
-        const height = @min(win.height, 20);
+        // Near the window width, use all of it: thin strips beside a dialog
+        // would show fragments of the pane borders underneath.
+        const width = if (win.width <= 84) win.width else 78;
+        const height = @min(win.height, 14);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, title, true);
         _ = try self.flow(inner.child(.{ .height = inner.height -| 2 }), body, 0, 0);
         if (inner.height > 1) {
-            const x = try self.actionButton(inner, inner.height - 2, 0, "[y Confirm]", self.dialog_focus.index == 1, self.job.future == null, .dialog_action, 1);
-            _ = try self.actionButton(inner, inner.height - 2, x, "[Cancel]", self.dialog_focus.index == 0, true, .dialog_action, 0);
-            try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · n/Esc/q Cancel", .muted);
+            // Cancel first, the primary action last; the footer holds the keys.
+            const x = try self.actionButton(inner, inner.height - 1, 0, "[Cancel]", self.dialog_focus.index == 0, true, .dialog_action, 0);
+            _ = try self.actionButton(inner, inner.height - 1, x, "[Move to Trash y]", self.dialog_focus.index == 1, self.job.future == null, .dialog_action, 1);
         }
     }
     fn openHelp(self: *App) !void {
@@ -15016,9 +15633,14 @@ const App = struct {
         }
         return row;
     }
-    fn helpDraw(self: *App, win: vaxis.Window) !void {
-        const width = @min(win.width -| 2, 90);
-        const height = @min(win.height -| 2, 42);
+    fn helpDraw(self: *App, full: vaxis.Window) !void {
+        // Mail help owns the body rectangle: the header, sync row, footer and
+        // status stay visible, and no pane border shows beside the panel.
+        const mail_help = !self.calendarHelpVisible() and full.height >= 10;
+        const win = if (mail_help) full.child(.{ .y_off = 2, .height = full.height - 4 }) else full;
+        if (mail_help) win.fill(.{ .style = self.style(.text) });
+        const width = if (mail_help) @min(win.width, 100) else @min(win.width -| 2, 90);
+        const height = if (mail_help) win.height else @min(win.height -| 2, 42);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, if (self.calendarHelpVisible()) " Calendar · keyboard & mouse " else " Keyboard & mouse ", true);
@@ -15045,7 +15667,10 @@ const App = struct {
             try self.editLine(prompt, 0, "Find", &self.help_query, self.help_searching, if (self.help_searching) .selected else .sender);
             try self.line(search_line.child(.{ .x_off = search_line.width -| count_width }), 0, summary, if (count == 0 and self.help_query.value().len > 0) .warning else .accent);
         } else try self.line(search_line, 0, "/ Search help · keys, actions, sections", .muted);
-        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows + 1), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 3 });
+        // The global footer already shows mail help keys; only Calendar's
+        // full-screen help keeps its own footer row.
+        const footer_rows: u16 = if (mail_help) 0 else 1;
+        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows + 1), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 2 -| footer_rows });
         if (self.help_content_width != content.width or self.help_height != content.height) self.help_reveal_match = self.help_match != null;
         self.help_content_width = content.width;
         self.help_lines = try self.helpContent(content, 0, false);
@@ -15061,7 +15686,7 @@ const App = struct {
             const back_x = inner.width -| 8;
             try self.line(inner.child(.{ .width = back_x -| 1 }), inner.height - 1, try self.fitLine(inner, footer, back_x -| 1), .muted);
             _ = try self.actionButton(inner, inner.height - 1, back_x, "[q Back]", self.calendar.help_focus_back, true, .dialog_action, 0);
-        } else try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
+        } else if (!mail_help) try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
     }
     fn loadInvitationPresentation(self: *App, result: Value) !void {
         self.invitation_calendar_blocked = false;
@@ -19500,15 +20125,18 @@ const App = struct {
         } else if (self.mode == .search or self.mode == .command or self.mode == .labels) {
             const prompt = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}▏", .{ if (self.mode == .command) ":" else if (self.mode == .labels) "Label (name adds, -name removes): " else if (self.mode == .attachment) "Attach file path: " else if (self.previous_mode == .contacts) "Contacts / " else if (self.input_query_scope == .cache) "Cache / " else "Gmail \\ ", self.input.value() });
             try self.line(win, win.height - 2, prompt, .selected);
-        } else try self.line(win, win.height - 2, try self.fitLine(win, if (self.updateVisible()) try std.fmt.allocPrint(self.frame.allocator(), "Tab Updates · {s}", .{self.fittedHints(win.width)}) else self.fittedHints(win.width), win.width), .muted);
+        } else try self.drawHints(win, win.height - 2, if (self.updateVisible()) try std.fmt.allocPrint(self.frame.allocator(), "Tab Updates · {s}", .{self.fittedHints(win.width -| 14)}) else self.fittedHints(win.width));
         const status_line = if (self.grace_active and self.grace_pending.load(.acquire) and win.width < 70) (if (self.grace_focus == 0) "Tab Switch · Enter: Undo" else "Tab Switch · Enter: Send now") else self.status[0..self.status_len];
-        try self.line(win, win.height - 1, try self.fitLine(win, status_line, win.width), if (self.warning) .warning else .muted);
+        // The status row shares the header's one-column indent.
+        // An idle "Ready" recedes to the faint border tone; notices stay muted.
+        try self.line(win.child(.{ .x_off = 1, .width = win.width -| 1 }), win.height - 1, try self.fitLine(win, status_line, win.width -| 1), if (self.warning) .warning else if (same(status_line, "Ready")) .border else .muted);
         try self.drawReaderOverlay(win);
         try self.drawFileDialog(win);
         try self.drawLabelPicker(win);
         try self.drawLabelManager(win);
         if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) {
-            const review = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\n{d} messages · exact targets pinned\n{s}\n\nMove these messages to Trash.\nThis can be undone; mail is not permanently deleted.", .{ self.pinned_targets.account.slice(), self.pinned_targets.count, self.triage_subject.value() });
+            const one = self.pinned_targets.count == 1;
+            const review = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\n{d} {s} · exact targets pinned\n{s}\n\nMove {s} to Trash.\nThis can be undone; mail is not permanently deleted.", .{ self.pinned_targets.account.slice(), self.pinned_targets.count, plural(self.pinned_targets.count, "message", "messages"), self.triage_subject.value(), if (one) @as([]const u8, "this message") else "these messages" });
             try self.overlay(win, " Move selected mail to Trash? ", review);
         } else if (self.mode == .invitation) {
             try self.invitationDraw(win);
@@ -19628,7 +20256,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try setMouseReporting(&vx, tty.writer(), !options.no_mouse);
     if (!app.drafts_list) try app.refreshMailbox();
     main_loop: while (!app.quit and received_signal.load(.acquire) == 0) {
-        app.finish() catch |err| app.sayError(@errorName(err));
+        app.finish() catch |err| app.reportFailure(err);
         app.adoptBackgroundCache() catch {};
         try app.dispatchPending();
         _ = app.pollTheme();
@@ -19656,8 +20284,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
             break :next_input received;
         };
         switch (event) {
-            .key_press => |key| app.onKey(key) catch |err| app.sayError(@errorName(err)),
-            .mouse => |mouse| app.onMouse(mouse) catch |err| app.sayError(@errorName(err)),
+            .key_press => |key| app.onKey(key) catch |err| app.reportFailure(err),
+            .mouse => |mouse| app.onMouse(mouse) catch |err| app.reportFailure(err),
             .winsize => |size| try app.resize(size),
             .tty_resize => {},
             .paste_start => app.pasteStart(),
@@ -21952,9 +22580,203 @@ test "back stack returns one context and insertion q remains text" {
     try std.testing.expectEqual(@as(usize, 1), app.folder);
     try std.testing.expectEqualStrings("personal@example.com", app.account());
     try std.testing.expect(!app.quit);
+    // Esc steps back like q but never quits; only q (and :q, idle Ctrl+C) do.
+    try app.escapeBack();
+    try std.testing.expect(!app.quit);
+    try std.testing.expectEqualStrings("Esc stays in the mailbox · q quits", app.status[0..app.status_len]);
     try app.browseBack();
     try std.testing.expect(app.quit);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: normal-mode Esc keeps the composer; q is the way back" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose.insert_mode = true;
+    try app.onComposeKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.compose.insert_mode and app.mode == .compose);
+    try app.onComposeKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings("Normal mode · q saves the draft and goes back", app.status[0..app.status_len]);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: short list dates always fit and reader dates keep their time" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const zone = try timezone.Zone.fromPosix("UTC0");
+    const now: i64 = 1794312000000; // 2026-11-10 12:00 UTC, a Tuesday
+    const cases = [_]struct { at: i64, list: []const u8, reader: []const u8 }{
+        .{ .at = 1794306600000, .list = "10:30", .reader = "10:30" },
+        .{ .at = 1794047760000, .list = "Sat", .reader = "Sat 10:36" },
+        .{ .at = 1793664000000, .list = "Nov 3", .reader = "Nov 3 00:00" },
+        .{ .at = 1762516800000, .list = "2025-11-07", .reader = "2025-11-07 12:00" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.list, try shortDate(arena.allocator(), &zone, case.at, now));
+        try std.testing.expectEqualStrings(case.reader, try readerDate(arena.allocator(), &zone, case.at, now));
+    }
+    try std.testing.expectEqualStrings("", try shortDate(arena.allocator(), &zone, 0, now));
+}
+
+test "local UI: list rows keep dates, name Sent recipients and flag with single cells" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"one\",\"subject\":\"Fictional plan\",\"from\":{\"name\":\"Me\",\"address\":\"personal@example.test\"},\"to\":[{\"name\":\"Alex Fixture\",\"address\":\"alex@example.test\"},{\"address\":\"sam@example.test\"}],\"labels\":[\"SENT\",\"STARRED\"],\"attachmentCount\":1,\"receivedAt\":1762516800000}]", .{}));
+    app.folder = 1;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 60, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 60, .height = 6, .screen = &screen };
+    try app.listDraw(win);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "2025-11-07") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "To: Alex Fixture +1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "★⊕") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "⭐") == null and std.mem.indexOf(u8, rendered, "📎") == null);
+    // The focused list row has the strong selection; an unfocused one only a marker.
+    try std.testing.expectEqualStrings("▌", screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expect(std.meta.eql(screen.readCell(5, 0).?.style.bg, vaxis.Color{ .rgb = app.palette.selection }));
+    app.focus = .reader;
+    try app.listDraw(win);
+    try std.testing.expectEqualStrings("▏", screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expect(!std.meta.eql(screen.readCell(5, 0).?.style.bg, vaxis.Color{ .rgb = app.palette.selection }));
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: overlays never lose their left border to a wide grapheme beside them" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var screen = try vaxis.Screen.init(a, .{ .cols = 20, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 4, .screen = &screen };
+    win.writeCell(5, 1, .{ .char = .{ .grapheme = "🌋", .width = 2 } });
+    _ = app.panel(win.child(.{ .x_off = 6, .width = 10 }), 0, 10, " Card ", true);
+    try std.testing.expectEqualStrings(" ", screen.readCell(5, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("│", screen.readCell(6, 1).?.char.grapheme);
+}
+
+test "local UI: footers keep essential keys first and use one separator style" {
+    var buffer: [1024]u8 = undefined;
+    const list = " j/k Mail · Enter Read · c New · / Search · x Archive · D Trash · r/R Reply · f Forward · m Labels · s Star · T Theme · ? Help · q Quit";
+    const narrow = fitHints(&buffer, list, 50);
+    try std.testing.expectEqualStrings("j/k Mail · Enter Read · c New · ? Help · q Quit", narrow);
+    try std.testing.expect(std.mem.indexOf(u8, fitHints(&buffer, list, 60), "c New") != null);
+    try std.testing.expect(hintWidth(narrow) <= 50);
+    const medium = fitHints(&buffer, list, 100);
+    try std.testing.expect(std.mem.indexOf(u8, medium, "T Theme") == null and std.mem.indexOf(u8, medium, "D Trash") != null and std.mem.indexOf(u8, medium, "q Quit") != null);
+    // Older double-space strings are normalized to the same separator.
+    try std.testing.expectEqualStrings("+ Add · - Remove · Esc/q Back", fitHints(&buffer, "+ Add  - Remove  Esc/q Back", 80));
+    try std.testing.expectEqual(@as(usize, 3), hintKeyEnd("j/k Mail"));
+    try std.testing.expectEqual(@as(usize, 6), hintKeyEnd("INSERT · Tab"));
+    try std.testing.expectEqual(@as(usize, 0), hintKeyEnd("Cache subset"));
+    try std.testing.expect(hintPriority("T Theme") < hintPriority("x Archive"));
+}
+
+test "local UI: triage notices name the action and offer Ctrl+Z" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const parse = struct {
+        fn value(allocator: Allocator, raw: []const u8) !Value {
+            return std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+        }
+    }.value;
+    const cases = [_]struct { request: []const u8, count: i64, notice: []const u8, undo: []const u8 }{
+        .{ .request = "{\"action\":\"archive\"}", .count = 1, .notice = "Archived 1", .undo = "archive" },
+        .{ .request = "{\"action\":\"trash\"}", .count = 2, .notice = "Moved 2 to Trash", .undo = "trash" },
+        .{ .request = "{\"action\":\"mark\",\"starred\":true}", .count = 1, .notice = "Starred", .undo = "star" },
+        .{ .request = "{\"action\":\"mark\",\"unread\":true}", .count = 1, .notice = "Marked unread", .undo = "mark unread" },
+        .{ .request = "{\"action\":\"mark\",\"unread\":false}", .count = 3, .notice = "Marked read 3", .undo = "mark read" },
+        .{ .request = "{\"action\":\"mark\",\"addLabels\":[\"Label_1\"]}", .count = 1, .notice = "Labels updated on 1", .undo = "labels" },
+        .{ .request = "{\"action\":\"restore\"}", .count = 1, .notice = "Restored 1 from Trash", .undo = "restore" },
+    };
+    for (cases) |case| {
+        const request = try parse(arena.allocator(), case.request);
+        try std.testing.expectEqualStrings(case.notice, try batchNotice(arena.allocator(), request, case.count));
+        try std.testing.expectEqualStrings(case.undo, batchUndoLabel(request));
+    }
+    try std.testing.expectEqualStrings("1 message", try std.fmt.allocPrint(arena.allocator(), "{d} {s}", .{ 1, plural(1, "message", "messages") }));
+}
+
+test "local UI: the command prompt ignores case, cancels when empty and suggests a near command" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    for ([_][]const u8{ "VERSION", "  ", "arhive", "zzzzzz", "Lab" }, [_][]const u8{ "Running Omagma", "Running Omagma", "Unknown command · did you mean :archive? · Ctrl+P lists actions", "Unknown command · Ctrl+P lists actions", "Unknown command · did you mean :labels? · Ctrl+P lists actions" }) |typed, expected| {
+        app.previous_mode = .browse;
+        app.mode = .command;
+        try app.input.set(allocator, typed);
+        try app.onKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(Mode.browse, app.mode);
+        try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], expected));
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestCommand(""));
+    try std.testing.expectEqualStrings("forward", nearestCommand("froward").?);
+    try std.testing.expectEqual(action_palette.Id.archive, action_palette.command("archive").?);
+    try std.testing.expectEqual(@as(u21, 'x'), actionKey(.archive).?);
+    try std.testing.expectEqual(@as(?usize, 1), goFolder(.{ .codepoint = 's' }));
+    try std.testing.expectEqual(@as(?usize, 4), goFolder(.{ .codepoint = 't' }));
+    try std.testing.expect(readerViewKey(.{ .codepoint = 'H' }) and !readerViewKey(.{ .codepoint = 'h' }));
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: rejected responses show the backend sentence and restore needs Trash" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const rejected = "{\"ok\":false,\"error\":{\"code\":\"UnknownQueryOperator\",\"message\":\"Unknown cache operator; use from, to, cc, subject, body, label, is, in, has, filename, after, before, on or status\"}}";
+    try std.testing.expectError(error.OperationRejected, app.data(arena.allocator(), rejected));
+    try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], "Unknown cache operator; use from"));
+    try std.testing.expectEqualStrings("UnknownQueryOperator", app.status_error_code[0..app.status_error_len]);
+    app.reportFailure(error.OperationRejected);
+    try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], "Unknown cache operator"));
+    // Provider-looking or code-only messages keep the stable wording.
+    try std.testing.expectError(error.OperationRejected, app.data(arena.allocator(), "{\"ok\":false,\"error\":{\"code\":\"UnmappedFixtureError\",\"message\":\"UnmappedFixtureError\"}}"));
+    try std.testing.expectEqualStrings("Operation failed · UnmappedFixtureError", app.status[0..app.status_len]);
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"inbox-one\",\"labels\":[\"INBOX\"]}]", .{}));
+    app.capabilities.mail_changes = true;
+    try std.testing.expect(try app.onMailControls(.{ .codepoint = 'U' }));
+    try std.testing.expectEqualStrings("Not in Trash · U restores mail from Trash", app.status[0..app.status_len]);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: empty lists explain themselves and help starts with essentials" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.sync[0].state = .failed;
+    try std.testing.expectEqualStrings("No downloaded mail yet · Ctrl+R Retry", try app.emptyListText());
+    app.sync[0].state = .cached;
+    try app.query.set(allocator, "needle");
+    try std.testing.expectEqualStrings("No matches in downloaded mail · \\ searches Gmail · q clears", try app.emptyListText());
+    // The list title names the active query and its scope.
+    try std.testing.expectEqualStrings(" Mail · Empty · / “needle” ", try app.listTitle());
+    try app.query.set(allocator, "");
+    try app.custom_label.set(allocator, "Label_fixture");
+    try std.testing.expectEqualStrings("No mail with this label", try app.emptyListText());
+    try app.custom_label.set(allocator, "");
+    app.folder = 4;
+    try std.testing.expectEqualStrings("No mail in Trash", try app.emptyListText());
+    try std.testing.expectEqualStrings("ESSENTIALS", help_rows[0].section);
+    // Every keyed help row belongs to a section.
+    try std.testing.expect(help_rows[0].section.len > 0);
 }
 
 test "cache search uses only retained local data and server cursors stay distinct" {
@@ -22327,7 +23149,11 @@ test "local UI: cache retry failures do not discard mailbox quit keys" {
         try std.testing.expectError(error.InvalidCacheRecord, app.onKey(.{ .codepoint = 'j' }));
         try std.testing.expect(!app.quit);
         try app.onKey(key);
-        try std.testing.expect(app.quit);
+        // Esc is still handled (not discarded) but never quits the mailbox.
+        if (key.codepoint == Key.escape) {
+            try std.testing.expect(!app.quit);
+            try std.testing.expectEqualStrings("Esc stays in the mailbox · q quits", app.status[0..app.status_len]);
+        } else try std.testing.expect(app.quit);
         try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
     }
 }
@@ -23448,17 +24274,17 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
     try app.onHelpKey(.{ .codepoint = 'l', .text = "lAbElS" });
     const label = app.help_match orelse return error.MissingHelpMatch;
-    try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[label].keys);
+    try std.testing.expectEqualStrings("Up / Down in sidebar", help_rows[label].keys);
     try app.onHelpKey(.{ .codepoint = Key.enter });
     try std.testing.expect(!app.help_searching);
-    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
-    try std.testing.expectEqualStrings("c Color in Manage labels", help_rows[app.help_match.?].keys);
-    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
-    try std.testing.expectEqualStrings("Up / Down in sidebar", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("m", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings(":labels · click LABELS", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("c Color in Manage labels", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqual(label, app.help_match.?);
 
@@ -23469,8 +24295,6 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
-    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
-    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     // Search is deliberately a substring match: Ctrl+Space also contains
@@ -23478,6 +24302,8 @@ test "local UI: help search matches actions keys and sections and cycles without
     try std.testing.expectEqualStrings("Ctrl+Space in To/Cc/Bcc", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Ctrl+F / Ctrl+Shift+F", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
@@ -23489,13 +24315,13 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+F / Ctrl+Shift+F", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+Space in To/Cc/Bcc", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
-    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
-    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
 
@@ -23671,7 +24497,13 @@ test "local UI: help search reveals and highlights actual wrapped matches after 
     defer a.free(narrow);
     try std.testing.expect(std.mem.indexOf(u8, narrow, "Choose labels") != null);
     try std.testing.expect(std.mem.indexOf(u8, narrow, "1/1 matches") != null);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "q Back") != null);
+    // Help keeps to the body: header/sync rows and the footer/status rows
+    // stay with the global frame (whose footer shows q Back).
+    try std.testing.expectEqualStrings("╭", screen.readCell(0, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("╰", screen.readCell(0, 17).?.char.grapheme);
+    try std.testing.expect(screen.readCell(0, 18).?.char.grapheme.len == 0 or same(screen.readCell(0, 18).?.char.grapheme, " "));
+    app.mode = .help;
+    try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(48), "q Back") != null);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -24123,9 +24955,10 @@ test "reader polish: single line labels and subjects emit real cells for isolate
     try std.testing.expectEqualStrings("\u{034f}Title e\u{0301} 👩‍💻", literal);
     app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"padding\",\"subject\":\"\\u034fMessage\",\"from\":{\"name\":\"Alex\"}}]", .{}));
     try app.drawMailRow(win, 2, 0);
-    try std.testing.expectEqualStrings(" ", screen.readCell(3, 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("M", screen.readCell(4, 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("e", screen.readCell(10, 2).?.char.grapheme);
+    // The four-cell gutter (bar, ✓, ●, space) precedes the subject.
+    try std.testing.expectEqualStrings(" ", screen.readCell(4, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("M", screen.readCell(5, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("e", screen.readCell(11, 2).?.char.grapheme);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -25736,6 +26569,9 @@ test "forward UX: all mailbox reader and search footers expose Forward before tr
         app.focus = focus;
         for ([_]bool{ false, true }) |expanded| {
             app.expanded = expanded;
+            // Narrow mailbox lists keep navigation, Enter, compose, search,
+            // archive/trash, help and quit; Forward follows from 100 columns.
+            if (focus == .list and !expanded and width < 100) continue;
             const hints = app.fittedHints(width);
             const action_at = std.mem.indexOf(u8, hints, "f Forward") orelse return error.ForwardHintMissing;
             try std.testing.expect(action_at + "f Forward".len <= width);
@@ -25859,6 +26695,8 @@ test "local UI: unread stars and bulk marks stay independent on focused narrow m
     defer app.deinit();
     app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"read\",\"subject\":\"Read subject\",\"from\":{\"name\":\"Alex\"},\"labels\":[\"STARRED\"]},{\"id\":\"unread\",\"subject\":\"Unread subject\",\"from\":{\"name\":\"Sam\"},\"labels\":[\"UNREAD\",\"STARRED\"]}]", .{}));
     try app.mail_selection.toggle("unread");
+    // The frame's flag column is active because visible rows are starred.
+    app.mail_flags = true;
     for ([_]u16{ 70, 16 }) |width| {
         var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
         defer screen.deinit(a);
@@ -25867,19 +26705,24 @@ test "local UI: unread stars and bulk marks stay independent on focused narrow m
             app.selected = index;
             try app.drawMailRow(win, index * 3, index);
         }
-        try std.testing.expectEqualStrings(" ", screen.readCell(0, 0).?.char.grapheme);
+        // Gutter: selection bar, bulk ✓, unread ●, then the subject.
+        try std.testing.expectEqualStrings("▌", screen.readCell(0, 0).?.char.grapheme);
         try std.testing.expectEqualStrings(" ", screen.readCell(1, 0).?.char.grapheme);
-        try std.testing.expectEqualStrings("⭐", screen.readCell(0, 1).?.char.grapheme);
-        try std.testing.expectEqualStrings("R", screen.readCell(3, 0).?.char.grapheme);
-        try std.testing.expectEqualStrings("A", screen.readCell(3, 1).?.char.grapheme);
-        try std.testing.expect(!screen.readCell(3, 0).?.style.bold);
-        try std.testing.expect(!screen.readCell(3, 0).?.style.italic);
-        try std.testing.expectEqualStrings("✓", screen.readCell(0, 3).?.char.grapheme);
-        try std.testing.expectEqualStrings("●", screen.readCell(1, 3).?.char.grapheme);
-        try std.testing.expectEqualStrings("⭐", screen.readCell(0, 4).?.char.grapheme);
-        try std.testing.expectEqualStrings("U", screen.readCell(3, 3).?.char.grapheme);
-        try std.testing.expectEqualStrings("S", screen.readCell(3, 4).?.char.grapheme);
-        try std.testing.expect(screen.readCell(3, 3).?.style.bold);
+        try std.testing.expectEqualStrings(" ", screen.readCell(2, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("R", screen.readCell(4, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("A", screen.readCell(4, 1).?.char.grapheme);
+        try std.testing.expect(!screen.readCell(4, 0).?.style.bold);
+        try std.testing.expect(!screen.readCell(4, 0).?.style.italic);
+        try std.testing.expectEqualStrings("✓", screen.readCell(1, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("●", screen.readCell(2, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("U", screen.readCell(4, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("S", screen.readCell(4, 4).?.char.grapheme);
+        try std.testing.expect(screen.readCell(4, 3).?.style.bold);
+        // A single-cell ★ in the fixed flag column, once there is room for it.
+        if (width >= 24) {
+            try std.testing.expectEqualStrings("★", screen.readCell(width - 3, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("★", screen.readCell(width - 3, 3).?.char.grapheme);
+        }
     }
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
@@ -25914,8 +26757,9 @@ test "local UI: received long local parts render copy and compose without shorte
     defer a.free(rendered);
     const expected_to = "To: \"Doe, Jane\" <" ++ long_to ++ ">";
     const expected_cc = "Cc: " ++ long_cc;
-    try std.testing.expect(std.mem.indexOf(u8, rendered, expected_to) != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, expected_cc) != null);
+    // The reader aligns its envelope keys; the copied envelope keeps colons.
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "To     \"Doe, Jane\" <" ++ long_to ++ ">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Cc     " ++ long_cc) != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, message.bodyText) != null);
     try app.copyReaderMessage();
     const copied = app.reader_copy_test_value.value();
@@ -25953,10 +26797,11 @@ test "local UI: reader labels use account names and show status without opaque I
     _ = try app.readerBodyDraw(win);
     const rendered = try markdownTestScreenText(a, &screen);
     defer a.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "● Unread ·") != null);
-    try std.testing.expectEqualStrings("⭐", screen.readCell(11, 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("S", screen.readCell(14, 2).?.char.grapheme);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Labels: Inbox · Travel 🌋") != null);
+    // Labels render as chips beside an aligned key; status shows only when set.
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "● Unread") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "★ Starred") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Labels  Inbox   Travel 🌋") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Read\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Clean readable body") != null);
     app.account_index = 1;
     try std.testing.expectEqualStrings("Labels: Inbox · 2 awaiting names", try app.readerLabels(app.thread[0]));
@@ -31363,10 +32208,11 @@ test "native draft paging: compact summaries navigate all 128 drafts and open ex
     for ([_]preferences.Density{ .comfortable, .compact }) |density| {
         app.ui_preferences.density = density;
         vx.screen.clear();
-        try app.drawMailRow(vx.window(), 0, 0);
+        // The list frame enables the shared flag column for visible rows.
+        try app.listDraw(vx.window());
         const rendered = try markdownTestScreenText(a, &vx.screen);
         defer a.free(rendered);
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "📎") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "⊕") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "Complete draft subject 0") != null);
     }
     // Every row is reachable by the ordinary j/k movement, including the

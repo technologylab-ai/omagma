@@ -405,7 +405,7 @@ def tui_case(binary, directory, fixture, name):
             terminal.until(cold_placeholders)
             color = status_color(terminal, "Fetching mail", FETCH_COLOR)
             require("Synthetic personal thread" not in terminal.text() and not contains_body(terminal, 96)
-                    and "No matching messages" not in terminal.text(),
+                    and "No mail in Inbox" not in terminal.text(),
                     "held cold startup showed mail rows or an empty-result state before loading")
             require(fixture.is_held(), "cold status was checked after remote completed")
             fixture.release()
@@ -424,7 +424,7 @@ def tui_case(binary, directory, fixture, name):
         for number in (95, 94, 93):
             terminal.send(b"J")
             terminal.until(lambda number=number: contains_body(terminal, number))
-            require("No matching messages" not in terminal.text() and "Fetching mail…" not in terminal.text(), "cached list reset empty while refreshing")
+            require("No mail in Inbox" not in terminal.text() and "Fetching mail…" not in terminal.text(), "cached list reset empty while refreshing")
         require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before cached navigation/full read")
         terminal.send(b"\r")
         # Enter preserves the selected delivered message in the card reader.
@@ -492,7 +492,7 @@ def tui_case(binary, directory, fixture, name):
         status_color(terminal, "Up to date", CURRENT_COLOR)
         terminal.until(lambda: "Synthetic personal delta 098" in terminal.text())
         require(contains_body(terminal, 96), "refresh jumped selection from original message identity")
-        require("No matching messages" not in terminal.text(), "merge reset cached list empty")
+        require("No mail in Inbox" not in terminal.text(), "merge reset cached list empty")
         return {**terminal.finish(), "cachedRowsBeforeRemoteRelease": True, "cachedFullReadBeforeRemoteRelease": True,
                 "cachedThreadBeforeRemoteRelease": True, "selectedIdentityPreserved": True,
                 "fetchingColor": color, "currentColor": list(CURRENT_COLOR)}

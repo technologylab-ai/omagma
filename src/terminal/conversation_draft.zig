@@ -63,6 +63,50 @@ pub fn quote(a: std.mem.Allocator, body: []const u8) ![]const u8 {
     }
     return bytes.items;
 }
+/// "On <date>, <name> <address> wrote:" above a text quote. The sender's own
+/// Date header is used as written; otherwise the received instant in UTC.
+/// Header text is flattened to one bounded line before it enters the body.
+pub fn attribution(a: std.mem.Allocator, message: t.Message, format: t.BodyFormat) ![]const u8 {
+    var date_buffer: [40]u8 = undefined;
+    const date: []const u8 = if (message.sentDate) |sent| sent else if (message.receivedAt > 0) blk: {
+        const seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@divFloor(message.receivedAt, 1000)) };
+        const day = seconds.getEpochDay().calculateYearDay();
+        const month = day.calculateMonthDay();
+        const clock = seconds.getDaySeconds();
+        break :blk try std.fmt.bufPrint(&date_buffer, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC", .{ day.year, month.month.numeric(), month.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour() });
+    } else "an earlier date";
+    const name = oneLine(message.from.name, 256);
+    const address = oneLine(message.from.address, 320);
+    const who = if (name.len > 0 and address.len > 0)
+        try std.fmt.allocPrint(a, "{s} <{s}>", .{ name, address })
+    else if (name.len > 0) name else address;
+    const raw = try std.fmt.allocPrint(a, "On {s}, {s} wrote:", .{ oneLine(date, 64), who });
+    const line = try a.dupe(u8, raw);
+    for (line) |*byte| if (byte.* < 0x20 or byte.* == 0x7f) {
+        byte.* = ' ';
+    };
+    return if (format == .markdown) markdown.escapeSource(a, line) else line;
+}
+fn oneLine(text: []const u8, limit: usize) []const u8 {
+    var end = @min(std.mem.indexOfAny(u8, text, "\r\n") orelse text.len, limit);
+    while (end > 0 and !std.unicode.utf8ValidateSlice(text[0..end])) end -= 1;
+    return std.mem.trim(u8, text[0..end], " \t");
+}
+/// Where the quoted original starts in a draft body: before its attribution
+/// line, or before the first "> " line of an older draft without one.
+pub fn quoteStart(body: []const u8) ?usize {
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, body, search, "\n\nOn ")) |at| : (search = at + 2) {
+        const line_end = std.mem.indexOfScalarPos(u8, body, at + 2, '\n') orelse break;
+        if (std.mem.endsWith(u8, std.mem.trimEnd(u8, body[at + 2 .. line_end], "\r"), "wrote:") and std.mem.startsWith(u8, body[line_end + 1 ..], "> ")) return at;
+    }
+    return std.mem.indexOf(u8, body, "\n\n> ");
+}
+fn attributedQuote(a: std.mem.Allocator, line: []const u8, body: []const u8) ![]const u8 {
+    const quoted = try quote(a, body);
+    if (line.len + 1 > t.Limits.compose_body_bytes - quoted.len) return error.BodyTooLarge;
+    return std.fmt.allocPrint(a, "\n\n{s}\n{s}", .{ line, quoted[2..] });
+}
 pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t.Draft {
     try requireBody(message);
     // A display-only fallback never supplies an implicit outgoing recipient.
@@ -74,7 +118,7 @@ pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t
         .to = envelope.to,
         .cc = envelope.cc,
         .subject = try prefixedSubject(a, message.subject, "Re:"),
-        .bodyText = if (options.original != null) "" else try quote(a, if (options.format == .markdown) try markdown.escapeSource(a, message.bodyText) else message.bodyText),
+        .bodyText = if (options.original != null) "" else try attributedQuote(a, try attribution(a, message, options.format), if (options.format == .markdown) try markdown.escapeSource(a, message.bodyText) else message.bodyText),
         .bodyFormat = options.format,
         .threadId = message.threadId,
         .inReplyTo = threading.in_reply_to,
@@ -152,10 +196,36 @@ test "conversation draft: reply-all excludes self aliases and retains native thr
     try std.testing.expectEqualStrings("peer@example.test", draft.cc[0].address);
     try std.testing.expectEqualStrings("other@example.test", draft.cc[1].address);
     try std.testing.expectEqualStrings("Re: Subject", draft.subject);
-    try std.testing.expectEqualStrings("\n\n> Line one\n> Line two\n", draft.bodyText);
+    try std.testing.expectEqualStrings("\n\nOn an earlier date, Sender <sender@example.test> wrote:\n> Line one\n> Line two\n", draft.bodyText);
     try std.testing.expectEqualStrings("thread", draft.threadId);
     try std.testing.expectEqualStrings("<source@example.test>", draft.inReplyTo);
     try std.testing.expectEqualStrings("<prior@example.test> <source@example.test>", draft.references);
+}
+test "conversation draft: reply quote names its sender and date above readable quoted text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const message: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "alex@example.test", .name = "Alex *Fixture*" }, .subject = "Plans", .bodyText = "See you at 5. Bring (fictional) snacks!\n# not a heading\n- not a list", .messageId = "<source@example.test>", .sentDate = "Sat, 7 Nov 2026 09:00:00 +0000" };
+    const plain = try reply(a, message, .{ .account = "self@example.test" });
+    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:\n> See you at 5. Bring (fictional) snacks!\n> # not a heading\n> - not a list\n", plain.bodyText);
+    const markdown_draft = try reply(a, message, .{ .account = "self@example.test", .format = .markdown });
+    // Only what would become markup is escaped: the name's emphasis, the
+    // heading and the list marker. Ordinary punctuation stays readable.
+    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 +0000, Alex \\*Fixture* <alex@example.test> wrote:\n> See you at 5. Bring (fictional) snacks!\n> \\# not a heading\n> \\- not a list\n", markdown_draft.bodyText);
+    const rendered = try markdown.render(a, markdown_draft.bodyText);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "On Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "> # not a heading") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.html, "<em>") == null and std.mem.indexOf(u8, rendered.html, "<h1") == null and std.mem.indexOf(u8, rendered.html, "<li") == null);
+    // The reader folds the attribution with its quote; signatures insert above it.
+    const folded = try @import("reader_tools.zig").fold(a, plain.bodyText, true, false);
+    try std.testing.expect(std.mem.indexOf(u8, folded.text, "wrote:") == null and std.mem.indexOf(u8, folded.text, "Bring") == null);
+    try std.testing.expectEqual(@as(?usize, 0), quoteStart(plain.bodyText));
+    try std.testing.expectEqual(@as(?usize, 4), quoteStart("Note\n\n> Older draft quote\n"));
+    try std.testing.expectEqual(@as(?usize, null), quoteStart("On Monday we met.\nNo quote here"));
+    // Without a Date header the received instant is shown in UTC; header
+    // text never adds lines to the body.
+    const received: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "line@example.test", .name = "Two\nLines" }, .bodyText = "Body", .receivedAt = 1794047760000 };
+    try std.testing.expectEqualStrings("On 2026-11-07 10:36 UTC, Two <line@example.test> wrote:", try attribution(a, received, .plain));
 }
 test "conversation draft: forward preserves semantic links and omission warning without reply identity" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

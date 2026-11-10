@@ -59,7 +59,8 @@ def reply_invariants(draft, identifier, body, all_recipients):
     require(draft["subject"] == "Re: Complete reply boundary", "reply subject changed")
     require(draft["threadId"] == f"thread-{identifier}", "provider thread changed")
     require(draft["inReplyTo"] == PARENT, "direct parent changed")
-    require(draft["bodyText"] == "\n\n> " + body + "\n", "source body was shortened")
+    require(draft["bodyText"] == "\n\nOn 2026-11-07 10:36 UTC, Source Sender <sender@example.test> wrote:\n> " + body + "\n",
+            "source body was shortened or lost its attribution")
 
 
 def exercise(binary: Path, directory: Path, expect_old_failure: bool):

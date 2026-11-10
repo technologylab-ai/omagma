@@ -219,7 +219,7 @@ def inline_case(binary, directory, captures=None):
         require("nothing sent yet" in terminal.text(), "explicit fixture countdown was not retained")
         terminal.send(b"\x13")  # Deliberate Send now, without waiting at the 10s boundary.
         expected_sends = 1
-        terminal.until(lambda: "Send complete · provider accepted" in terminal.text())
+        terminal.until(lambda: "Sent to " in terminal.text())
         with Client(binary, directory) as client:
             history = client.request("history.operations")
             require(len(history["items"]) == 1 and not history["nextCursor"],

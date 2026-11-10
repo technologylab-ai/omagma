@@ -25,8 +25,20 @@ pub const Palette = struct {
     magenta: Color = .{ 199, 149, 230 },
     orange: Color = .{ 255, 158, 97 },
     red: Color = .{ 255, 112, 112 },
+    /// Derived roles: an unfocused pane's selected row, quiet unfocused pane
+    /// borders (below muted text) and a raised surface for dialogs.
+    selection_inactive: Color = .{ 32, 38, 47 },
+    border: Color = .{ 72, 79, 95 },
+    surface: Color = .{ 26, 31, 41 },
     from_omarchy: bool = false,
 };
+
+/// Linear sRGB-channel mix: percent of `toward` over `base`.
+pub fn mix(base: Color, toward: Color, percent: u8) Color {
+    var result: Color = undefined;
+    for (&result, base, toward) |*channel, from, to| channel.* = @intCast((@as(u16, from) * (100 - percent) + @as(u16, to) * percent + 50) / 100);
+    return result;
+}
 
 /// The file is checked from existing UI wakeups at most once every two
 /// seconds. Only a changed identity is read; idle frames never parse TOML.
@@ -79,17 +91,28 @@ pub fn parse(bytes: []const u8) !Palette {
     if (bytes.len > 16 * 1024) return error.ThemeTooLarge;
     var palette: Palette = .{};
     var has_muted = false;
+    var has_selection = false;
+    var border: ?Color = null;
+    var surface: ?Color = null;
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#' or line[0] == '[') continue;
         const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..separator], " \t");
+        // Omarchy's own "muted" is a border tone, distinct from dimmed text.
+        if (std.mem.eql(u8, key, "muted") or std.mem.eql(u8, key, "lighter_background")) {
+            // Optional derived roles never invalidate an otherwise usable theme.
+            const value = color(line[separator + 1 ..]) catch continue;
+            if (std.mem.eql(u8, key, "muted")) border = value else surface = value;
+            continue;
+        }
         const target: ?*Color = if (std.mem.eql(u8, key, "foreground")) &palette.foreground else if (std.mem.eql(u8, key, "background")) &palette.background else if (std.mem.eql(u8, key, "dark_foreground")) &palette.muted else if (std.mem.eql(u8, key, "accent")) &palette.accent else if (std.mem.eql(u8, key, "selection")) &palette.selection else if (std.mem.eql(u8, key, "cyan")) &palette.cyan else if (std.mem.eql(u8, key, "green")) &palette.green else if (std.mem.eql(u8, key, "yellow")) &palette.yellow else if (std.mem.eql(u8, key, "red")) &palette.red else if (std.mem.eql(u8, key, "blue")) &palette.blue else if (std.mem.eql(u8, key, "magenta")) &palette.magenta else if (std.mem.eql(u8, key, "orange")) &palette.orange else null;
         if (target) |dest| {
             dest.* = try color(line[separator + 1 ..]);
             palette.from_omarchy = true;
             if (std.mem.eql(u8, key, "dark_foreground")) has_muted = true;
+            if (std.mem.eql(u8, key, "selection")) has_selection = true;
         }
     }
     // Secondary text keeps the theme's hue while moving toward foreground
@@ -97,6 +120,13 @@ pub fn parse(bytes: []const u8) !Palette {
     if (has_muted) for (&palette.muted, palette.foreground) |*channel, foreground| {
         channel.* = @intCast((@as(u16, channel.*) + foreground) / 2);
     };
+    if (palette.from_omarchy) {
+        // A theme without its own selection gets a clearly visible accent tint.
+        if (!has_selection) palette.selection = mix(palette.background, palette.accent, 18);
+        palette.selection_inactive = mix(palette.background, palette.foreground, 7);
+        palette.border = border orelse mix(palette.background, palette.muted, 45);
+        palette.surface = surface orelse mix(palette.background, palette.foreground, 4);
+    }
     return palette;
 }
 
@@ -126,6 +156,24 @@ test "theme color roles parse independently and preserve bounded fallback" {
     try std.testing.expectError(error.InvalidThemeColor, parse("accent=\"#123\"\n"));
     try std.testing.expectError(error.InvalidThemeColor, parse("foreground=\"#112233\" bad\n"));
     try std.testing.expectError(error.InvalidCharacter, parse("accent=\"#zz2233\"\n"));
+}
+
+test "local UI: theme roles derive focus, border and surface tones from Omarchy colors" {
+    const tokyo = try parse("background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\naccent = \"#7aa2f7\"\nselection = \"#292e42\"\nmuted = \"#414868\"\nlighter_background = \"#24283b\"\n");
+    // An explicit theme selection is kept; derived roles never replace it.
+    try std.testing.expectEqualSlices(u8, &.{ 41, 46, 66 }, &tokyo.selection);
+    try std.testing.expectEqualSlices(u8, &.{ 65, 72, 104 }, &tokyo.border);
+    try std.testing.expectEqualSlices(u8, &.{ 36, 40, 59 }, &tokyo.surface);
+    try std.testing.expectEqualSlices(u8, &mix(.{ 26, 27, 38 }, .{ 169, 177, 214 }, 7), &tokyo.selection_inactive);
+    // Without a selection key, the focused row uses an 18% accent tint.
+    const plain = try parse("background = \"#000000\"\nforeground = \"#ffffff\"\naccent = \"#ff0000\"\nmuted = \"bad\"\n");
+    try std.testing.expectEqualSlices(u8, &.{ 46, 0, 0 }, &plain.selection);
+    try std.testing.expectEqualSlices(u8, &.{ 18, 18, 18 }, &plain.selection_inactive);
+    try std.testing.expect(plain.border[0] > plain.background[0] and plain.border[0] < plain.muted[0]);
+    // The built-in palette keeps its exact published values.
+    const builtin: Palette = .{};
+    try std.testing.expectEqualSlices(u8, &.{ 57, 43, 48 }, &builtin.selection);
+    try std.testing.expect(builtin.border[0] < builtin.muted[0] and builtin.border[0] > builtin.background[0]);
 }
 
 test "local UI: built-in theme keeps the exact video orange independently of desktop files" {
