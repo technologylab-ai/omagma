@@ -86,6 +86,9 @@ pub fn build(b: *std.Build) void {
     const mailbox_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_mail_actions_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(mailbox_tests.root_module, sdk);
     b.step("test-browser-mail-actions", "Check shared browser mailbox mutations and per-item undo").dependOn(&guardedTestRun(b, mailbox_tests, test_watchdog).step);
+    // Request validation reaches the embedded command catalogue from every
+    // dispatcher, so each of these standalone test roots needs the options too.
+    for ([_]*std.Build.Step.Compile{ browser_export_tests, browser_server_tests, browser_cache_tests, browser_provider_tests, contact_isolation_tests, mailbox_tests }) |tests| tests.root_module.addOptions("build_options", options);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);

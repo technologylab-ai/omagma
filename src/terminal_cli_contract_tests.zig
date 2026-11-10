@@ -164,7 +164,9 @@ test "CLI contract: one-call reply, patching and guarded replacement keep thread
     defer h.deinit();
     const a = h.arena.allocator();
     const reply = try h.data("{\"cmd\":\"mail.reply\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-005\",\"all\":true,\"bodyText\":\"Thursday works.\"}");
-    try std.testing.expect(std.mem.startsWith(u8, j.text(reply, "bodyText"), "Thursday works.\n\n> "));
+    // The note sits above the attribution line and the quoted original.
+    try std.testing.expect(std.mem.startsWith(u8, j.text(reply, "bodyText"), "Thursday works.\n\nOn "));
+    try std.testing.expect(std.mem.indexOf(u8, j.text(reply, "bodyText"), " wrote:\n> ") != null);
     const id = j.text(reply, "id");
     const thread = j.text(reply, "threadId");
     try std.testing.expect(thread.len != 0);
