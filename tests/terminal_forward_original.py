@@ -78,7 +78,9 @@ class RawFixture:
                     message.update(id=message_id, threadId="source-thread", raw=encoded(raw))
                     # Forwarding an original must not need the semantic MIME
                     # reader to accept FULL. Raw source remains valid/exact.
-                    message["payload"] = {"body": {"size": 1, "data": "eA"}}
+                    # A part without a media type is now an opaque file, so use
+                    # damaged transfer data: that is still a decoder refusal.
+                    message["payload"] = {"mimeType": "text/plain", "body": {"size": 1, "data": "?invalid"}}
                     source["messages"].append(message)
                 bad = dict(source["messages"][-1])
                 bad.update(id="raw-invalid-base64", raw="%%%%")
@@ -160,7 +162,7 @@ def exercise(binary: Path, directory: Path):
         require(downloaded["saved"] and downloaded["size"] == len(LARGE_ORIGINAL)
                 and destination.read_bytes() == LARGE_ORIGINAL, "large original lifecycle changed exact source bytes")
         prior_drafts = client.request("draft.list")["drafts"]
-        for message_id, expected in (("raw-invalid-base64", "InvalidBase64"), ("raw-missing", "MissingField"), ("raw-invalid-headers", "MissingHeaderBoundary")):
+        for message_id, expected in (("raw-invalid-base64", "InvalidBase64"), ("raw-missing", "MissingField"), ("raw-invalid-headers", "InvalidHeaders")):
             require(client.request("mail.forward", messageId=message_id, original=True, ok=False)["code"] == expected, f"incorrect refusal for {message_id}")
             require(client.request("draft.list")["drafts"] == prior_drafts, "failed original forward created partial draft")
         require(client.request("mail.forward", messageId="raw-original", original="true", ok=False)["code"] == "InvalidRequest", "wrong original field type was accepted")

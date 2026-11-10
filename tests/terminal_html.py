@@ -455,7 +455,13 @@ def resource_case(binary, directory, cycles, idle):
             terminal.html_stage = "end-visible-tail"
             terminal.send(b"l")
             terminal.send(b"G")
+            # Beyond the viewer limit the formatted view ends with a notice
+            # rather than being discarded; the complete text is one key away.
+            terminal.until(lambda: reader_contains(terminal.screen, "Formatted view truncated at viewer limit"))
+            terminal.send(b"p")
+            terminal.send(b"G")
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large tail marker."))
+            terminal.send(b"p")
             terminal.html_stage = "home-visible-head"
             terminal.send(b"\x1b[H")
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large HTML"))
