@@ -136,7 +136,7 @@ def start(binary, directory, source, *, no_color=False, columns=160, rows=40):
 
 
 def opened(terminal):
-    return terminal.screen.locate("[Apply]") is not None and terminal.screen.locate("[Cancel]") is not None
+    return terminal.screen.locate("[Apply") is not None and terminal.screen.locate("[Cancel]") is not None
 
 
 def header_color(terminal, expected):
@@ -187,9 +187,9 @@ def picker_case(binary, directory, capture_dir):
         terminal.send(b"k")
         terminal.until(lambda: selected(terminal, "Omagma") and header_color(terminal, ORANGE))
         capture(terminal, capture_dir, "omagma-preview")
-        key_focus(terminal, TAB, "[Apply]")
         key_focus(terminal, TAB, "[Cancel]")
-        key_focus(terminal, BACKTAB, "[Apply]")
+        key_focus(terminal, TAB, "[Apply Ctrl+S]")
+        key_focus(terminal, BACKTAB, "[Cancel]")
         terminal.send(b"\x1b")
         terminal.until(lambda: not opened(terminal) and header_color(terminal, desktop))
         require(signature(prefs) == before, "Escape wrote preview preferences")
@@ -197,14 +197,14 @@ def picker_case(binary, directory, capture_dir):
         terminal.until(lambda: opened(terminal))
         terminal.send(b"k")
         terminal.until(lambda: header_color(terminal, ORANGE))
-        key_focus(terminal, BACKTAB, "[Cancel]")
+        key_focus(terminal, TAB, "[Cancel]")
         terminal.send(ENTER)
         terminal.until(lambda: not opened(terminal) and header_color(terminal, desktop))
         require(signature(prefs) == before, "Cancel wrote preview preferences")
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal))
         terminal.send(b"k")
-        key_focus(terminal, TAB, "[Apply]")
+        key_focus(terminal, BACKTAB, "[Apply Ctrl+S]")
         terminal.send(ENTER)
         terminal.until(lambda: not opened(terminal) and prefs.exists()
                        and json.loads(prefs.read_text()).get("theme") == "omagma")
@@ -251,14 +251,15 @@ def follow_case(binary, directory, capture_dir):
         terminal.until(lambda: opened(terminal))
         require(terminal.screen.locate("[Apply]") is not None and terminal.screen.locate("[Cancel]") is not None,
                 "minimum-width theme action clipped")
-        key_focus(terminal, TAB, "[Apply]")
         key_focus(terminal, TAB, "[Cancel]")
+        key_focus(terminal, TAB, "[Apply]")
+        key_focus(terminal, BACKTAB, "[Cancel]")
         terminal.send(ENTER)
         terminal.until(lambda: not opened(terminal))
         terminal.resize(48, 20)
         clears = terminal.screen.full_physical_clears
         terminal.until(lambda: terminal.screen.full_physical_clears > clears and "Mail ·" in terminal.text()
-                       and "j/k Mail · Enter Read · c New · ? Help · q Quit" in terminal.screen.lines()[-2])
+                       and "j/k Mail · f Forward · ? Help · q Quit" in terminal.screen.lines()[-2])
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal))
         omagma = terminal.screen.locate("Omagma")
@@ -283,7 +284,7 @@ def follow_case(binary, directory, capture_dir):
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal))
         terminal.send(b"k")
-        apply = terminal.screen.locate("[Apply]")
+        apply = terminal.screen.locate("[Apply")
         click(terminal, apply["column"], apply["row"])
         terminal.until(lambda: not opened(terminal) and prefs.exists()
                        and json.loads(prefs.read_text()).get("theme") == "omagma")
@@ -296,7 +297,7 @@ def follow_case(binary, directory, capture_dir):
         click(terminal, follow["column"], follow["row"])
         terminal.until(lambda: selected(terminal, "Follow Omarchy") and header_color(terminal, palette(UI_FIXTURES / "theme-colors.toml", "accent")))
         capture(terminal, capture_dir, "follow-preview")
-        apply = terminal.screen.locate("[Apply]")
+        apply = terminal.screen.locate("[Apply")
         click(terminal, apply["column"], apply["row"])
         terminal.until(lambda: not opened(terminal) and json.loads(prefs.read_text()).get("theme") == "follow_omarchy")
         terminal.finish()
@@ -316,9 +317,9 @@ def no_color_case(binary, directory, capture_dir):
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal) and "NO_COLOR" in terminal.text())
         terminal.send(b"k")
-        key_focus(terminal, TAB, "[Apply]", no_color=True)
         key_focus(terminal, TAB, "[Cancel]", no_color=True)
-        key_focus(terminal, BACKTAB, "[Apply]", no_color=True)
+        key_focus(terminal, TAB, "[Apply Ctrl+S]", no_color=True)
+        key_focus(terminal, BACKTAB, "[Cancel]", no_color=True)
         capture(terminal, capture_dir, "theme-no-color")
         require(re.search(rb"\x1b\[[0-9;:]*[34]8[;:]2[;:]", bytes(terminal.output)) is None,
                 "NO_COLOR theme preview emitted truecolor SGR")
@@ -344,7 +345,7 @@ def failed_save_case(binary, directory):
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal))
         terminal.send(b"k")
-        key_focus(terminal, TAB, "[Apply]")
+        key_focus(terminal, BACKTAB, "[Apply Ctrl+S]")
         terminal.send(ENTER)
         terminal.until(lambda: opened(terminal) and "Not saved" in terminal.text())
         require(signature(prefs) == before and stat.S_IMODE(prefs.stat().st_mode) == 0o644,

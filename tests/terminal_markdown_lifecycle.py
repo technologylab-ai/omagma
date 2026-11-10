@@ -233,7 +233,7 @@ def measure_workload(args, directory, report):
         terminal = terminal_type(args.binary, home, extra=("--metrics-file", str(meter)), history_limit=65536,
                                  columns=160, rows=40, screen_type=MouseScreen, environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
         try:
-            terminal.until(lambda: "Ready" in terminal.text())
+            terminal.until(lambda: terminal.ready())
             open_draft(terminal)
             with sampler_type(terminal.process.pid) as sampler:
                 for index in range(args.warmup):

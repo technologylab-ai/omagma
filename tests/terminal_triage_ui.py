@@ -26,7 +26,7 @@ def check(binary, directory):
                              environment={"COLORTERM": "truecolor", "NO_COLOR": None})
     try:
         terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002)
-        terminal.until(lambda: 'Fixture account <personal@example.com>' in terminal.text() and 'Ready' in terminal.text())
+        terminal.until(lambda: 'Fixture account <personal@example.com>' in terminal.text() and terminal.ready())
         terminal.until(lambda: terminal.screen.locate('Projects') is not None)
         with Client(binary, directory) as client:
             before = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
@@ -47,11 +47,11 @@ def check(binary, directory):
         wait_label_picker(terminal, '[ ]  Projects')
         filter_label_picker(terminal, 'Projects', '[ ]')
         terminal.send(b'\r')
-        terminal.until(lambda: '[Apply 1]' in terminal.text())
+        terminal.until(lambda: '[Apply 1 Ctrl+S]' in terminal.text())
         with Client(binary, directory) as client:
             staged = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
             require(staged == restored, 'staging a label changed mail before Apply')
-        reach(terminal, '[Apply 1]')
+        reach(terminal, '[Apply 1 Ctrl+S]')
         activate(terminal)
         terminal.until(lambda: 'Labels updated on' in terminal.text() and 'Labels · staged changes' not in terminal.text())
         click(terminal, *sidebar_point(terminal, 'Projects'))

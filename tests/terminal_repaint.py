@@ -93,7 +93,11 @@ def no_ghosts(terminal):
     require(bool(panels), "repaint gate never observed actual framed panes")
     for left, right, top, bottom in panels:
         for y in range(top, bottom):
-            require(not any(char in BARS for char in terminal.screen.cells[y][left:right]),
+            row = list(terminal.screen.cells[y][left:right])
+            first = next((index for index, char in enumerate(row) if char != " "), None)
+            if first is not None and first <= 1 and row[first] == "▏":
+                row[first] = " "
+            require(not any(char in BARS for char in row),
                     "plain no-bars pane contains a stale border/caret glyph")
     logical_columns = min(terminal.columns, 240)
     require(all(not char.strip() for row in terminal.screen.cells for char in row[logical_columns:]),

@@ -22,7 +22,7 @@ The libvaxis package hash is `vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mec
 
 At 120 columns and above, navigation can remain alongside mail/reader panes. Horizontal splitting requires at least 80 available columns; below layout uses stacked panes when there are at least 48 columns and 16 content rows. Otherwise the focused pane uses the available space, and narrow navigation takes over when focused. `v` chooses right/below, `:layout` also changes the layout, `:split` sets bounded ratios, and `z` expands the reader. In the reader, `V` opens a text cursor in MOVE. After positioning it, `V` or Space marks the start; further `V` presses switch CHAR/LINE and Space returns to MOVE. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
 
-The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. Derived roles add an inactive-selection tint (bulk-selected rows), a border tone quieter than muted text for unfocused panes, and a raised surface; a theme without its own `selection` uses an 18% accent tint over the background. The focused pane's selected row carries an accent `▌` bar and the selection background; an unfocused pane's row keeps only a thin `▏` marker. Footers pass through one fitter that keeps essential keys (navigation, Enter, compose, search, archive/Trash, help, back/quit) longest and renders keys bold with muted labels. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
+The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. Derived roles add an inactive-selection tint (bulk-selected rows), a border tone quieter than muted text for unfocused panes, a neutral label-chip background, the `★` flag colour and muted text for selected and tinted rows; a theme without its own `selection` uses an accent tint over the background (18% or more). Derived roles keep contrast floors while the theme's own colours stay as written: text at least 4.5:1 against the surface it sits on (moving toward the foreground), the star at least 3:1 (yellow, else accent, else foreground) and tints at least 1.35:1 against the background (growing the mix). The focused pane's selected row carries an accent `▌` bar and the selection background; an unfocused pane's row keeps only a thin `▏` marker. Footers pass through one fitter that keeps essential keys (navigation, Forward, help, back/quit, then Enter, compose, search, archive/Trash) longest and renders keys bold with muted labels. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
 
 Illustrative layout, not a runtime capture:
 
@@ -43,7 +43,7 @@ Illustrative layout, not a runtime capture:
 │ Contacts · Labels    ││                         ││                             │
 └──────────────────────┘└─────────────────────────┘└─────────────────────────────┘
  j/k Mail  h/l Pane  / Cache  \ Gmail  c Compose  v Layout  ? Help  q Quit
- Ready
+
 ```
 
 Mail windows contain up to 32 rows and are replaced rather than appended. Two content rows per card use one separating row only between cards, so 5/8-row interiors fit 2/3 complete cards. The title reports selected/current-window count and only known newer/older arrows, never a Gmail total. Reaching a boundary scrolls through adjacent cached windows before requesting a missing older provider page. Explicit continuation controls remain available. Refresh preserves the selected ID where possible. The reader first loads the selected message, then Enter opens its chronological thread. It displays decoded full text, From/To/Cc, local time, numbered attachments and invitation cues. Reading does not implicitly mark mail read. Remote images do not load.
@@ -53,7 +53,7 @@ Mail windows contain up to 32 rows and are replaced rather than appended. Two co
 ## Loading, status and view identity
 
 The global frame uses four rows: mode/account header, colored sync state, one
-context-sensitive shortcut line, and action/error status. Compact fitting drops
+context-sensitive shortcut line, and action/error status (blank when idle). Compact fitting drops
 brand/Experimental/layout decoration before account or Mock identity. Synced
 time is a fixed local timestamp rather than a frozen relative age. The Linux
 timezone snapshot is loaded once at startup from `TZ`/`TZDIR` or

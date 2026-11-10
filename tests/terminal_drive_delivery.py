@@ -56,7 +56,7 @@ def scroll_review(terminal, key, reached, limit=60):
 def run(binary, directory):
     terminal = MouseTerminal(binary, directory, columns=160, rows=40, screen_type=MouseScreen)
     try:
-        terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002 and 'Ready' in terminal.text())
+        terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002 and terminal.ready())
         terminal.send(b'c')
         terminal.until(lambda: 'Subject:' in terminal.text() and 'Attachments 0' in terminal.text())
         # Bcc stays selectable with Drive; only the review blocks the send.
@@ -167,7 +167,7 @@ def narrow(binary, directory):
     """Narrow composers use two lines per file and wrap the warning."""
     terminal = MouseTerminal(binary, directory, columns=64, rows=40, screen_type=MouseScreen)
     try:
-        terminal.until(lambda: 'Ready' in terminal.text() and terminal.screen.locate('Drafts') is not None)
+        terminal.until(lambda: terminal.ready() and terminal.screen.locate('Drafts') is not None)
         click(terminal, *point(terminal, 'Drafts'))
         terminal.until(lambda: SUBJECT in terminal.text())
         terminal.send(b'\r')
@@ -193,7 +193,7 @@ def progress(binary, directory, scenario):
     terminal = MouseTerminal(binary, directory, columns=160, rows=40, screen_type=MouseScreen,
                              extra=('--fixture-scenario', scenario))
     try:
-        terminal.until(lambda: 'Ready' in terminal.text())
+        terminal.until(lambda: terminal.ready())
         terminal.send(b'c')
         terminal.until(lambda: 'Subject:' in terminal.text())
         terminal.send(f'ipeer@example.test\t\t\t{SUBJECT} progress\tSynthetic note.\x1b'.encode())

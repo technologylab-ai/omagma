@@ -58,7 +58,9 @@ A fixed flag column before the date shows `★` for starred mail, `⊕` for know
 attachments and `◔` for a local follow-up date, in both densities. Bulk-selected
 rows are tinted and ticked `✓`. In the focused pane the selected row has an
 accent bar `▌` and a clear background; an unfocused pane marks its selected row
-with a thin `▏` only, without changing read status. Dates always fit: the time
+with a thin `▏` only, without changing read status. The strong cue stays while
+the `:` prompt, `/` search, label checklist or Trash review act on that row.
+Dates always fit: the time
 for today, the weekday within the past week, `Nov 7` this year and an ISO date
 for older mail. Sent mail shows `To: recipient` instead of your own name.
 
@@ -179,6 +181,8 @@ The CLI exposes both modes through `omagma mail search --cached` / `--server`, o
 
 Error status lines include a short diagnostic code. `?` opens Help with that
 code and its explanation at the top; Escape/`q` returns to the current view.
+Guidance such as *Select a message first* shows only the sentence; Help still
+names its code. The status row stays blank while nothing needs saying.
 
 Within Help, `/` searches shortcut names, descriptions and section names,
 ignoring case. Matches highlight immediately. Enter keeps the query and
@@ -195,7 +199,10 @@ above the original HTML, retaining its tables, styling and embedded images.
 **Text quote** (`t`) puts a plain-text quotation in the editable body, below an
 `On <date>, <name> <address> wrote:` line (the reader folds both with `Q`). In a
 Markdown draft only characters that would otherwise become markup are escaped,
-so ordinary punctuation in the quote stays readable.
+so ordinary punctuation in the quote stays readable; the quote renders exactly
+as if every Markdown character were escaped. The attribution line, with the
+sender's name, is always escaped in full. A signature goes above that line, or
+above a plain forward's header, never into forwarded text.
 Forward also offers **Attach original (.eml)** (`e`), which attaches the
 complete original message and leaves the body ready for your note.
 Tab/Shift+Tab selects a choice, Enter or a click activates it, and Escape/`q`
@@ -497,7 +504,7 @@ the portion of the custom-label collection that fits its height.
 Space or Enter on a row toggles a planned change; `+`/`-` stages Add/Remove.
 A `*` marks a change, and filtering keeps hidden staged choices. Apply or
 Ctrl+S commits the changes; Cancel writes nothing. Tab/Shift+Tab reaches Filter,
-List, Add, Remove, counted Apply and Cancel, including compact screens.
+List, Add, Remove, Cancel and the counted Apply, including compact screens.
 The account and target count stay visible, and editing is disabled while the
 initial membership snapshot loads. System labels stay with mailbox/read/star
 controls rather than this custom-label checklist.
@@ -523,8 +530,9 @@ Space selects mail, Ctrl+A selects the window, and actions apply to that set or
 the focused message. Escape/`q` clears a selection first; Ctrl+Z (or `:undo`)
 reverses the last completed account action. The status names what happened
 (`Archived 1 · Ctrl+Z Undo`, `Moved 2 to Trash · Ctrl+Z Undo`, `Starred`,
-`Undone: archive (1 restored)`). `U` restores only mail in Trash; elsewhere it
-says `Not in Trash`. Changing mailbox/search context
+`Undone: archive (1 restored)`). `U` restores only mail in Trash: anything
+listed in the Trash mailbox, or elsewhere mail whose labels include Trash;
+otherwise it says `Not in Trash`. Changing mailbox/search context
 clears its previous selection.
 Bulk actions can have partial outcomes; uncertain items are not replayed.
 `:scope message` selects the normal single-message scope. `:scope thread`
@@ -534,7 +542,9 @@ resolution refused. The review states the actual count, and later arrivals or
 selection changes do not retarget it. An explicit Space selection takes
 precedence and applies only to those selected messages.
 `D` opens Trash review, initially focused on Cancel; `y` or Enter on the
-deliberately focused Confirm button submits the change.
+deliberately focused Confirm button submits the change. On short terminals the
+review drops its blank rows first; when it must cover the footer it shows its
+own `Esc/q/n Cancel · y Move to Trash` line.
 
 `:spam` and `:unspam` expose the same mailbox actions in the TUI; `unspam`
 removes Spam and restores Inbox membership. They honor the current explicit
@@ -875,7 +885,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 
 An empty `:` prompt cancels. An unknown command says `Unknown command · Ctrl+P lists actions`, suggesting the nearest known command (`did you mean :archive?`).
 
-One footer style shows keys in bold and their labels muted, separated by ` · `. When the terminal is narrow, decoration such as `T Theme` drops first; navigation, Enter, compose, search, archive/Trash, help and back/quit stay longest.
+One footer style shows keys in bold and their labels muted, separated by ` · `. When the terminal is narrow, decoration such as `T Theme` drops first; navigation, Forward, help and back/quit stay longest, then Enter, compose, search and archive/Trash. The reader footer always keeps its back key.
 Normal compose shows `e` for `$EDITOR`; the original-message preview shows its
 `L`/`B` link and attachment actions when space permits. Help also covers text
 editing (`Ctrl+A/E` for line start/end), list navigation and review controls.
@@ -893,7 +903,8 @@ prefixes and cannot be rebound by Omagma.
 Press `T` on the mailbox screen, or enter `:theme`, to preview **Omagma**,
 the built-in volcano-orange palette used in project screenshots, or **Follow
 Omarchy**, the default. `j`/`k` previews the whole interface; Tab/Shift+Tab
-chooses the list, Apply or Cancel, and Enter activates the focused choice.
+chooses the list, Cancel or Apply, and Enter activates the focused choice;
+Ctrl+S applies from anywhere in the picker.
 Only Apply saves the choice; Escape/Cancel restores the saved theme. Follow
 Omarchy adopts local theme changes automatically. Ctrl+L redraws and reloads
 the chosen theme. Without an available Omarchy palette, it uses Omagma colors

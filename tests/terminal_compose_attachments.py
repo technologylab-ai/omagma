@@ -12,10 +12,10 @@ def run(binary, directory, key):
     terminal = MouseTerminal(binary, directory, columns=160, rows=40, screen_type=MouseScreen)
     try:
         terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002)
-        terminal.until(lambda: 'From: Fixture account <personal@example.com>' in terminal.text() and 'Ready' in terminal.text())
+        terminal.until(lambda: 'Fixture account <personal@example.com>' in terminal.text() and terminal.ready())
         if key != b'c':
             terminal.send(b'j')
-            terminal.until(lambda: 'From: Alex Fixture <alex@example.org>' in terminal.text() and 'Ready' in terminal.text())
+            terminal.until(lambda: 'Alex Fixture <alex@example.org>' in terminal.text() and terminal.ready())
         terminal.send(key)
         # A PTY read can end after the composer pane but before its footer.
         # Await all required current-frame affordances within the same deadline.

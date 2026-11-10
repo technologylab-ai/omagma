@@ -149,9 +149,9 @@ def exercise(binary, root):
             terminal = Terminal(binary, root, columns=160, rows=40, history_limit=1024 * 1024,
                                 extra=("--fixture-root", str(fixtures), "--ui-file", str(preferences)),
                                 environment={"EDITOR": shlex.join([sys.executable, str(editor), str(source)])})
-        wait("initial-mail-list", lambda: "Growing chain source" in terminal.text() and "Ready" in terminal.text())
+        wait("initial-mail-list", lambda: "Growing chain source" in terminal.text() and terminal.ready())
         wait("bounded-reader-refusal", lambda: "Body unavailable" in terminal.text()
-             and "j/k Scroll" in terminal.text().splitlines()[-2], keys=b"\r")
+             and "j/k Scroll" in terminal.screen.lines()[-2], keys=b"\r")
         wait("formatted-reply-choice", lambda: "Keep formatting" in terminal.text(), keys=b"r")
         with stages.step("verify-formatting-choice"):
             require("HTML · 146 embedded resources" in terminal.text()
@@ -195,12 +195,12 @@ def exercise(binary, root):
             require(not draft["attachments"], "reply unexpectedly forwarded the ordinary PDF")
         # Reply returns to its reader context. Traverse reader -> list ->
         # sidebar before selecting local Drafts; a single h only reaches list.
-        wait("open-mailbox-sidebar", lambda: "j/k Navigate" in terminal.text().splitlines()[-2], keys=b"hh")
+        wait("open-mailbox-sidebar", lambda: "j/k Navigate" in terminal.screen.lines()[-2], keys=b"hh")
         with stages.step("select-drafts-folder"):
             terminal.send(b"jjjjj")
             terminal.gap()
         wait("load-drafts-list", lambda: "Drafts" in terminal.text().splitlines()[0]
-             and "Re: Growing chain source" in terminal.text() and "Ready" in terminal.text(), keys=b"\r")
+             and "Re: Growing chain source" in terminal.text() and terminal.ready(), keys=b"\r")
         wait("reopen-saved-composer", lambda: "Compose" in terminal.text().splitlines()[0]
              and "Local draft · no mail sent" in terminal.text().splitlines()[1], keys=b"\r", seconds=30)
         # Review is visible before its asynchronous size receipt arrives.

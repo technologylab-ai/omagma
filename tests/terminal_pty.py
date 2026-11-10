@@ -202,6 +202,13 @@ class Terminal:
     def text(self):
         return self.screen.text()
 
+    def ready(self):
+        """The view is idle, as the former "Ready" status meant: a complete
+        frame (header and sync line drawn, not the pre-size placeholder) whose
+        bottom status row is blank. Foreground work always writes a status."""
+        lines = self.screen.lines()
+        return len(lines) >= 3 and bool(lines[0].strip()) and bool(lines[1].strip()) and not lines[-1].strip()
+
     def resize(self, columns, rows):
         # Resize only this harness's PTY. The foreground child receives SIGWINCH
         # from the kernel; a fresh cell model waits for the resulting redraw.
@@ -601,7 +608,7 @@ def exercise(terminal, action):
                       bodyCursorShape="native block", bodyTextHasVirtualCaret=False)
         return result
     if action == "save-incoming-attachment":
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         # The body renderer shows the decoded MIME alternative, not the
         # synthetic metadata snippet. At this width that snippet is clipped
         # before its message number. Wait on the actual selected body instead.
@@ -609,9 +616,9 @@ def exercise(terminal, action):
             incoming = client.request("mail.read", messageId="shared-msg-003")
         opening = incoming["bodyText"].splitlines()[0]
         gmail_search(terminal, "Synthetic personal message 003")
-        terminal.until(lambda: opening in terminal.text() and "Ready" in terminal.text()
+        terminal.until(lambda: opening in terminal.text() and terminal.ready()
                        and "Gmail \\ Synthetic personal message 003" not in terminal.text())
-        terminal.until(lambda: "Attachment 1:" in terminal.text() and "Ready" in terminal.text())
+        terminal.until(lambda: "Attachment 1:" in terminal.text() and terminal.ready())
         destination = terminal.directory / "received fixture binary.bin"
         command = b":save-attachment 1 " + str(destination).encode() + b"\r"
         terminal.send(command)
@@ -760,7 +767,7 @@ def exercise(terminal, action):
         terminal.send(b"jjjjj")
         terminal.gap()
         terminal.send(b"\r")
-        terminal.until(lambda: "Drafts" in terminal.text().splitlines()[0] and "Ready" in terminal.text())
+        terminal.until(lambda: "Drafts" in terminal.text().splitlines()[0] and terminal.ready())
         terminal.send(b"\r")
         terminal.until(lambda: "Compose" in terminal.text() and "Outcome unknown" in terminal.text())
         terminal.send(b"\x13")
@@ -774,7 +781,7 @@ def exercise(terminal, action):
                       protectedDraftUnchanged=True, composerCommandKeepsContext=True)
         return result
     if action == "contact-create":
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         terminal.send(b"a")
         terminal.until(lambda: "Contacts" in terminal.text() and "Alex Personal Fixture" in terminal.text())
         terminal.send(b"n")
@@ -793,9 +800,9 @@ def exercise(terminal, action):
         result["accountScopedContactPersisted"] = True
         return result
     if action == "rsvp-cancel":
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         gmail_search(terminal, "subject:Synthetic personal thread 002")
-        terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
+        terminal.until(lambda: "I · Respond" in terminal.text() and terminal.ready())
         terminal.send(b"I")
         terminal.until(lambda: "Review RSVP" in terminal.text() and "[v Details]" in terminal.text())
         require("UID:" not in terminal.text(), "friendly RSVP summary exposed protocol-only identifiers")
@@ -810,9 +817,9 @@ def exercise(terminal, action):
         result["rsvpSubmitted"] = False
         return result
     if action == "long-rsvp-review":
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         gmail_search(terminal, "subject:Synthetic personal thread 002")
-        terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
+        terminal.until(lambda: "I · Respond" in terminal.text() and terminal.ready())
         terminal.send(b"I")
 
         def invitation_card_lines():
@@ -868,13 +875,13 @@ def exercise(terminal, action):
                       wrappedUidTailVisible=True, rsvpSubmitted=False)
         return result
     if action == "account-page-navigation":
-        terminal.until(lambda: "Ready" in terminal.text() and "Synthetic personal thread 031" in terminal.text())
+        terminal.until(lambda: terminal.ready() and "Synthetic personal thread 031" in terminal.text())
         terminal.send(b"]")
-        terminal.until(lambda: "Ready" in terminal.text() and "Synthetic personal thread 021" in terminal.text())
+        terminal.until(lambda: terminal.ready() and "Synthetic personal thread 021" in terminal.text())
         terminal.send(b"[")
-        terminal.until(lambda: "Ready" in terminal.text() and "Synthetic personal thread 031" in terminal.text())
+        terminal.until(lambda: terminal.ready() and "Synthetic personal thread 031" in terminal.text())
         terminal.send(b"2")
-        terminal.until(lambda: "Ready" in terminal.text() and "Synthetic work thread 031" in terminal.text())
+        terminal.until(lambda: terminal.ready() and "Synthetic work thread 031" in terminal.text())
         require("Synthetic personal thread" not in terminal.text(), "account switch retained previous account mail")
         terminal.send(b"?")
         scroll_help_to(terminal, "Click · wheel")
@@ -888,7 +895,7 @@ def exercise(terminal, action):
         return result
     if action == "mail-controls":
         gmail_search(terminal, "subject:Synthetic personal thread 002")
-        terminal.until(lambda: "Synthetic personal thread 002" in terminal.text() and "Ready" in terminal.text()
+        terminal.until(lambda: "Synthetic personal thread 002" in terminal.text() and terminal.ready()
                        and "Gmail \\ subject:Synthetic personal thread 002" not in terminal.text())
         terminal.send(b"\r")
         terminal.until(lambda: "3/3 mails" in terminal.text())

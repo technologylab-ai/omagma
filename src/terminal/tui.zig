@@ -371,10 +371,14 @@ fn hintKeyEnd(segment: []const u8) usize {
 fn hintPriority(segment: []const u8) u8 {
     const key = segment[0..hintKeyEnd(segment)];
     if (key.len == 0) return 10;
+    // Forward stays with the essentials in every mail footer. A narrow
+    // mailbox list gives up "Enter Read" (opening mail is the obvious Enter)
+    // before Forward, Help or the way out; dialogs keep Enter.
+    if (same(segment, "Enter Read")) return 9;
     const ranks = [_]struct { rank: u8, keys: []const []const u8 }{
-        .{ .rank = 10, .keys = &.{ "j/k", "?", "q", "Esc", "Esc/q", "Enter", "y", "Ctrl+S", "i" } },
+        .{ .rank = 10, .keys = &.{ "j/k", "?", "q", "Esc", "Esc/q", "n/Esc/q", "Enter", "y", "Ctrl+S", "i", "f" } },
         .{ .rank = 9, .keys = &.{ "x", "D", "c", "/", "^V" } },
-        .{ .rank = 8, .keys = &.{ "r/R", "r", "f", "Tab", "J/K", "h/l", "z/q", "n/N", "+", "-", "l/Esc/q", "n/Esc/q", "Tab/Shift+Tab" } },
+        .{ .rank = 8, .keys = &.{ "r/R", "r", "Tab", "J/K", "h/l", "z/q", "n/N", "+", "-", "l/Esc/q", "Tab/Shift+Tab" } },
         .{ .rank = 7, .keys = &.{ "\\", "Ctrl+Z", "Space" } },
         .{ .rank = 2, .keys = &.{ "T", "Ctrl+T", "Ctrl+G", "1–3", "Ctrl+D/U", "Ctrl+A/E", "v", "o", "e", "V", "L", "B", "H", "Q", "S", "I", "b", "Ctrl+R", "Ctrl+N/P" } },
     };
@@ -481,6 +485,8 @@ fn nearestCommand(name: []const u8) ?[]const u8 {
     }
     return best;
 }
+/// Bytes a `:` command may hold after trimming.
+const command_workspace = 4096;
 /// Gmail-style jumps after g: i Inbox, s Sent, d Drafts, a All Mail, t Trash.
 fn goFolder(key: Key) ?usize {
     for ([_]u21{ 'i', 's', 'd', 'a', 't' }, [_]usize{ 0, 1, 2, 6, 4 }) |letter, folder| if (key.matches(letter, .{})) return folder;
@@ -520,6 +526,13 @@ fn batchUndoLabel(request: Value) []const u8 {
     if (unread == .bool) return if (unread.bool) "mark unread" else "mark read";
     if (get(request, "addLabels") != .null or get(request, "removeLabels") != .null) return "labels";
     return "mail action";
+}
+
+/// Guidance about the current selection or view rather than a failure: the
+/// status line shows only the sentence, while Help still names the code.
+fn guidanceCode(code: []const u8) bool {
+    for ([_][]const u8{ "MessageRequired", "CacheNavigationOnly", "ReaderMessageChanging", "OperationPending" }) |guidance| if (same(code, guidance)) return true;
+    return false;
 }
 
 fn validDiagnosticCode(code: []const u8) bool {
@@ -2894,10 +2907,11 @@ const App = struct {
         }
         const count = self.visibleLabelCount();
         if (tabDirection(key)) |backwards| {
-            var enabled: u8 = 0b100011;
+            // Filter, list, Add, Remove, Cancel, then the primary Apply.
+            var enabled: u8 = 0b010011;
             if (self.label_memberships.ready and self.canManageLabels()) {
                 if (count > 0) enabled |= 0b001100;
-                if (self.label_memberships.changed() > 0) enabled |= 0b010000;
+                if (self.label_memberships.changed() > 0) enabled |= 0b100000;
             }
             self.dialog_focus.move(backwards, 6, enabled);
             self.label_filtering = self.dialog_focus.index == 0;
@@ -2941,8 +2955,8 @@ const App = struct {
                 },
                 2 => try self.chooseLabel(false),
                 3 => try self.chooseLabel(true),
-                4 => try self.applyLabels(),
-                5 => self.cancelLabelPicker(),
+                4 => self.cancelLabelPicker(),
+                5 => try self.applyLabels(),
                 else => {},
             }
         } else if (key.matches(' ', .{})) {
@@ -2966,7 +2980,7 @@ const App = struct {
         const editable = self.label_memberships.ready and self.canManageLabels() and !self.labelManagerBusy();
         const can_stage = editable and count > 0;
         const can_apply = editable and changes > 0;
-        if (((self.dialog_focus.index == 2 or self.dialog_focus.index == 3) and !can_stage) or (self.dialog_focus.index == 4 and !can_apply)) self.dialog_focus.index = 5;
+        if (((self.dialog_focus.index == 2 or self.dialog_focus.index == 3) and !can_stage) or (self.dialog_focus.index == 5 and !can_apply)) self.dialog_focus.index = 4;
         const target_count = self.pinned_targets.count;
         const conversation = self.action_scope_thread and self.mail_selection.count == 0;
         const scope = if (conversation) @as([]const u8, "Conversation · complete") else "Messages";
@@ -3010,9 +3024,10 @@ const App = struct {
             x = try self.actionButton(inner, button_start, x, if (compact) "[- Rm]" else "[- Remove]", self.dialog_focus.index == 3, can_stage, .label_remove, 0);
             if (compact) x = 0;
             const apply_row = button_start + @as(usize, if (compact) 1 else 0);
-            const apply_label = try std.fmt.allocPrint(self.frame.allocator(), "[Apply {d}]", .{changes});
-            x = try self.actionButton(inner, apply_row, x, apply_label, self.dialog_focus.index == 4, can_apply, .dialog_action, 20);
-            _ = try self.actionButton(inner, apply_row, x, "[Cancel]", self.dialog_focus.index == 5, true, .label_back, 0);
+            // Cancel first, the counted primary Apply last with its key.
+            x = try self.actionButton(inner, apply_row, x, "[Cancel]", self.dialog_focus.index == 4, true, .label_back, 0);
+            const apply_label = try std.fmt.allocPrint(self.frame.allocator(), "[Apply {d}{s}]", .{ changes, if (compact) @as([]const u8, "") else " Ctrl+S" });
+            _ = try self.actionButton(inner, apply_row, x, apply_label, self.dialog_focus.index == 5, can_apply, .dialog_action, 20);
             const hint = if (!self.label_memberships.ready) @as([]const u8, "Reading current labels…") else if (!self.canManageLabels()) "Read-only · Cancel keeps labels" else if (compact) "Space Toggle · Tab · Esc" else "Space Toggle · +/- Stage · Ctrl+S Apply · Esc Cancel";
             try self.line(inner, inner.height - 1, try self.fitLine(inner, hint, inner.width), .muted);
         }
@@ -3457,7 +3472,7 @@ const App = struct {
             return true;
         }
         if (key.matches('U', .{}) or key.matches('u', .{ .shift = true })) {
-            if (self.folder != 5 and !self.restorableTarget()) {
+            if (self.folder != 5 and !self.trashMailbox() and !self.restorableTarget()) {
                 self.say(false, "Not in Trash · U restores mail from Trash", .{});
                 return true;
             }
@@ -3481,6 +3496,11 @@ const App = struct {
 
     /// Restore applies to Trash. Selected IDs outside the loaded window are
     /// unknown here, so the backend decides for them.
+    /// Rows listed by the Trash mailbox itself are in Trash, even when their
+    /// cached label set is incomplete; search results may come from anywhere.
+    fn trashMailbox(self: *const App) bool {
+        return self.folder == 4 and self.custom_label.value().len == 0 and self.query.value().len == 0 and !self.drafts_list and !self.follow_ups_list;
+    }
     fn restorableTarget(self: *App) bool {
         if (self.mail_selection.count == 0) return if (self.focusedMessage()) |message| messageHasLabel(message, "TRASH") else false;
         for (self.mail_selection.ids[0..self.mail_selection.count]) |*identifier| {
@@ -3830,7 +3850,8 @@ const App = struct {
         writer.print(format, args) catch {
             overflow = true;
         };
-        const value_in = if (writer.buffered().len != 0) writer.buffered() else "Status unavailable";
+        // Only the idle status (an empty format) is deliberately blank.
+        const value_in = if (writer.buffered().len != 0 or format.len == 0) writer.buffered() else "Status unavailable";
         if (self.action_notice and !warning) return;
         if (self.status_kind == .unknown and (self.compose.unknown_outcome or self.invitation_unknown or self.label_unknown[self.account_index]) and !warning) return;
         if (warning) self.action_notice = false;
@@ -3845,6 +3866,10 @@ const App = struct {
         self.status_owner = self.statusContext();
         self.status_error_len = 0;
     }
+    /// Idle leaves the status row blank; it still replaces stale notices.
+    fn sayIdle(self: *App) void {
+        self.say(false, "", .{});
+    }
     fn statusContext(self: *const App) StatusOwner {
         return .{ .mode = switch (self.mode) {
             .help, .command, .search => self.previous_mode,
@@ -3855,7 +3880,7 @@ const App = struct {
     fn clearObsoleteStatus(self: *App) void {
         if (self.status_kind == .action or self.status_kind == .unknown or self.action_notice) return;
         const current = self.statusContext();
-        if (!std.meta.eql(current, self.status_owner)) self.say(false, "Ready", .{});
+        if (!std.meta.eql(current, self.status_owner)) self.sayIdle();
     }
     fn keepBackgroundDiagnostic(self: *const App, kind: JobKind) bool {
         // Incidental cache/label/identity readiness must not erase the current
@@ -3876,7 +3901,7 @@ const App = struct {
             self.calendar.error_code.set(code[0..@min(code.len, 128)]) catch {};
             self.calendar.notice.set("Calendar operation failed · retained data kept") catch {};
         }
-        if (validDiagnosticCode(code)) self.say(true, "{s} · {s}", .{ humanError(code), code }) else self.say(true, "{s}", .{humanError(code)});
+        if (validDiagnosticCode(code) and !guidanceCode(code)) self.say(true, "{s} · {s}", .{ humanError(code), code }) else self.say(true, "{s}", .{humanError(code)});
         self.diagnostic(code);
         if (same(code, "UnknownOutcome")) self.status_kind = .unknown;
     }
@@ -3911,7 +3936,7 @@ const App = struct {
     fn sayEditorResult(self: *App, exit_code: u8) void {
         if (self.editorNoticeProtected()) return;
         // The local editor result is an action outcome, not a view hint.
-        // Unrelated label/recipient refreshes must not replace it with Ready.
+        // Unrelated label/recipient refreshes must not replace it with idle.
         self.action_notice = false;
         if (exit_code == 0) self.sayAction(false, "Editor returned · draft retained · Ctrl+S Review send", .{}) else self.sayAction(true, "Editor exited {d} · changed text retained · Ctrl+S Review send", .{exit_code});
     }
@@ -3996,8 +4021,10 @@ const App = struct {
         } else if (key.matches('l', .{ .ctrl = true })) {
             self.loadTheme(false);
             self.vx.queueRefresh();
+        } else if (key.matches('s', .{ .ctrl = true })) {
+            self.applyThemePicker();
         } else if (key.matches(Key.enter, .{})) {
-            if (self.dialog_focus.index == 2) self.cancelThemePicker() else self.applyThemePicker();
+            if (self.dialog_focus.index == 1) self.cancelThemePicker() else self.applyThemePicker();
         } else if (self.dialog_focus.index == 0) {
             if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.previewTheme(.follow_omarchy) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.previewTheme(.omagma);
         }
@@ -5845,7 +5872,7 @@ const App = struct {
         if (retain_reader and truth(get(result, "cached")) and self.readerNeedsCacheRefresh()) self.pending_cached_reader_refresh = true;
         if (kind != .drafts and kind != .follow_up_list) self.syncMetadata(self.account_index, result);
         // An empty list explains itself in the list pane; the status stays quiet.
-        if (!self.compose_active and !self.background_merge) self.say(false, "Ready", .{});
+        if (!self.compose_active and !self.background_merge) self.sayIdle();
     }
     fn replaceReader(self: *App, full_thread: bool, response: []const u8, cached_view: bool) !void {
         _ = try self.replaceReaderImpl(full_thread, response, cached_view, false);
@@ -5933,7 +5960,7 @@ const App = struct {
             self.restore_reader_thread = false;
             self.search_restore_pending = false;
         }
-        if (!self.compose_active) self.say(false, "Ready", .{});
+        if (!self.compose_active) self.sayIdle();
         return true;
     }
     fn readerNeedsCacheRefresh(self: *App) bool {
@@ -6099,7 +6126,7 @@ const App = struct {
             }
         }
         if (self.options.account != null and !found) return error.UnknownAccount;
-        self.say(false, "Ready", .{});
+        self.sayIdle();
     }
     fn start(self: *App, kind: JobKind, request_value: anytype) !void {
         return self.startTarget(kind, request_value, null);
@@ -6970,7 +6997,9 @@ const App = struct {
             .updates_load, .updates_check, .meeting_calendars, .meeting_agenda, .meeting_open => return error.InvalidUpdateResponse,
             .labels_list => {
                 try self.replaceLabels(response);
-                if (!self.keepBackgroundDiagnostic(.labels_list)) self.say(false, "{s}", .{if (self.label_picker) "Choose label · Enter Add · - Remove" else "Ready"});
+                if (!self.keepBackgroundDiagnostic(.labels_list)) {
+                    if (self.label_picker) self.say(false, "Choose label · Enter Add · - Remove", .{}) else self.sayIdle();
+                }
             },
             .label_state => {
                 const result = try self.data(self.job_arena.allocator(), response);
@@ -11862,7 +11891,7 @@ const App = struct {
                         self.cancelLabelPicker();
                     },
                     .dialog_action => if (hit.index == 20) {
-                        self.dialog_focus.index = 4;
+                        self.dialog_focus.index = 5;
                         try self.applyLabels();
                     },
                     else => {},
@@ -12728,7 +12757,7 @@ const App = struct {
                 } else if (self.mode == .command) {
                     // Command names ignore case (arguments keep theirs); an
                     // empty prompt cancels silently.
-                    var command_buffer: [4096]u8 = undefined;
+                    var command_buffer: [command_workspace]u8 = undefined;
                     // A paste may exceed the command workspace; refuse it
                     // whole rather than run a truncated command.
                     const entered = std.mem.trim(u8, self.input.value(), " \t");
@@ -12927,7 +12956,7 @@ const App = struct {
                 .text, .subject, .selected => self.palette.foreground,
                 .muted => self.palette.muted,
                 .border => self.palette.border,
-                .star => self.palette.yellow,
+                .star => self.palette.star,
                 .accent => self.palette.accent,
                 .warning => self.palette.red,
                 .sender, .fetching => self.palette.cyan,
@@ -13144,11 +13173,20 @@ const App = struct {
         if (mark == .focused) {
             if (self.mono) result.reverse = true else result.bg = .{ .rgb = self.palette.selection };
         } else if (bulk and !self.mono) result.bg = .{ .rgb = self.palette.selection_inactive };
+        // Muted text keeps its contrast on the selection and bulk tints.
+        if (!self.mono and tone == .muted and (mark == .focused or bulk)) result.fg = .{ .rgb = self.palette.selected_muted };
         return result;
     }
     fn mailRowMark(self: *const App, index: usize) RowMark {
         if (index != self.selected) return .none;
-        return if (self.focus == .list and !self.expanded and self.mode == .browse) .focused else .inactive;
+        // Prompts and dialogs opened from the list act on its selection, so
+        // that row keeps the strong cue while they are open.
+        const targets_list = switch (self.mode) {
+            .browse, .trash_confirm, .labels => true,
+            .command, .search => self.previous_mode == .browse,
+            else => false,
+        };
+        return if (self.focus == .list and !self.expanded and targets_list) .focused else .inactive;
     }
     /// Sent mail names its recipients; the account's own name is redundant.
     fn sentRow(self: *const App, message: Value) bool {
@@ -13173,8 +13211,15 @@ const App = struct {
         const raw_subject = text(get(message, "subject"));
         const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
         if (subject.len > 0) return subject;
-        // A summary has recipient counts, not addresses; still say who it is for.
+        // A summary has recipient counts, not addresses; still say who it is
+        // for. Rows that carry recipients (browser session previews) name
+        // the first one; native draft.list summaries have counts only.
         if (self.drafts_list) {
+            const listed = items(get(message, "to"));
+            if (listed.len > 0) {
+                const name = if (text(get(listed[0], "name")).len > 0) text(get(listed[0], "name")) else text(get(listed[0], "address"));
+                if (name.len > 0) return if (listed.len > 1) std.fmt.allocPrint(self.frame.allocator(), "(no subject · to {s} +{d})", .{ name, listed.len - 1 }) else std.fmt.allocPrint(self.frame.allocator(), "(no subject · to {s})", .{name});
+            }
             const counts = get(message, "summaryCounts");
             const total = integer(get(counts, "to")) + integer(get(counts, "cc")) + integer(get(counts, "bcc"));
             if (total > 0) return std.fmt.allocPrint(self.frame.allocator(), "(no subject · {d} {s})", .{ total, plural(@intCast(total), "recipient", "recipients") });
@@ -14540,7 +14585,7 @@ const App = struct {
             if (colored.bg == .rgb and !std.mem.eql(u8, &colored.bg.rgb, &self.palette.background)) return colored;
             break;
         };
-        return .{ .fg = .{ .rgb = self.palette.foreground }, .bg = .{ .rgb = self.palette.border } };
+        return .{ .fg = .{ .rgb = self.palette.foreground }, .bg = .{ .rgb = self.palette.chip } };
     }
     const ReaderChip = struct { label: []const u8, style: vaxis.Style };
     /// Unread/star state only when set (never a bare "Read"), then labels as
@@ -15362,7 +15407,7 @@ const App = struct {
                 .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Ctrl+G Gmail · Enter Search cached subset · Esc Back" else " Ctrl+G Cache · Enter Search Gmail · Esc Back",
                 .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Back",
                 .theme => " j/k Choice · Tab Controls · Enter Activate · Esc/q Back",
-                .trash_confirm => " Tab Controls · Enter Activate · y Move to Trash · n/Esc/q Cancel",
+                .trash_confirm => " Tab Controls · y Move to Trash · n/Esc/q Cancel · Enter Activate",
                 .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and self.focus == .list and !self.expanded) " j/k Mail · Space Select · m Labels · s Star · u Unread · x Archive · D Trash · Ctrl+Z Undo · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and (self.focus == .reader or self.expanded)) " j/k Scroll · r/R Reply · f Forward · m Labels · s Star · u Unread · q List · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c New · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c New · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c New · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
                 else => " Esc Back",
             };
@@ -15385,9 +15430,9 @@ const App = struct {
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
             .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else if (self.canPasteImage()) " INSERT · ^V image · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help" else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
-            .theme => " j/k Preview · Tab Controls · Enter Activate · Esc/q Cancel",
+            .theme => " j/k Preview · Tab Controls · Enter Activate · Ctrl+S Apply · Esc/q Cancel",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Back",
-            .trash_confirm => " Tab Controls · Enter Activate · y Move to Trash · n/Esc/q Cancel",
+            .trash_confirm => " Tab Controls · y Move to Trash · n/Esc/q Cancel · Enter Activate",
             .invitation => if (self.invitation_review.defects != 0 or self.invitation_calendar_blocked) self.invitationHint() else if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
             .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate · Enter Choose · l/Esc/q Mail · 1–3 Accounts · a Contacts · T Theme · ? Help" else if (self.cacheSearch()) " Cache subset · j/k Mail · r Reply · f Forward · c New · m Labels · / Search · \\ Gmail · q Clear search · T Theme · ? Help" else if (self.query.value().len > 0) " Gmail search · j/k Mail · r Reply · f Forward · c New · m Labels · / Search · \\ Gmail · q Clear search · T Theme · ? Help" else " j/k Mail · Enter Read · c New · / Search · x Archive · D Trash · f Forward · r/R Reply · m Labels · s Star · u Unread · n/N Next unread · a Contacts · \\ Gmail · T Theme · ? Help · q Quit",
             else => " Esc Back",
@@ -15432,11 +15477,11 @@ const App = struct {
         count += 1;
         labels[count] = "J/K Mail";
         count += 1;
-        labels[count] = if (self.expanded) "z/q Shrink" else "q Back";
-        count += 1;
+        // The way back and Help stay visible however narrow the footer is.
+        const back: []const u8 = if (self.expanded) "z/q Shrink" else "q Back";
         var length: usize = 0;
         var columns: usize = 0;
-        const reserve: usize = 9; // Separator and always-visible Help.
+        const reserve: usize = back.len + 3 + 9; // Back, separator and Help.
         for (labels[0..count]) |label| {
             const extra = label.len + @as(usize, if (length == 0) 0 else 3);
             if (columns + extra + reserve > width) break;
@@ -15448,9 +15493,11 @@ const App = struct {
             length += label.len;
             columns += extra;
         }
-        const ending = if (length > 0) " · ? Help" else "? Help";
-        @memcpy(self.reader_hint_buffer[length..][0..ending.len], ending);
-        return self.reader_hint_buffer[0 .. length + ending.len];
+        for ([_][]const u8{ if (length > 0) " · " else "", back, " · ? Help" }) |part| {
+            @memcpy(self.reader_hint_buffer[length..][0..part.len], part);
+            length += part.len;
+        }
+        return self.reader_hint_buffer[0..length];
     }
     /// Every footer passes one fitter: segments keep their order, the least
     /// important ones drop first, and the result uses one separator style.
@@ -15556,8 +15603,9 @@ const App = struct {
             _ = description.printSegment(.{ .text = try self.fitLine(description, detail, description.width), .style = self.listStyle(.muted, focused) }, .{ .wrap = .none });
         }
         const row: usize = inner.height -| 2;
-        const x = try self.actionButton(inner, row, 2, "[Apply]", self.dialog_focus.index == 1, true, .theme_action, 1);
-        _ = try self.actionButton(inner, row, x, "[Cancel]", self.dialog_focus.index == 2, true, .theme_action, 2);
+        // Cancel first, the primary action last with its key.
+        const x = try self.actionButton(inner, row, 2, "[Cancel]", self.dialog_focus.index == 1, true, .theme_action, 1);
+        _ = try self.actionButton(inner, row, x, if (inner.width >= 28) "[Apply Ctrl+S]" else "[Apply]", self.dialog_focus.index == 2, true, .theme_action, 2);
         // Keys live in the footer; the dialog keeps only an explicit failure
         // or the NO_COLOR explanation.
         if (self.theme_save_failed) try self.line(inner, inner.height - 1, try self.fitLine(inner, "Not saved · Esc Cancel", inner.width), .warning) else if (self.mono) try self.line(inner, inner.height - 1, try self.fitLine(inner, "NO_COLOR · terminal colors", inner.width), .muted);
@@ -15568,15 +15616,40 @@ const App = struct {
         // Near the window width, use all of it: thin strips beside a dialog
         // would show fragments of the pane borders underneath.
         const width = if (win.width <= 84) win.width else 78;
-        const height = @min(win.height, 14);
-        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        var height: u16 = @min(win.height, 14);
+        var y: u16 = (win.height - height) / 2;
+        // Short terminals: drop blank rows (finally the one above the
+        // buttons) so the header and footer keys stay visible. When even the
+        // content cannot fit, cover the footer and show the keys inside.
+        var own_keys = false;
+        var gap: u16 = 1;
+        if (y + height > win.height -| 2) {
+            const clean = try safe(self.frame.allocator(), body, true);
+            const body_rows = text_layout.caret(clean, clean.len, width -| 4, win.screen.width_method, .words).row + 1;
+            const content: u16 = @intCast(@min(body_rows + 3, 14)); // Borders, text and buttons.
+            const band = win.height -| 3;
+            if (band >= content) {
+                height = band;
+                y = 1;
+                if (band == content) gap = 0;
+            } else {
+                own_keys = true;
+                gap = 0;
+                height = @min(win.height, content + 1);
+                y = (win.height - height) / 2;
+            }
+        }
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast(y), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, title, true);
-        _ = try self.flow(inner.child(.{ .height = inner.height -| 2 }), body, 0, 0);
-        if (inner.height > 1) {
+        const controls: u16 = if (own_keys) 2 else 1;
+        _ = try self.flow(inner.child(.{ .height = inner.height -| controls -| gap }), body, 0, 0);
+        if (inner.height > controls) {
             // Cancel first, the primary action last; the footer holds the keys.
-            const x = try self.actionButton(inner, inner.height - 1, 0, "[Cancel]", self.dialog_focus.index == 0, true, .dialog_action, 0);
-            _ = try self.actionButton(inner, inner.height - 1, x, "[Move to Trash y]", self.dialog_focus.index == 1, self.job.future == null, .dialog_action, 1);
+            const row = inner.height - controls;
+            const x = try self.actionButton(inner, row, 0, "[Cancel]", self.dialog_focus.index == 0, true, .dialog_action, 0);
+            _ = try self.actionButton(inner, row, x, "[Move to Trash y]", self.dialog_focus.index == 1, self.job.future == null, .dialog_action, 1);
+            if (own_keys) try self.drawHints(area.child(.{ .x_off = 1, .y_off = 1, .width = width -| 2, .height = height -| 2 }), inner.height - 1, "Esc/q/n Cancel · y Move to Trash");
         }
     }
     fn openHelp(self: *App) !void {
@@ -15770,9 +15843,10 @@ const App = struct {
             try self.line(search_line.child(.{ .x_off = search_line.width -| count_width }), 0, summary, if (count == 0 and self.help_query.value().len > 0) .warning else .accent);
         } else try self.line(search_line, 0, "/ Search help · keys, actions, sections", .muted);
         // The global footer already shows mail help keys; only Calendar's
-        // full-screen help keeps its own footer row.
-        const footer_rows: u16 = if (mail_help) 0 else 1;
-        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows + 1), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 2 -| footer_rows });
+        // full-screen help keeps its own footer row, below a spacer. Mail
+        // help content fills every row below the search line.
+        const footer_rows: u16 = if (mail_help) 0 else 2;
+        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows + 1), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 1 -| footer_rows });
         if (self.help_content_width != content.width or self.help_height != content.height) self.help_reveal_match = self.help_match != null;
         self.help_content_width = content.width;
         self.help_lines = try self.helpContent(content, 0, false);
@@ -21193,9 +21267,8 @@ const App = struct {
             try self.line(win, win.height - 2, prompt, .selected);
         } else try self.drawHints(win, win.height - 2, if (self.updateVisible()) try std.fmt.allocPrint(self.frame.allocator(), "Tab Updates · {s}", .{self.fittedHints(win.width -| 14)}) else self.fittedHints(win.width));
         const status_line = if (self.grace_active and self.grace_pending.load(.acquire) and win.width < 70) (if (self.grace_focus == 0) "Tab Switch · Enter: Undo" else "Tab Switch · Enter: Send now") else self.status[0..self.status_len];
-        // The status row shares the header's one-column indent.
-        // An idle "Ready" recedes to the faint border tone; notices stay muted.
-        try self.line(win.child(.{ .x_off = 1, .width = win.width -| 1 }), win.height - 1, try self.fitLine(win, status_line, win.width -| 1), if (self.warning) .warning else if (same(status_line, "Ready")) .border else .muted);
+        // The status row shares the header's one-column indent; idle is blank.
+        try self.line(win.child(.{ .x_off = 1, .width = win.width -| 1 }), win.height - 1, try self.fitLine(win, status_line, win.width -| 1), if (self.warning) .warning else .muted);
         try self.drawReaderOverlay(win);
         try self.drawFileDialog(win);
         try self.drawLabelPicker(win);
@@ -21464,7 +21537,7 @@ test "reader find: persistent counter and selected ordinal survive same-message 
     try std.testing.expectEqual(@as(usize, 1), app.reader_finder.selected);
     // Completion statuses and refreshed cached values must not own the find
     // counter's lifetime or reset the current occurrence.
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     try app.replaceReader(false, response, true);
     for ([_]u16{ 80, 40, 14 }) |width| {
         win.width = width;
@@ -23770,6 +23843,240 @@ test "local UI: short list dates always fit and reader dates keep their time" {
     try std.testing.expectEqualStrings("", try shortDate(arena.allocator(), &zone, 0, now));
 }
 
+test "local UI: short dates follow the local zone and its DST offset for each date" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const utc = try timezone.Zone.fromPosix("UTC0");
+    const berlin = try timezone.Zone.fromPosix("CET-1CEST,M3.5.0,M10.5.0/3");
+    const new_york = try timezone.Zone.fromPosix("EST5EDT,M3.2.0,M11.1.0");
+    // 2026-11-10 23:30 UTC seen at 2026-11-11 00:30 UTC: yesterday in UTC,
+    // already today in Berlin and still today, earlier, in New York.
+    const late: i64 = 1794353400000;
+    const next_morning: i64 = 1794357000000;
+    try std.testing.expectEqualStrings("Tue", try shortDate(a, &utc, late, next_morning));
+    try std.testing.expectEqualStrings("00:30", try shortDate(a, &berlin, late, next_morning));
+    try std.testing.expectEqualStrings("18:30", try shortDate(a, &new_york, late, next_morning));
+    // Berlin leaves summer time on 2026-10-25 at 01:00 UTC. The same local
+    // 02:30 occurs twice; 23:30 UTC the evening before is already that day.
+    const midnight: i64 = 1792886400000; // 2026-10-25 00:00 UTC
+    const noon = midnight + 12 * 3600 * 1000;
+    try std.testing.expectEqualStrings("02:30", try shortDate(a, &berlin, midnight + 30 * 60 * 1000, noon));
+    try std.testing.expectEqualStrings("02:30", try shortDate(a, &berlin, midnight + 90 * 60 * 1000, noon));
+    try std.testing.expectEqualStrings("01:30", try shortDate(a, &berlin, midnight - 30 * 60 * 1000, noon));
+    try std.testing.expectEqualStrings("Sat", try shortDate(a, &utc, midnight - 30 * 60 * 1000, noon));
+    try std.testing.expectEqualStrings("Sat 23:30", try readerDate(a, &utc, midnight - 30 * 60 * 1000, noon));
+    // New York leaves summer time on 2026-11-01 at 06:00 UTC: 04:30 UTC is
+    // still 00:30 EDT that Sunday (a fixed EST offset would say Saturday).
+    try std.testing.expectEqualStrings("Sun", try shortDate(a, &new_york, midnight + 7 * 86400 * 1000 + 270 * 60 * 1000, midnight + 9 * 86400 * 1000 + 15 * 3600 * 1000));
+    try std.testing.expectEqualStrings("Sun 00:30", try readerDate(a, &new_york, midnight + 7 * 86400 * 1000 + 270 * 60 * 1000, midnight + 9 * 86400 * 1000 + 15 * 3600 * 1000));
+}
+
+test "local UI: list date and flag columns follow the rows scrolled into view" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    const now = Io.Timestamp.now(std.testing.io, .real).toMilliseconds();
+    const recent = now - 60 * 1000;
+    const old = now - 400 * 86400 * 1000;
+    var rows: std.ArrayList(u8) = .empty;
+    defer rows.deinit(a);
+    try rows.append(a, '[');
+    for (0..12) |index| {
+        if (index > 0) try rows.append(a, ',');
+        const wide = index >= 6;
+        const row = try std.fmt.allocPrint(a, "{{\"id\":\"m{d}\",\"subject\":\"Fictional {d}\",\"from\":{{\"name\":\"Alex\"}},\"receivedAt\":{d},\"labels\":[{s}]}}", .{ index, index, if (wide) old else recent, if (wide) "\"STARRED\"" else "" });
+        defer a.free(row);
+        try rows.appendSlice(a, row);
+    }
+    try rows.append(a, ']');
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), rows.items, .{}));
+    var screen = try vaxis.Screen.init(a, .{ .cols = 60, .rows = 8, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 60, .height = 8, .screen = &screen };
+    try app.listDraw(win);
+    try std.testing.expectEqual(@as(u16, 5), app.mail_date_width);
+    try std.testing.expect(!app.mail_flags);
+    // Scrolling to older, starred rows widens the date column and adds the
+    // flag column; each date is complete and its star sits before it.
+    app.selected = 11;
+    screen.clear();
+    try app.listDraw(win);
+    try std.testing.expectEqual(@as(u16, 10), app.mail_date_width);
+    try std.testing.expect(app.mail_flags);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const date = try shortDate(arena.allocator(), &app.zone, old, app.mail_now);
+    try std.testing.expectEqual(@as(usize, 10), date.len);
+    var dated_rows: usize = 0;
+    for (0..screen.height) |row| {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(a);
+        for (50..60) |col| try line.appendSlice(a, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        if (!same(line.items, date)) continue;
+        dated_rows += 1;
+        try std.testing.expectEqualStrings("★", screen.readCell(46, @intCast(row)).?.char.grapheme);
+        try std.testing.expectEqualStrings(" ", screen.readCell(49, @intCast(row)).?.char.grapheme);
+    }
+    try std.testing.expect(dated_rows >= 2);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+const UnreadKeyClient = struct {
+    searches: usize = 0,
+    unread_only: bool = true,
+    after_b: bool = false,
+    before_c: bool = false,
+    provider_calls: usize = 0,
+    /// Worker jobs reach the backend through call(); unread moves and body
+    /// previews must stay local, anything else counts as a provider call.
+    fn provider(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSlice(Value, a, raw, .{});
+        defer request.deinit();
+        if (truth(get(request.value, "cacheOnly")) or same(text(get(request.value, "cmd")), "mail.read")) return cached(ctx, a, raw);
+        self.provider_calls += 1;
+        return error.ProviderMustNotRun;
+    }
+    fn cached(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSlice(Value, a, raw, .{});
+        defer request.deinit();
+        const cmd = text(get(request.value, "cmd"));
+        if (same(cmd, "mail.search")) {
+            self.searches += 1;
+            self.unread_only = self.unread_only and truth(get(request.value, "cacheOnly")) and std.mem.indexOf(u8, text(get(request.value, "query")), "is:unread") != null;
+            const after = text(get(request.value, "afterMessageId"));
+            self.after_b = self.after_b or same(after, "b");
+            self.before_c = self.before_c or same(text(get(request.value, "beforeMessageId")), "c");
+            return a.dupe(u8, if (after.len > 0) "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"c\"}],\"cached\":true,\"cacheReady\":true}}" else "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}],\"cached\":true,\"cacheReady\":true}}");
+        }
+        if (same(cmd, "mail.read")) return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .id = text(get(request.value, "messageId")), .bodyText = "Fictional body", .bodyCached = true } }, .{});
+        return a.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"labels\":[\"UNREAD\",\"INBOX\"]},{\"id\":\"b\",\"labels\":[\"INBOX\"]},{\"id\":\"c\",\"labels\":[\"UNREAD\",\"INBOX\"]}],\"cached\":true,\"cacheReady\":true}}");
+    }
+    fn app(self: *@This(), allocator: Allocator) App {
+        // Same test App as CacheTestClient's, answered by this client.
+        var shape: CacheTestClient = .{};
+        var result = shape.app(allocator);
+        result.client = .{ .ctx = self, .callFn = provider, .cachedFn = cached };
+        return result;
+    }
+};
+fn settleTestJobs(app: *App) !void {
+    for (0..16) |_| {
+        if (app.job.future == null) return;
+        app.job.future.?.await(app.io);
+        try app.finish();
+    }
+    return error.TestJobsDidNotSettle;
+}
+
+test "local UI: g prefixes and n/N unread moves work through onKey" {
+    const a = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var client: UnreadKeyClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.loop = loop;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"labels\":[\"UNREAD\",\"INBOX\"]},{\"id\":\"b\",\"labels\":[\"INBOX\"]},{\"id\":\"c\",\"labels\":[\"UNREAD\",\"INBOX\"]}],\"cached\":true,\"cacheReady\":true}}");
+    // The list's own preview read finishes before any key is pressed.
+    try settleTestJobs(&app);
+    app.selected = 1;
+    errdefer std.debug.print("unread keys: status \"{s}\" code {s} searches {d} selected {d}\n", .{ app.status[0..app.status_len], app.status_error_code[0..app.status_error_len], client.searches, app.selected });
+    // n / N: the next and previous unread cached mail, searched locally.
+    try app.onKey(.{ .codepoint = 'n', .text = "n" });
+    try settleTestJobs(&app);
+    try std.testing.expectEqualStrings("c", app.messageId());
+    try app.onKey(.{ .codepoint = 'N', .text = "N" });
+    try settleTestJobs(&app);
+    try std.testing.expectEqualStrings("a", app.messageId());
+    try std.testing.expect(client.searches == 2 and client.unread_only and client.after_b and client.before_c);
+    // g then Escape ends the prefix; nothing jumps.
+    try app.onKey(.{ .codepoint = 'g', .text = "g" });
+    try std.testing.expect(app.g_pending);
+    try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.g_pending);
+    try std.testing.expectEqual(@as(usize, 0), app.folder);
+    // g then a digit ends the prefix; the digit acts on its own.
+    try app.onKey(.{ .codepoint = 'g', .text = "g" });
+    try app.onKey(.{ .codepoint = '1', .text = "1" });
+    try settleTestJobs(&app);
+    try std.testing.expect(!app.g_pending);
+    try std.testing.expectEqual(@as(usize, 0), app.folder);
+    // gg selects the first cached mail.
+    app.selected = 2;
+    try app.onKey(.{ .codepoint = 'g', .text = "g" });
+    try app.onKey(.{ .codepoint = 'g', .text = "g" });
+    try settleTestJobs(&app);
+    try std.testing.expect(!app.g_pending);
+    try std.testing.expectEqual(@as(usize, 0), app.selected);
+    // g t opens Trash.
+    try app.onKey(.{ .codepoint = 'g', .text = "g" });
+    try app.onKey(.{ .codepoint = 't', .text = "t" });
+    try settleTestJobs(&app);
+    try std.testing.expectEqual(@as(usize, 4), app.folder);
+}
+
+test "local UI: an over-long paste into the command prompt is refused whole" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.onKey(.{ .codepoint = ':', .text = ":" });
+    try std.testing.expectEqual(Mode.command, app.mode);
+    app.pasteStart();
+    for (0..5000) |_| try app.onKey(.{ .codepoint = 'a', .text = "a" });
+    app.pasteEnd();
+    // The whole paste stays visible in the prompt; nothing runs truncated.
+    try std.testing.expectEqual(Mode.command, app.mode);
+    try std.testing.expectEqual(@as(usize, 5000), app.input.value().len);
+    try std.testing.expect(5000 > command_workspace);
+    try app.onKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expectEqualStrings("Command too long · nothing was run", app.status[0..app.status_len]);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: theme picker and Drafts rows follow the dialog and recipient conventions" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.mode = .theme;
+    app.dialog_focus.reset(.theme, 0);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
+    try app.drawThemePicker(win);
+    const shown = try markdownTestScreenText(a, &screen);
+    defer a.free(shown);
+    // Cancel first; the primary Apply last with its key after the label.
+    const cancel_at = std.mem.indexOf(u8, shown, "[Cancel]") orelse return error.TestExpectedEqual;
+    const apply_at = std.mem.indexOf(u8, shown, "[Apply Ctrl+S]") orelse return error.TestExpectedEqual;
+    try std.testing.expect(cancel_at < apply_at);
+    app.onThemePickerKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    app.onThemePickerKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    app.onThemePickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    app.mode = .browse;
+    // Drafts without a subject say who they are for.
+    app.drafts_list = true;
+    const rows = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"d1\",\"subject\":\"\",\"to\":[{\"address\":\"alex@example.test\",\"name\":\"Alex Fixture\"},{\"address\":\"sam@example.test\"}]},{\"id\":\"d2\",\"subject\":\"\",\"summaryCounts\":{\"to\":2,\"cc\":0,\"bcc\":0,\"attachments\":0}}]", .{}));
+    try std.testing.expectEqualStrings("(no subject · to Alex Fixture +1)", try app.mailRowSubject(rows[0]));
+    try std.testing.expectEqualStrings("(no subject · 2 recipients)", try app.mailRowSubject(rows[1]));
+}
+
 test "local UI: list rows keep dates, name Sent recipients and flag with single cells" {
     const a = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -23791,6 +24098,18 @@ test "local UI: list rows keep dates, name Sent recipients and flag with single 
     // The focused list row has the strong selection; an unfocused one only a marker.
     try std.testing.expectEqualStrings("▌", screen.readCell(0, 0).?.char.grapheme);
     try std.testing.expect(std.meta.eql(screen.readCell(5, 0).?.style.bg, vaxis.Color{ .rgb = app.palette.selection }));
+    // `:`, `/`, labels and Trash review act on that row and keep its cue.
+    for ([_]Mode{ .command, .search, .labels, .trash_confirm }) |mode| {
+        app.mode = mode;
+        app.previous_mode = .browse;
+        try app.listDraw(win);
+        try std.testing.expectEqualStrings("▌", screen.readCell(0, 0).?.char.grapheme);
+    }
+    app.previous_mode = .contacts;
+    app.mode = .command;
+    try app.listDraw(win);
+    try std.testing.expectEqualStrings("▏", screen.readCell(0, 0).?.char.grapheme);
+    app.mode = .browse;
     app.focus = .reader;
     try app.listDraw(win);
     try std.testing.expectEqualStrings("▏", screen.readCell(0, 0).?.char.grapheme);
@@ -23816,8 +24135,8 @@ test "local UI: footers keep essential keys first and use one separator style" {
     var buffer: [1024]u8 = undefined;
     const list = " j/k Mail · Enter Read · c New · / Search · x Archive · D Trash · r/R Reply · f Forward · m Labels · s Star · T Theme · ? Help · q Quit";
     const narrow = fitHints(&buffer, list, 50);
-    try std.testing.expectEqualStrings("j/k Mail · Enter Read · c New · ? Help · q Quit", narrow);
-    try std.testing.expect(std.mem.indexOf(u8, fitHints(&buffer, list, 60), "c New") != null);
+    try std.testing.expectEqualStrings("j/k Mail · f Forward · ? Help · q Quit", narrow);
+    try std.testing.expectEqualStrings("j/k Mail · Enter Read · c New · f Forward · ? Help · q Quit", fitHints(&buffer, list, 60));
     try std.testing.expect(hintWidth(narrow) <= 50);
     const medium = fitHints(&buffer, list, 100);
     try std.testing.expect(std.mem.indexOf(u8, medium, "T Theme") == null and std.mem.indexOf(u8, medium, "D Trash") != null and std.mem.indexOf(u8, medium, "q Quit") != null);
@@ -23895,12 +24214,27 @@ test "local UI: rejected responses show the backend sentence and restore needs T
     // Provider-looking or code-only messages keep the stable wording.
     try std.testing.expectError(error.OperationRejected, app.data(arena.allocator(), "{\"ok\":false,\"error\":{\"code\":\"UnmappedFixtureError\",\"message\":\"UnmappedFixtureError\"}}"));
     try std.testing.expectEqualStrings("Operation failed · UnmappedFixtureError", app.status[0..app.status_len]);
+    // Selection/view guidance reads as a sentence; Help keeps its code.
+    app.sayError("MessageRequired");
+    try std.testing.expectEqualStrings("Select a message first", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("MessageRequired", app.status_error_code[0..app.status_error_len]);
+    app.sayError("CacheNavigationOnly");
+    try std.testing.expectEqualStrings("Unread navigation uses downloaded mail · q clears the Gmail search", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("CacheNavigationOnly", app.status_error_code[0..app.status_error_len]);
     app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
     app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"inbox-one\",\"labels\":[\"INBOX\"]}]", .{}));
     app.capabilities.mail_changes = true;
     try std.testing.expect(try app.onMailControls(.{ .codepoint = 'U' }));
     try std.testing.expectEqualStrings("Not in Trash · U restores mail from Trash", app.status[0..app.status_len]);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    // In the Trash mailbox itself, a row whose cached labels lack TRASH is
+    // still restorable.
+    app.folder = 4;
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"trash-one\",\"labels\":[]}]", .{}));
+    try std.testing.expect(app.trashMailbox());
+    try std.testing.expect(!app.restorableTarget());
+    try app.query.set(allocator, "from:alex");
+    try std.testing.expect(!app.trashMailbox());
 }
 
 test "local UI: empty lists explain themselves and help starts with essentials" {
@@ -23922,8 +24256,14 @@ test "local UI: empty lists explain themselves and help starts with essentials" 
     app.folder = 4;
     try std.testing.expectEqualStrings("No mail in Trash", try app.emptyListText());
     try std.testing.expectEqualStrings("ESSENTIALS", help_rows[0].section);
-    // Every keyed help row belongs to a section.
-    try std.testing.expect(help_rows[0].section.len > 0);
+    // Every row is a section heading, or a keyed or note row under one.
+    var section: []const u8 = "";
+    for (help_rows) |row| {
+        if (row.section.len > 0) {
+            try std.testing.expect(row.keys.len == 0 and row.action.len == 0);
+            section = row.section;
+        } else try std.testing.expect(section.len > 0 and row.action.len > 0);
+    }
 }
 
 test "cache search uses only retained local data and server cursors stay distinct" {
@@ -25736,6 +26076,33 @@ test "reader tail remains visible in the resize frame after reduced wrapping" {
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "trash review fits short terminals and keeps its keys visible" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"subject\":\"Fictional subject\"}]}}");
+    try app.pinned_targets.account.set("personal@example.com");
+    app.pinned_targets.count = 1;
+    try app.triage_subject.set(allocator, "Fictional subject");
+    app.mode = .trash_confirm;
+    for ([_][2]u16{ .{ 120, 40 }, .{ 80, 24 }, .{ 60, 16 }, .{ 40, 16 }, .{ 80, 12 }, .{ 36, 11 } }) |size| {
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(allocator, .{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(allocator);
+        app.vx = &vx;
+        try app.draw();
+        const shown = try markdownTestScreenText(allocator, &vx.screen);
+        defer allocator.free(shown);
+        // Both buttons, the whole review text and a Cancel/confirm key line.
+        try std.testing.expect(std.mem.indexOf(u8, shown, "[Cancel]") != null and std.mem.indexOf(u8, shown, "[Move to Trash y]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Fictional subject") != null and std.mem.indexOf(u8, shown, "permanently deleted.") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "y Move to Trash") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Esc/q") != null);
+    }
+}
+
 test "mouse selects cached mail and respects disabled release and confirmation boundaries" {
     const allocator = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -26129,7 +26496,7 @@ test "composer polish: saved file open intent has durable success and failure re
     try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], "Attachment saved · could not open file:"));
     try std.testing.expectEqualStrings("FileNotFound", app.status_error_code[0..app.status_error_len]);
     const length = app.status_len;
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     try std.testing.expectEqual(length, app.status_len);
     try std.testing.expect(app.warning);
 }
@@ -26327,7 +26694,7 @@ test "triage UI: empty label cache requests one refresh and action notices survi
     app.say(false, "Mail action: 2 applied · :undo", .{});
     app.action_notice = true;
     app.say(false, "Working…", .{});
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     try std.testing.expectEqualStrings("Mail action: 2 applied · :undo", app.status[0..app.status_len]);
     app.say(true, "PermissionDenied", .{});
     try std.testing.expectEqualStrings("PermissionDenied", app.status[0..app.status_len]);
@@ -26586,6 +26953,12 @@ test "reader polish: small focused thread keeps body rows and Q S anchor the cur
     const response = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"from\":{\"address\":\"a@example.test\"}},{\"id\":\"b\",\"from\":{\"address\":\"b@example.test\"}},{\"id\":\"c\",\"subject\":\"Compact thread\",\"from\":{\"address\":\"c@example.test\"},\"bodyText\":\"Hello onboarding instructions for the preview build.\\nSecond readable line.\\n> Quoted history\\n-- \\nSignature\"}]}}";
     try app.replaceReader(true, response, true);
     app.focus = .reader;
+    // However narrow, the reader footer keeps the way back and Help.
+    for ([_]u16{ 30, 36, 40, 44, 50, 56, 60, 80, 120 }) |width| {
+        const hints = app.fittedHints(width);
+        try std.testing.expect(std.mem.indexOf(u8, hints, "q Back") != null and std.mem.indexOf(u8, hints, "? Help") != null);
+        try std.testing.expect(hintWidth(hints) + 1 <= width);
+    }
     var screen = try vaxis.Screen.init(allocator, .{ .cols = 78, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(allocator);
     var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 78, .height = 30, .screen = &screen };
@@ -26633,7 +27006,7 @@ test "status polish: long UTF8 status remains bounded and diagnostics are readab
     try std.testing.expectEqualStrings("BodySizeMismatch", app.status_error_code[0..app.status_error_len]);
     app.selection_generation += 1;
     app.clearObsoleteStatus();
-    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.status[0..app.status_len]);
 }
 
 test "status polish: view changes clear obsolete hints but preserve action and unknown outcomes" {
@@ -26644,7 +27017,7 @@ test "status polish: view changes clear obsolete hints but preserve action and u
     app.say(false, "Contacts · n New · e Edit", .{});
     app.mode = .browse;
     app.clearObsoleteStatus();
-    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.status[0..app.status_len]);
     app.sayAction(false, "Change applied · :undo", .{});
     app.mode = .contacts;
     app.clearObsoleteStatus();
@@ -26653,7 +27026,7 @@ test "status polish: view changes clear obsolete hints but preserve action and u
     app.markUnknown(.send);
     app.mode = .browse;
     app.clearObsoleteStatus();
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     try std.testing.expectEqual(StatusKind.unknown, app.status_kind);
     try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Outcome unknown") != null);
 }
@@ -26679,13 +27052,13 @@ test "editor notice: saved canceled and failed results survive background work w
         app.selection_generation +%= 1;
         app.clearObsoleteStatus();
         try app.apply(.recipient_cache, "{\"ok\":true,\"data\":{\"recipients\":[]}}");
-        app.say(false, "Ready", .{});
+        app.sayIdle();
         try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], if (exit_code == 0) "Editor returned" else "Editor exited 1"));
         try std.testing.expectEqualStrings("Retained editor body 🌋", app.compose.fields[4].value());
         try std.testing.expectEqualStrings("local-draft", app.compose.id.value());
     }
     app.sayEditorFailure(error.NotRegularFile);
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     app.clearObsoleteStatus();
     try std.testing.expectEqual(StatusKind.action, app.status_kind);
     try std.testing.expectEqualStrings("Editor: NotRegularFile · draft retained", app.status[0..app.status_len]);
@@ -26694,9 +27067,9 @@ test "editor notice: saved canceled and failed results survive background work w
     // action lifetime. Its account owner is never relabeled as another account.
     app.action_notice = false;
     app.account_index = 1;
-    app.say(false, "Ready", .{});
+    app.sayIdle();
     try std.testing.expectEqual(@as(usize, 1), app.status_owner.account);
-    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.status[0..app.status_len]);
     app.markUnknown(.send);
     const unknown = try allocator.dupe(u8, app.status[0..app.status_len]);
     defer allocator.free(unknown);
@@ -26757,7 +27130,7 @@ test "editor persistence: exit save uses operation acknowledgement rather than r
         save.fail_transport = failure == 0;
         save.reject = failure == 1;
         app.action_notice = false;
-        app.say(false, "Ready", .{});
+        app.sayIdle();
         try std.testing.expect(!app.warning);
         try std.testing.expectError(error.DraftPersistenceFailed, app.persistDraftAtExit());
         try std.testing.expectEqualStrings("Retained termination body 🌋", app.compose.fields[4].value());
@@ -27116,7 +27489,7 @@ test "status polish: queued recipient cache loading preserves same-context diagn
     try std.testing.expectEqualStrings("NotRegularFile", app.status_error_code[0..app.status_error_len]);
     app.mode = .browse;
     app.clearObsoleteStatus();
-    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.status[0..app.status_len]);
     try std.testing.expectEqual(@as(usize, 0), app.status_error_len);
     // A real foreground retry result remains able to clear the previous error.
     app.mode = .compose;
@@ -27716,9 +28089,6 @@ test "forward UX: all mailbox reader and search footers expose Forward before tr
         app.focus = focus;
         for ([_]bool{ false, true }) |expanded| {
             app.expanded = expanded;
-            // Narrow mailbox lists keep navigation, Enter, compose, search,
-            // archive/trash, help and quit; Forward follows from 100 columns.
-            if (focus == .list and !expanded and width < 100) continue;
             const hints = app.fittedHints(width);
             const action_at = std.mem.indexOf(u8, hints, "f Forward") orelse return error.ForwardHintMissing;
             try std.testing.expect(action_at + "f Forward".len <= width);
@@ -27987,9 +28357,9 @@ test "dialog UX: all modal controls have reverse focus, safe Enter and distinct 
     try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
     try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Remove.
     try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
-    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Apply staged changes.
-    try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
     try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Cancel.
+    try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Apply staged changes, last.
     try std.testing.expectEqual(@as(usize, 5), app.dialog_focus.index);
     try app.onLabelPickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
     try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
@@ -28003,10 +28373,12 @@ test "dialog UX: all modal controls have reverse focus, safe Enter and distinct 
     try std.testing.expectEqualStrings("q", app.label_filter.value());
     try std.testing.expect(app.label_picker); // q is text in Filter.
     try app.onLabelPickerKey(.{ .codepoint = Key.escape });
-    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // No matches: Add/Remove skipped; staged Apply remains.
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // No matches: Add/Remove skipped; Cancel.
     try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
-    try app.onLabelPickerKey(.{ .codepoint = Key.tab });
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // The staged Apply remains.
     try std.testing.expectEqual(@as(usize, 5), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
     try app.onLabelPickerKey(.{ .codepoint = Key.enter });
     try std.testing.expect(!app.label_picker);
     try std.testing.expectEqual(@as(usize, 0), app.label_memberships.changed());

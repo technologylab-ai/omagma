@@ -25,7 +25,7 @@ def exercise(binary, root, captures):
     terminal = MouseTerminal(binary, root, screen_type=ComposerScreen, columns=120, rows=40,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         terminal.send(b"h")
         terminal.until(lambda: terminal.screen.locate("Drafts") is not None)
         click(terminal, *point(terminal, "Drafts"))
@@ -128,7 +128,7 @@ def preview_wheel(binary, root, captures):
     terminal = MouseTerminal(binary, root, screen_type=ComposerScreen, columns=120, rows=32,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
-        terminal.until(lambda: "Ready" in terminal.text()
+        terminal.until(lambda: terminal.ready()
                        and terminal.screen.mouse_tracking_mode == 1002)
         terminal.send(b"c")
         terminal.until(lambda: "Subject:" in terminal.text() and "Attachments 0" in terminal.text())

@@ -18,7 +18,7 @@ def open_draft(binary, root, restored=False):
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
         if not restored:
-            terminal.until(lambda: "Ready" in terminal.text())
+            terminal.until(lambda: terminal.ready())
             terminal.send(b"h")
             terminal.until(lambda: terminal.screen.locate("MAILBOXES") is not None)
             x, y = point(terminal, "MAILBOXES")
