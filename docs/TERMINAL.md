@@ -588,9 +588,14 @@ show, including read-only holiday calendars. Space toggles a source, `a` switche
 between the current account and all configured accounts, and Enter applies the
 selection. Esc cancels pending changes; `o` shows only the focused calendar and
 `c` changes its theme color. Source letters and names remain visible without
-color. The selection persists across restarts. `h`/`l` move the date range,
-`t` returns to today and `Ctrl+G` jumps to a date: type `fri`, `tomorrow`,
-`+3d`, `-1w`, `12-24` or `2026-12-24`; the status shows the date reached.
+color. The selection persists across restarts. Calendar opens on today in the
+calendar's own time zone. `h`/`l` move the date range (a compact three-day
+Week moves by three days and shows the Monday-aligned week again once the
+terminal is wide enough), `t` returns to today and `Ctrl+G` jumps to a date:
+type `fri`, `tomorrow`, `+3d`, `-1w`, `12-24` or `2026-12-24`; the status
+shows the date reached. A weekday name that is today means today, and a
+`12-24`-style date already past this year means next year (type the year or
+`-Nd` for an earlier date).
 `j`/`k` select an event (at the last one, `l` continues into the next period),
 `gg`/`G` or Home/End reach the first/last event and Ctrl+D/Ctrl+U move half a
 page, as in Mail. Enter opens details. The selected event and its actions
@@ -630,12 +635,17 @@ routine cannot hide new starts in other hours.
 
 ### Create and edit meetings
 
-Press `n` to create a timed or all-day event on the selected event's day, `c`
-to start a new event copied from the selected one (title, place and times; it
-is a new event with its own review), or `e` to edit the selected event. Edit is
-offered only for events in a writable calendar; for read-only events `e`
-explains that `b` opens them in Google Calendar. Times accept `1430`, `2pm`
-or `14:30`, dates accept `tomorrow`, `fri`, `+2d` or `12-24`, and End time
+Press `n` to create a timed or all-day event: it starts today at the next half
+hour, on the selected event's day once you have moved the selection, or on the
+first day of a range you navigated to. `c`
+starts a new event copied from the selected one (title, place and times; it
+is a new event with its own review), and `e` edits the selected event. Edit is
+offered only for events this calendar organizes in a writable calendar; for
+read-only events and meetings organized by someone else `e` explains that `b`
+opens them in Google Calendar. Times accept `1430`, `2pm` or `14:30` (four
+digits are HHMM only when the hour is below 24 and the minutes below 60, so
+`2026` reads as 20:26), dates accept `tomorrow`, `fri`, `+2d` or `12-24` (a
+past `12-24` means next year), End date `+2d` counts from Start, and End time
 accepts `+45m` or `+1h30m`; leaving the field shows the exact value.
 The editor names the destination account/calendar and time zone. Its all-day
 last date is inclusive; the provider's exclusive end is handled automatically.
@@ -697,20 +707,32 @@ run only while the TUI is open and use the existing Calendar read permission.
 
 From an invitation, `A` opens a review for adding the event to the selected
 calendar, or applying a supported newer update/cancellation. Review the account,
-calendar and times before confirming. `q` returns to where you pressed `A` (the
-mail or the invitation card); `g` chooses another destination calendar, and
+calendar and times before confirming. `q` returns to the mail reader where you
+pressed `A`, also after the action ran; it never reopens the RSVP reply card,
+whose single-letter answers send at once (`I` reopens it). A reply card
+reached any other way than `I` ignores single-letter `a`/`t`/`d` until you
+interact with it; Tab to an answer and Enter always works. `g` chooses another destination calendar, and
 after choosing one in that picker `q` returns to the picker. An event that is already saved shows one line,
 **Already in Personal · Enter opens it in Calendar**. Calendar ID, UID and the
 source time stay behind `v` Details. If the check itself fails, the review says
 why in words instead of waiting.
 
-When an invitation has no usable time zone (a floating time, or a zone name
-Omagma cannot verify), the review says so and offers **Assume Europe/Vienna? →**
-with the converted start and end: `z` uses that suggestion (the destination
-calendar's zone when the invitation suggests none) and `Z` lets you type any
-IANA zone. The review then states **Zone assumed by you**, and confirming still
-needs its own `y`. In the reply card, `z`/`Z` open that same Calendar review;
-`s` still sends the RSVP without Calendar. The saved review fixes the exact action;
+When an invitation has no usable time zone (a floating time, an unknown zone
+name such as Outlook's `W. Europe Standard Time`, or embedded zone rules Omagma
+cannot match), the review says so and shows the wall clock exactly as written
+with a candidate: **09:00–10:00 as written · read as Europe/Berlin?**. Nothing
+is assumed until you choose: `z` (or the focused **[z Use …]** button) uses the
+candidate — the mapped zone for a Windows name, otherwise the destination
+calendar's zone; only zones that resolve the written times are offered — and
+`Z` (or **[Z Type zone]**) opens an empty field for any IANA zone. A bare Enter
+only explains these choices. Only the endpoints without a usable zone take the
+choice; an end in a valid zone keeps it. Choosing replaces the invitation's
+named zone for this review only, and the times shown next come from Calendar's
+check in that zone. The review then says, for example, **The invitation names
+"W. Europe Standard Time". You chose to read its times as Europe/Berlin.**, and
+confirming still needs its own `y`. In the reply card, **[z Use suggested
+zone]** and **[Z Type zone]** open that same Calendar review; `s` still sends
+the RSVP without Calendar. The saved review fixes the exact action;
 it never sends an RSVP email. If the connection fails after dispatch, the outcome
 remains unknown. **r · Check Calendar** checks the recorded action without
 applying it again, including after restart. Do not resubmit the event to resolve
@@ -730,12 +752,13 @@ decision.
 Invitations show a themed event card below the message's labels, with a bold
 title, accent-colored time and **I · Respond** cue. After you answer, the card
 shows **✓ Accepted · I Change** (or `~ Tentative`, `× Declined`) and the reply
-card says **Your response · Accepted**, dimming that choice. A damaged
+card says **Your response · Accepted**, dimming that choice; its key then only
+says **Already accepted · choose another answer to change it**. A damaged
 invitation (an unreadable organizer, repeated fields, dropped time-zone rules
 or malformed calendar data) shows `⚠` beside **I · Details**; its card explains
 **Can't answer from Omagma · this invitation is damaged: …**, confirms that
-nothing was sent and offers `r` Reply by email and `o` Open in Gmail (`g` when
-`o` is Join); it has no `A` Calendar route. An unreadable organizer address
+nothing was sent and offers **[r Reply by email]** and **[o Open in Gmail]**
+(`g` when `o` is Join), reachable with Tab and Enter; it has no `A` Calendar route. An unreadable organizer address
 shows the organizer's name. A roomy reader uses a quiet
 border and three content rows; smaller panes retain a compact one-to-three-row
 summary so the message body stays readable. Invitations with a detected, usable

@@ -98,14 +98,34 @@ pub const State = struct {
     /// infers it. `assumed_floating` also consents to fixing floating times.
     assumed_zone: b.Text(512) = .{},
     assumed_floating: bool = false,
+    /// Which endpoints the assumed zone binds: only an unresolved or
+    /// floating endpoint; a valid endpoint zone is never overridden.
+    assume_start: bool = false,
+    assume_end: bool = false,
+    /// The chosen zone replaces a named TZID (z/Z is that explicit consent).
+    assume_reinterpret: bool = false,
+    /// The zone `z` offers: a resolvable candidate computed when the plan
+    /// arrives (suggestion first, then the destination calendar's zone).
+    zone_candidate: b.Text(512) = .{},
     zone_entry: bool = false,
     /// z/Z pressed in the Mail drawer: once the plan shows a zone problem,
     /// assume the suggestion (`suggested`) or open zone entry (`typed`).
     zone_intent: enum { none, suggested, typed } = .none,
-    /// Where `q` from an invitation review returns: the Mail drawer it was
-    /// opened from, or the destination picker the user chose it in.
-    return_to_invitation: bool = false,
+    /// Opened by A/z/Z from a message: `q` from its review returns to that
+    /// Mail reader (never into the RSVP drawer), also after the action ran.
+    /// `picker_chosen` instead returns to the destination picker.
+    from_mail: bool = false,
     picker_chosen: bool = false,
+    /// The first Calendar plan's zone suggestion (a mapped Windows/vendor
+    /// TZID). Re-plans that name a zone no longer report it; the review keeps
+    /// offering it for its whole life.
+    zone_suggestion: b.Text(512) = .{},
+    /// Opened at "today" before the calendar's own zone was known: the
+    /// first default source recomputes today in that zone, then clears it.
+    day_follows_today: bool = false,
+    /// Compact (3-day) Week: the first visible day after h/l. Week windows
+    /// stay Monday-aligned once the grid is wide again.
+    week_anchor: ?i64 = null,
     /// `v` reveals protocol identifiers in an invitation review.
     review_details: bool = false,
     /// Select this provider event ID once the next window loads (after

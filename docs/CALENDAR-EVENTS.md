@@ -7,15 +7,22 @@ guest notifications before anything is saved.
 ## In the TUI
 
 Open Calendar from the mail sidebar, then press `n` to create an event or `e` to
-edit the selected event. Choose the destination account and writable calendar in
+edit the selected event. Edit appears only for events the calendar itself
+organizes; a meeting organized by someone else opens in Google Calendar with
+`b`. Choose the destination account and writable calendar in
 the editor. The destination is explicit even when the main view combines several
 calendars or accounts.
 
 Enter the title, dates, time zone and optional place or notes. Timed events show
-start and end times. Times may be typed as `1430`, `2pm` or `14:30`, dates as
-`tomorrow`, `fri`, `+2d`, `12-24` or `2026-12-24`, and End time as `+45m` or
-`+1h30m` after Start; leaving the field shows the exact value that will be
-reviewed. `n` starts on the selected event's day, and `c` starts a new event
+start and end times. Times may be typed as `1430`, `2pm` or `14:30` (four digits
+are HHMM only for an hour below 24 and minutes below 60, so `2026` is 20:26),
+dates as `tomorrow`, `fri` (today's own weekday name means today), `+2d`,
+`12-24` (a date already past this year means next year) or `2026-12-24`. End
+date `+2d` counts from the Start date, and End time `+45m` or `+1h30m` from
+Start; leaving the field shows the exact value that will be reviewed. `n`
+starts today at the next half hour; once you have moved the selection to an
+event it starts on that event's day, and in a range you navigated to it starts
+on the range's first day. `c` starts a new event
 copied from the selected one (title, place and times, never its identity). For an all-day event, the editor asks for the **last included
 date** and converts it to Google's exclusive end date. If a clock change repeats
 a local time, choose its first or second occurrence; the choices show the real
@@ -121,6 +128,23 @@ second appointment.
 This is separate from accepting a meeting invitation. Messages listing another
 attendee still require a matching account or verified alias. Existing recurrence,
 ambiguous-event, cancellation and timezone review limits remain in effect.
+After the appointment is added, `q` returns to the mail where you pressed `A`.
+
+## Invitation times without a usable zone
+
+An invitation whose time names an unknown zone (Outlook's `W. Europe Standard
+Time`), carries embedded zone rules Omagma cannot match, or has no zone at all
+(floating) is never added by guessing. The review shows the wall clock exactly
+as written and a candidate: the mapped zone for a Windows name, otherwise the
+destination calendar's zone, offered only when it resolves the written times.
+Nothing is assumed until you press `z` (or focus **[z Use …]** and press Enter)
+or `Z` to type a zone; a bare Enter only explains the choice. Only the endpoints
+without a usable zone take your choice, and an end in a valid zone keeps it.
+For a named zone this is an explicit reinterpretation for this review only
+(`reinterpretEmbeddedTimezones` in the CLI request); for a floating time it is
+the consent to fix it (`acceptFloatingTime`). Calendar then checks the times in
+that zone, the review states what you chose (**You chose to read its times as
+Europe/Berlin.**), and the usual Review and `y` confirmation follow.
 
 ## Other calendar attachments
 

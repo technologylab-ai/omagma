@@ -62,6 +62,21 @@ def hour_gutter(terminal):
     return [line[:5] for line in terminal.screen.lines() if re.match(r"^\d{2}:00(?: |$)", line)]
 
 
+def hour_band(terminal, hour):
+    """The Week rows belonging to one hour: its gutter row up to the next."""
+    lines = terminal.screen.lines()
+    first = next(index for index, line in enumerate(lines) if line.startswith(f"{hour:02}:00"))
+    last = next((index for index in range(first + 1, len(lines)) if re.match(r"^\d{2}:00", lines[index])), len(lines))
+    return lines[first:last]
+
+
+def cell_time(line, start, end):
+    """A Week cell's full start time: its row's gutter hour plus the first
+    minute the cell shows (":30"); None when the cell shows no minute."""
+    match = re.search(r":([0-5]\d)", line[start:end])
+    return line[:2] + ":" + match.group(1) if match and re.match(r"^\d{2}:00", line) else None
+
+
 def search_mail(terminal, version):
     terminal.send(b"/subject:\"Planning version " + str(version).encode() + b"\"\r")
     terminal.until(lambda: f"Planning version {version}" in terminal.text())
@@ -597,6 +612,13 @@ def browsing(binary, directory, captures):
         terminal.until(lambda: "Join target validated" in terminal.text())
         require("Profile 3" in terminal.text(), "Join feedback omitted the configured Chrome profile")
         capture(terminal, captures, "calendar-event-join-feedback")
+        # o joins from the detail card as well: b replaces the status first,
+        # so the Join feedback below can only come from o.
+        terminal.send(b"b")
+        terminal.until(lambda: "Google Calendar target validated" in terminal.text() and "Join target validated" not in terminal.text())
+        terminal.send(b"o")
+        terminal.until(lambda: "Join target validated" in terminal.text())
+        require("Profile 3" in terminal.text(), "o Join from the detail card omitted the configured Chrome profile")
         for columns, rows in ((82, 28), (48, 22)):
             terminal.resize(columns, rows)
             terminal.until(lambda: "[q Back]" in terminal.text() and "Project planning" in terminal.text())
@@ -826,9 +848,7 @@ def grid_coverage(binary, directory, captures):
              if __import__("json").loads(path.read_text())["account"] == ACCOUNTS[0]]
     require(len(paths) == 1, "grid fixture account storage is ambiguous")
     paths[0].write_text(json.dumps(state) + "\n")
-    # The compact Calendar chrome frees four rows; 34 rows keep the earlier
-    # grid height, where the 09:00 overlap still needs its +1 badge.
-    terminal = start(binary, client_dir, fixture, rows=34)
+    terminal = start(binary, client_dir, fixture)
     try:
         terminal.send(b"C")
         wait_calendar(terminal)
@@ -844,22 +864,33 @@ def grid_coverage(binary, directory, captures):
 
         # At38 rows all24 actual gutter labels fit, in chronological order.
         require(hour_gutter(terminal) == expected_hours, "wide grid wastes room while hiding hours")
-        # The gutter names the hour; a cell keeps only its non-zero minute.
-        require(":30" in terminal.text() and "+1" in terminal.text(), "grid lost actual start minutes or overlap count")
-        lines = terminal.screen.lines()
-        row_10 = next(row for row in lines if row.startswith("10:00"))
-        row_11 = next(row for row in lines if row.startswith("11:00"))
-        require("│" in row_10[6:] and "+1" in row_10 and "Long" in row_11,
+        # The gutter names the hour and a cell keeps its non-zero minute: the
+        # full 09:30 start is derivable from the 09:00 row itself.
+        band_9 = hour_band(terminal, 9)
+        require(cell_time(band_9[0], 6, None) == "09:30", "grid lost the actual 09:30 start time")
+        # The 09:45 overlap is either listed beside it or counted.
+        require(any("Overlap" in row for row in band_9) or any("+1" in row for row in band_9),
+                "grid hid the overlapping meeting without a count")
+        band_10 = hour_band(terminal, 10)
+        band_11 = hour_band(terminal, 11)
+        require(any("│" in row[6:] for row in band_10) and any("Long" in row for row in band_11),
                 "multi-hour meeting incorrectly appears free after start hour")
         capture(terminal, captures, "calendar-overlaps-wide")
         for columns in (104, 110):
             before = terminal.screen.completed_frames
-            terminal.resize(columns, 34)
-            terminal.until(lambda: terminal.screen.completed_frames > before and "Sun" in terminal.text())
+            terminal.resize(columns, 38)
+            terminal.until(lambda: terminal.screen.completed_frames > before and "│Sun " in terminal.text())
             require(hour_gutter(terminal) == expected_hours, "seven-day resize hid an hour gutter label")
-            camera_rows = [row for row in terminal.screen.lines() if row.startswith("09:00")]
-            require(camera_rows and "" in camera_rows[0] and "Lo" in camera_rows[0] and "+1" in camera_rows[0], "narrow seven-day cell dropped camera, title or overlap count")
+            band_9 = hour_band(terminal, 9)
+            require("" in band_9[0] and "Lo" in band_9[0] and cell_time(band_9[0], 6, None) == "09:30",
+                    "narrow seven-day cell dropped camera, title or start minute")
+            require(any("+1" in row or "Ov" in row for row in band_9), "narrow seven-day cell hid the overlap without a count")
             capture(terminal, captures, f"calendar-camera-grid-{columns}")
+        # A shorter terminal still counts what no longer fits.
+        before = terminal.screen.completed_frames
+        terminal.resize(110, 30)
+        terminal.until(lambda: terminal.screen.completed_frames > before and "│Sun " in terminal.text())
+        require(any("+1" in row for row in hour_band(terminal, 9)), "short grid hid the overlap without its +1 count")
         terminal.resize(82, 28)
         terminal.until(lambda: "Week needs 104 cols" in terminal.text())
         terminal.send(b"kkkk")

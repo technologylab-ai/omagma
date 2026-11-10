@@ -642,6 +642,23 @@ fn icsDay(raw: []const u8) ?i64 {
     const day = timezone.dateDay(&iso) catch return null;
     return @as(i64, day);
 }
+/// The civil wall time of an iCalendar DATE-TIME ("20261025T090000"[Z]).
+fn icsCivil(raw: []const u8) ?timezone.CivilTime {
+    if (raw.len < 15 or raw[8] != 'T') return null;
+    return .{
+        .year = std.fmt.parseInt(u16, raw[0..4], 10) catch return null,
+        .month = std.fmt.parseInt(u8, raw[4..6], 10) catch return null,
+        .day = std.fmt.parseInt(u8, raw[6..8], 10) catch return null,
+        .hour = std.fmt.parseInt(u8, raw[9..11], 10) catch return null,
+        .minute = std.fmt.parseInt(u8, raw[11..13], 10) catch return null,
+        .second = std.fmt.parseInt(u8, raw[13..15], 10) catch return null,
+    };
+}
+/// "2026-10-25 09:00": an iCalendar wall time exactly as written.
+fn icsClock(a: Allocator, raw: []const u8) ?[]const u8 {
+    const civil = icsCivil(raw) orelse return null;
+    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{ civil.year, civil.month, civil.day, civil.hour, civil.minute }) catch null;
+}
 /// A display string that starts with an ISO date (YYYY-MM-DD).
 fn isoPrefixDay(value: []const u8) ?i64 {
     if (value.len < 10 or value[4] != '-' or value[7] != '-') return null;
@@ -927,8 +944,8 @@ const calendar_help_rows = [_]HelpRow{
     .{ .section = "VIEWS & NAVIGATION" },
     .{ .keys = "M · click card", .action = "Focus an upcoming meeting card; Dismiss is selected first" },
     .{ .keys = "1 / 2 / 3 · d / w", .action = "Agenda / Day / Week; Week starts on Monday and keeps the selected day" },
-    .{ .keys = "h / l · left / right", .action = "Previous or next period" },
-    .{ .keys = "t · Ctrl+G", .action = "Today · jump to fri, tomorrow, +3d, -1w, 12-24 or 2026-12-24" },
+    .{ .keys = "h / l · left / right", .action = "Previous or next period; a compact three-day Week moves by three days" },
+    .{ .keys = "t · Ctrl+G", .action = "Today · jump to fri, tomorrow, +3d, -1w, 12-24 or 2026-12-24; today's weekday name means today, a past 12-24 means next year" },
     .{ .keys = "j / k · arrows", .action = "Choose an event; scroll an open event or review" },
     .{ .keys = "gg / G · Ctrl+D / Ctrl+U", .action = "First / last event · half a page, as in Mail" },
     .{ .keys = "Space / click +N in Week", .action = "List the events sharing visible hour rows; Enter selects and reveals, Esc returns without changing selection" },
@@ -943,8 +960,8 @@ const calendar_help_rows = [_]HelpRow{
     .{ .keys = "Tab / Shift+Tab", .action = "Move between controls; Enter activates" },
     .{ .keys = "q / Esc", .action = "Return to Calendar; from its main view, return to Mail" },
     .{ .section = "EVENTS & MEETINGS" },
-    .{ .keys = "n / c / e", .action = "New event on the selected day / copy the selected event / edit it (writable calendars); timed or all day, optional guests and video link" },
-    .{ .keys = "1430 · 2pm · +45m · fri", .action = "Event editor times and dates; leaving a field shows the exact value" },
+    .{ .keys = "n / c / e", .action = "New event (today, or the day of an event you selected) / copy the selected event / edit it (events this writable calendar organizes); timed or all day, optional guests and video link" },
+    .{ .keys = "1430 · 2pm · +45m · fri", .action = "Event editor times and dates; End date +2d counts from Start; 2026 in a time field is 20:26; leaving a field shows the exact value" },
     .{ .keys = "Tab / Shift+Tab in event editor", .action = "Move fields and controls; Enter toggles All day, Video and guest notifications" },
     .{ .keys = "Ctrl+Space / Contacts in event editor", .action = "Choose a guest address from the destination account's contacts; additions are reviewed before invitations are sent" },
     .{ .keys = "Ctrl+S in event editor", .action = "Review the exact account, calendar, times, guests and notification policy before saving" },
@@ -2106,6 +2123,10 @@ const App = struct {
     invitation_lines: usize = 0,
     invitation_height: usize = 0,
     invitation_confirm_ready: bool = false,
+    /// Single-letter a/t/d answers send at once, so they work only in a
+    /// drawer the user opened with I on that message or has since interacted
+    /// with (Tab, scrolling, Details…). Tab to a button + Enter always works.
+    invitation_letters_armed: bool = false,
     invitation_details: bool = false,
     invitation_start_display: @import("../bounded.zig").Text(512) = .{},
     invitation_end_display: @import("../bounded.zig").Text(512) = .{},
@@ -11150,6 +11171,7 @@ const App = struct {
         try self.invitation_inspected_account.set(self.allocator, self.account());
         self.invitation_scroll = 0;
         self.invitation_confirm_ready = false;
+        self.invitation_letters_armed = true;
         try self.start(.invitation_inspect, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.inspect", .messageId = self.invitation_inspected_id.value() });
     }
     fn openCurrentMail(self: *App) !void {
@@ -12351,6 +12373,13 @@ const App = struct {
         };
         self.dialog_focus.ensure(context, 0);
         if (self.mode == .invitation and self.job.future != null) return;
+        if (self.mode == .invitation) {
+            // Any drawer interaction except a single-letter answer (or
+            // leaving) re-enables those letters; see invitation_letters_armed.
+            const letter = key.matches('a', .{}) or key.matches('t', .{}) or key.matches('d', .{});
+            if (!letter and !key.matches(Key.escape, .{}) and !key.matches('q', .{})) self.invitation_letters_armed = true;
+            if (tabDirection(key)) |backwards| return self.invitationFocusMove(backwards);
+        }
         if (tabDirection(key)) |backwards| {
             const copy_warning = self.mode == .review and self.gmailCopyWarning();
             var enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) (if (copy_warning) @as(u8, 0b111) else 0b11) else 0b01;
@@ -12400,9 +12429,10 @@ const App = struct {
             self.say(false, "{s}", .{if (self.invitationCalendarCheckNeeded()) "Checking RSVP and Calendar status…" else "Checking Sent for the previous RSVP…"});
             return;
         }
-        if (self.invitationZoneBlocked() and (key.matches('z', .{}) or key.matches('Z', .{}) or key.matches('z', .{ .shift = true }))) {
+        const zone_button = key.matches(Key.enter, .{}) and (self.dialog_focus.index == 10 or self.dialog_focus.index == 11);
+        if (self.invitationZoneBlocked() and (zone_button or key.matches('z', .{}) or key.matches('Z', .{}) or key.matches('z', .{ .shift = true }))) {
             if ((self.invitationControlMask() & 0b1000000) == 0) return;
-            const typed = !key.matches('z', .{});
+            const typed = if (zone_button) self.dialog_focus.index == 11 else !key.matches('z', .{});
             try self.openCalendar(true);
             if (self.calendar.open) self.calendar.zone_intent = if (typed) .typed else .suggested;
             return;
@@ -12419,14 +12449,15 @@ const App = struct {
         }
         // A damaged invitation cannot be answered here; offer ordinary mail
         // routes for the same inspected message instead (nothing is sent).
-        if (self.invitation_review.defects != 0 and self.invitation_confirm_ready and (key.matches('r', .{}) or key.matches('g', .{}) or (key.matches('o', .{}) and !reader_tools.safeUrl(self.invitation_join_url.slice())))) {
+        const mail_button = key.matches(Key.enter, .{}) and (self.dialog_focus.index == 8 or self.dialog_focus.index == 9);
+        if (self.invitation_review.defects != 0 and self.invitation_confirm_ready and (mail_button or key.matches('r', .{}) or key.matches('g', .{}) or (key.matches('o', .{}) and !reader_tools.safeUrl(self.invitation_join_url.slice())))) {
             self.mode = .browse;
             if (!same(self.readerReplyId(), self.invitation_inspected_id.value()) or !same(self.account(), self.invitation_inspected_account.value())) {
                 self.mode = .invitation;
                 self.say(true, "Select this invitation's mail first", .{});
                 return;
             }
-            return if (key.matches('r', .{})) self.composeNew(false) else self.openCurrentMail();
+            return if (key.matches('r', .{}) or (mail_button and self.dialog_focus.index == 8)) self.composeNew(false) else self.openCurrentMail();
         }
         if (key.matches('o', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 5)) {
             if (!self.invitation_confirm_ready or !reader_tools.safeUrl(self.invitation_join_url.slice())) return;
@@ -12438,6 +12469,15 @@ const App = struct {
             const status = if (rsvp_only) self.invitation_pending_status.slice() else if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
             if (!self.invitation_confirm_ready) {
                 self.say(true, "Resize to review RSVP identity before confirmation", .{});
+                return;
+            }
+            if (!rsvp_only and !key.matches(Key.enter, .{}) and !self.invitation_letters_armed) {
+                self.say(true, "Nothing sent · Tab to an answer and press Enter (or I to review again)", .{});
+                return;
+            }
+            // The dimmed current answer is not offered again by key either.
+            if (!rsvp_only and std.ascii.eqlIgnoreCase(self.invitation_confirmed_status.slice(), status)) {
+                self.say(false, "Already {s} · choose another answer to change it", .{status});
                 return;
             }
             if (self.invitation_unknown and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) {
@@ -15818,7 +15858,7 @@ const App = struct {
         if (same(code, "CalendarReviewStale") or same(code, "stale_source")) return "The event changed · review the latest invitation";
         if (same(code, "time_review_required")) return "The invitation's date or timezone needs review";
         if (same(code, "ConnectionRefused") or same(code, "CalendarUnavailable") or same(code, "ConnectionTimedOut")) return "Calendar could not be reached";
-        if (same(code, "EmbeddedTimezoneUnresolved") or same(code, "AmbiguousLocalTime") or same(code, "FloatingTimeRequiresReview")) return "The invitation's timezone needs review";
+        if (same(code, "EmbeddedTimezoneUnresolved") or same(code, "AmbiguousLocalTime") or same(code, "FloatingTimeRequiresReview") or same(code, "CalendarTimezoneMismatch") or same(code, "InvalidTimezoneName")) return "The invitation's timezone needs review";
         if (same(code, "CalendarTimezoneRequired") or same(code, "FloatingTimezoneRequired")) return "The invitation gives no usable time zone";
         return code;
     }
@@ -15832,7 +15872,7 @@ const App = struct {
     }
     fn invitationZoneBlocked(self: *const App) bool {
         const code = self.invitation_calendar_sync_error.slice();
-        return self.invitation_calendar_blocked and (same(code, "CalendarTimezoneRequired") or same(code, "FloatingTimezoneRequired") or same(code, "EmbeddedTimezoneUnresolved") or same(code, "time_review_required") or same(code, "FloatingTimeRequiresReview"));
+        return self.invitation_calendar_blocked and (same(code, "CalendarTimezoneRequired") or same(code, "FloatingTimezoneRequired") or same(code, "EmbeddedTimezoneUnresolved") or same(code, "time_review_required") or same(code, "FloatingTimeRequiresReview") or same(code, "CalendarTimezoneMismatch") or same(code, "InvalidTimezoneName"));
     }
     fn invitationCalendarNotice(self: *const App) []const u8 {
         if (self.invitation_calendar_blocked) return if (self.invitation_calendar_can_retry) "RSVP not sent · Calendar check failed · a/t retries" else if (self.invitationZoneBlocked()) "RSVP not sent · the invitation's time zone needs your choice" else "RSVP not sent · Calendar needs attention";
@@ -15892,6 +15932,26 @@ const App = struct {
         if (self.invitationCalendarUnknown()) mask &= 0b10110001;
         if (self.invitation_calendar_blocked or (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded()))) mask |= 0b10000000;
         return mask;
+    }
+    /// Recovery buttons 8–11: r Reply by email and Open in Gmail for a damaged
+    /// invitation, z Use suggested zone and Z Type zone for a zone blocker.
+    fn invitationRecoveryMask(self: *const App) u8 {
+        if (!self.invitation_confirm_ready) return 0;
+        var mask: u8 = 0;
+        if (self.invitation_review.defects != 0) mask |= 0b0011;
+        if (self.invitationZoneBlocked() and (self.invitationControlMask() & 0b1000000) != 0) mask |= 0b1100;
+        return mask;
+    }
+    /// Tab order over every drawer button, including the recovery buttons.
+    fn invitationFocusMove(self: *App, backwards: bool) void {
+        const enabled = @as(u16, self.invitationControlMask()) | (@as(u16, self.invitationRecoveryMask()) << 8);
+        const count: usize = 12;
+        var index: usize = @min(self.dialog_focus.index, count - 1);
+        for (0..count) |_| {
+            index = (index + if (backwards) count - 1 else 1) % count;
+            if (enabled & (@as(u16, 1) << @intCast(index)) != 0) break;
+        }
+        self.dialog_focus.index = index;
     }
     fn invitationDraw(self: *App, win: vaxis.Window) !void {
         self.dialog_focus.ensure(.invitation, 0);
@@ -15962,8 +16022,10 @@ const App = struct {
             try details.append(a, .{ .text = "Accept/Tentative checks Calendar before sending. A known blocker leaves the RSVP unsent; s explicitly replies without Calendar. A reviews a separate Calendar action.", .tone = .muted });
         }
         const detail_rows = try self.measureCardBlocks(measure, details.items);
-        const controls = [_][]const u8{ if (self.invitation_review.canRespond()) "[Esc Cancel]" else "[Esc Close]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]", if (personal != .none) @as([]const u8, "[A Add to calendar]") else "[A Calendar]", if (self.invitation_calendar_blocked) (if (same(self.invitation_pending_status.slice(), "tentative")) @as([]const u8, "[s Tentative without Calendar]") else "[s Accept without Calendar]") else if (self.invitationCalendarCheckNeeded()) "[C Check status]" else "[C Check Sent]" };
-        const show = [_]bool{ true, self.invitation_review.canRespond(), self.invitation_review.canRespond(), self.invitation_review.canRespond(), true, joinable and !hero_join, !browser_target and self.invitationCalendarAllowed(), self.invitation_calendar_blocked or (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded())) };
+        const controls = [_][]const u8{ if (self.invitation_review.canRespond()) "[Esc Cancel]" else "[Esc Close]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]", if (personal != .none) @as([]const u8, "[A Add to calendar]") else "[A Calendar]", if (self.invitation_calendar_blocked) (if (same(self.invitation_pending_status.slice(), "tentative")) @as([]const u8, "[s Tentative without Calendar]") else "[s Accept without Calendar]") else if (self.invitationCalendarCheckNeeded()) "[C Check status]" else "[C Check Sent]", "[r Reply by email]", if (joinable) @as([]const u8, "[g Open in Gmail]") else "[o Open in Gmail]", "[z Use suggested zone]", "[Z Type zone]" };
+        const damaged = self.invitation_review.defects != 0;
+        const zone_blocked = self.invitationZoneBlocked() and !browser_target and self.invitationCalendarAllowed();
+        const show = [_]bool{ true, self.invitation_review.canRespond(), self.invitation_review.canRespond(), self.invitation_review.canRespond(), true, joinable and !hero_join, !browser_target and self.invitationCalendarAllowed(), self.invitation_calendar_blocked or (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded())), damaged, damaged, zone_blocked, zone_blocked };
         const gap: u16 = if (measure.width < 26) 1 else 2;
         var button_rows: usize = 1;
         var button_x: usize = 0;
@@ -15997,8 +16059,8 @@ const App = struct {
         try self.drawCardBlocks(inner.child(.{ .y_off = @intCast(identity_row), .height = @intCast(pinned_rows) }), pinned.items, 0);
         self.invitation_confirm_ready = true;
         const idle = self.job.future == null;
-        const enabled = self.invitationControlMask();
-        if (enabled & (@as(u8, 1) << @intCast(self.dialog_focus.index)) == 0) self.dialog_focus.index = 0;
+        const enabled = @as(u16, self.invitationControlMask()) | (@as(u16, self.invitationRecoveryMask()) << 8);
+        if (self.dialog_focus.index >= controls.len or enabled & (@as(u16, 1) << @intCast(self.dialog_focus.index)) == 0) self.dialog_focus.index = 0;
         if (hero_join) {
             const button_x_pos = inner.width -| 8;
             try self.drawJoinCamera(inner, button_x_pos -| 3, 0);
@@ -16019,7 +16081,7 @@ const App = struct {
                 row += 1;
                 x = 0;
             }
-            x = try self.actionButton(inner, row, x, label, self.dialog_focus.index == index, idle and enabled & (@as(u8, 1) << @intCast(index)) != 0, .dialog_action, index);
+            x = try self.actionButton(inner, row, x, label, self.dialog_focus.index == index, idle and enabled & (@as(u16, 1) << @intCast(index)) != 0, .dialog_action, index);
         }
         try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Enter Activate · j/k Scroll · Esc Back", inner.width), .muted);
     }
@@ -16703,6 +16765,17 @@ const App = struct {
             .primary = truth(get(value, "primary")),
         };
     }
+    /// `n` starts today (next half hour) unless the user moved the selection
+    /// to an event (then that event's day); a range navigated away from today
+    /// starts on its first day. The automatic first selection never decides.
+    fn calendarNewEventDay(self: *App, now_ms: i64) !i64 {
+        if (self.calendar.page == .main and self.calendar.week_reveal_selected) if (self.calendarEventAt(self.calendar.selected)) |event| {
+            if (try self.calendarDay(get(event, "start"))) |day| return day;
+        };
+        const today = self.calendar.zone.localDay(now_ms) catch return self.calendar.day;
+        const first = self.calendar.week_anchor orelse self.calendar.day;
+        return if (today >= first and today < first + calendar_ui.period(self.calendar.view)) today else first;
+    }
     fn calendarComposeNew(self: *App) !void {
         if (browser_target) return error.NativeOnly;
         if (self.calendarEntries().len == 0 and ((self.job.future != null and self.job.kind == .calendar_list) or self.calendar.resume_lists)) {
@@ -16746,9 +16819,7 @@ const App = struct {
             return;
         };
         var options = try self.calendarComposeInit(entry);
-        if (self.calendar.page == .main) if (self.calendarEventAt(self.calendar.selected)) |event| {
-            if (try self.calendarDay(get(event, "start"))) |day| options.day = day;
-        };
+        options.day = try self.calendarNewEventDay(options.now_ms);
         self.calendar_form = try calendar_composer.Model.init(self.frame.allocator(), options);
         try self.calendarComposeLoadFields();
         try self.calendarComposePending();
@@ -17567,7 +17638,9 @@ const App = struct {
         var date_buffer: [10]u8 = undefined;
         var clock_buffer: [5]u8 = undefined;
         const normalized: []const u8 = switch (index) {
-            1, 3 => calendar_text.normalizeDate(&date_buffer, raw, today) catch return,
+            1 => calendar_text.normalizeDate(&date_buffer, raw, today) catch return,
+            // "+2d" in End date counts from the Start date.
+            3 => calendar_text.normalizeEndDate(&date_buffer, raw, today, timezone.dateDay(self.calendar_form_fields[1].value()) catch null) catch return,
             2 => calendar_text.normalizeClock(&clock_buffer, raw) catch return,
             else => blk: {
                 if (calendar_text.offsetMinutes(raw) catch return) |minutes| {
@@ -18141,11 +18214,28 @@ const App = struct {
             if (self.ui_preferences.calendar.scope == .account and index < self.accounts.len and !same(text(get(self.accounts[index], "address")), self.calendar.account.slice())) continue;
             self.calendar.complete = false;
         };
-        const failed = integer(get(merged, "failedSources"));
-        const stale = integer(get(merged, "staleSources"));
-        try self.calendar.notice.set(if (self.calendar.source_loading) try std.fmt.allocPrint(self.frame.allocator(), "Loading selected calendars… · {d} events", .{self.calendarEvents().len}) else if (count == 0) "No calendars selected · g Calendars · Space to select" else if (failed > 0 or stale > 0) try std.fmt.allocPrint(self.frame.allocator(), "Saved calendars · {d} calendar{s} · {d} unavailable · {d} stale · availability unknown", .{ count, if (count == 1) @as([]const u8, "") else "s", failed, stale }) else if (!self.calendar.complete) "Incomplete range · events may be missing · Ctrl+R Retry" else try self.calendarUpToDateText());
+        try self.calendar.notice.set(try self.calendarStatusText());
     }
-    /// The single up-to-date status used after loads and when returning.
+    /// The one Calendar status sentence, derived from the real load state:
+    /// loading, saved/stale results, incomplete, failed or up to date. Loads,
+    /// Back and gg all use it, so none can claim "Up to date" on its own.
+    fn calendarStatusText(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        var count: usize = 0;
+        for (self.calendarEntries()) |entry| {
+            if (self.calendarSourceVisible(entry)) count += 1;
+        }
+        if (self.calendar.source_loading) return std.fmt.allocPrint(a, "Loading selected calendars… · {d} events", .{self.calendarEvents().len});
+        if (count == 0) return "No calendars selected · g Calendars · Space to select";
+        if (!self.calendar.ready) return if (self.calendar.error_code.len > 0) "Calendar could not be loaded · Ctrl+R Retry" else "Loading calendar…";
+        const failed = integer(get(self.calendar.agenda.value, "failedSources"));
+        const stale = integer(get(self.calendar.agenda.value, "staleSources"));
+        if (failed > 0 or stale > 0) return std.fmt.allocPrint(a, "Saved calendars · {d} calendar{s} · {d} unavailable · {d} stale · availability unknown", .{ count, if (count == 1) @as([]const u8, "") else "s", failed, stale });
+        if (self.calendar.stale) return "Saved calendar · stale · availability is unknown";
+        if (!self.calendar.complete) return "Incomplete range · events may be missing · Ctrl+R Retry";
+        return self.calendarUpToDateText();
+    }
+    /// The up-to-date sentence; only calendarStatusText decides to use it.
     fn calendarUpToDateText(self: *App) ![]const u8 {
         var count: usize = 0;
         for (self.calendarEntries()) |entry| {
@@ -18227,8 +18317,17 @@ const App = struct {
         if (self.calendar.zone_name.len == 0) try self.calendar.zone_name.set("UTC");
         self.calendar.zone.deinit(self.allocator);
         self.calendar.zone = timezone.loadNamed(self.io, self.allocator, self.environ, self.calendar.zone_name.slice()) catch .{ .unavailable = true };
+        self.calendarFollowToday();
         self.calendar.single_source = false;
         try self.loadCalendarAgenda(false);
+    }
+    /// Opened at "today" before the calendar's zone was known: once it is,
+    /// today is recomputed in that zone (as headers and `t` use), once.
+    fn calendarFollowToday(self: *App) void {
+        if (!self.calendar.day_follows_today) return;
+        self.calendar.day_follows_today = false;
+        const today = self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch return;
+        self.calendar.day = if (self.calendar.view == .week) calendar_text.mondayOf(today) else today;
     }
     fn openCalendar(self: *App, from_mail: bool) !void {
         if (browser_target) {
@@ -18264,11 +18363,18 @@ const App = struct {
         try self.calendar.source_message.set(source);
         self.calendar.mail_primary_pending = from_mail;
         self.calendar.booking_copy = from_mail and (if (self.mode == .invitation) self.invitationBookingCopy() else self.reader_invitation_booking and same(self.reader_invitation_account.slice(), self.account()) and same(self.reader_invitation_message.slice(), source));
-        self.calendar.return_to_invitation = from_mail and self.mode == .invitation;
+        self.calendar.from_mail = from_mail;
+        // Leaving the RSVP drawer for Calendar pauses its single-letter
+        // answers until the user interacts with a drawer again (or presses I).
+        if (self.mode == .invitation) self.invitation_letters_armed = false;
         self.calendar.open = true;
         self.calendar.page = if (self.calendar.booking_copy) .review else if (from_mail) .calendars else .main;
         self.mode = .browse;
+        // A provisional day until the calendar's own zone is known; the
+        // default source then recomputes today in that zone (headers and t
+        // use it too), so the view opens on the calendar's Today.
         self.calendar.day = self.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch @divFloor(Io.Timestamp.now(self.io, .real).toMilliseconds(), 86400000);
+        self.calendar.day_follows_today = true;
         try self.calendarBeginDiscovery();
     }
     fn closeCalendar(self: *App) void {
@@ -18365,6 +18471,7 @@ const App = struct {
             try self.start(.calendar_plan, try self.calendarPlanRequest("calendar.invitation-plan", null));
         } else {
             self.calendar.page = .main;
+            self.calendarFollowToday();
             try self.loadCalendarAgenda(false);
         }
     }
@@ -18423,6 +18530,13 @@ const App = struct {
             if (try self.calendarNextSource()) return true;
             try self.calendarMergeSnapshots();
         }
+        // A compact Week moved by three days loads from its anchor; once the
+        // grid is wide again the week is Monday-aligned (and back on narrowing).
+        if (self.calendar.week_anchor != null and self.calendar.page == .main and self.calendar.ready and !self.calendar.source_loading and !self.calendar.dimmed) if (self.calendarWeekStart(self.vx.window().width)) |wanted| {
+            self.calendar.day = wanted;
+            try self.loadCalendarAgenda(false);
+            return true;
+        };
         return false;
     }
     fn calendarPreclaimFailure(code: []const u8) bool {
@@ -18593,14 +18707,19 @@ const App = struct {
                     if (self.calendarBookingAdd()) {
                         if (truth(get(result, "writable"))) try self.prepareCalendarReview() else try self.calendar.error_code.set("CalendarWritePermissionRequired");
                     }
+                    // A booking that can't be added (e.g. a floating time) must
+                    // not stay on "Checking appointment identity…".
+                    if (self.job.future == null) self.calendar.notice.display(try self.calendarBookingStatus(self.calendarBookingState()));
                 } else try self.calendar.notice.set("Review the proposed Calendar action · RSVP is a separate action");
+                try self.calendarRefreshZoneCandidate();
+                if (!self.calendar.booking_copy and self.calendarZoneProblem()) try self.calendar.notice.set(if (!self.calendarZoneChoosable()) "This time can't be fixed by choosing a zone · nothing was added" else if (self.calendar.assumed_zone.len > 0) "Still unresolved · choose another zone or q Back · nothing was added" else "Choose how to read this invitation's time · nothing is assumed until you press z or Z");
                 // z/Z from the Mail drawer continue here, still review-first.
                 const intent = self.calendar.zone_intent;
                 self.calendar.zone_intent = .none;
                 if (intent != .none and self.calendarZoneProblem() and self.calendar.assumed_zone.len == 0) {
                     if (intent == .typed) {
                         self.calendar.zone_entry = true;
-                        try self.calendar_zone_field.set(self.allocator, self.calendar.zone_name.slice());
+                        try self.calendar_zone_field.set(self.allocator, "");
                     } else if (self.calendarZoneCandidate().len > 0) return self.calendarAssumeZone(self.calendarZoneCandidate());
                 }
             },
@@ -18643,7 +18762,9 @@ const App = struct {
         const local = try self.zone.format(self.frame.allocator(), point.value);
         const display = if (same(formatted, local)) formatted else try std.fmt.allocPrint(self.frame.allocator(), "{s} · your local: {s}", .{ formatted, local });
         if (point.zone.len == 0 or same(point.zone, self.calendar.zone_name.slice())) return display;
-        return std.fmt.allocPrint(self.frame.allocator(), "{s} · organizer's zone: {s}", .{ display, point.zone });
+        // A zone the user chose is never presented as the organizer's.
+        const chosen = self.calendar.assumed_zone.len > 0 and same(point.zone, self.calendar.assumed_zone.slice());
+        return std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}: {s}", .{ display, if (chosen) @as([]const u8, "zone you chose") else "organizer's zone", point.zone });
     }
     fn calendarChanges(self: *App, previous: Value, source: Value, span: Value) ![]const u8 {
         const a = self.frame.allocator();
@@ -18957,14 +19078,17 @@ const App = struct {
             return std.fmt.allocPrint(a, "Already in {s} · Enter opens it in Calendar · q Back", .{self.calendar.calendar_name.slice()});
         const zone_problem = self.calendarZoneProblem();
         const candidate = self.calendarZoneCandidate();
-        const zone_block = if (zone_problem) try std.fmt.allocPrint(a, "{s}\n{s}{s}{s}z Use {s} · Z Type another zone · q Back\n", .{
+        // Before a choice the wall clock is shown exactly as written; the
+        // instant only ever comes from the backend's plan for a chosen zone.
+        const choosable = self.calendar.assume_start or self.calendar.assume_end;
+        const written = if (zone_problem and choosable) try self.calendarWrittenText() else "";
+        const zone_block = if (zone_problem) try std.fmt.allocPrint(a, "{s}\n{s}{s}{s}\n", .{
             try self.calendarZoneProblemText(),
-            if (self.calendar.assumed_zone.len > 0) try std.fmt.allocPrint(a, "Still unresolved assuming {s}: {s}\n", .{ self.calendar.assumed_zone.slice(), calendarErrorText(text(get(value, "timeError"))) }) else "",
-            if (candidate.len > 0) try std.fmt.allocPrint(a, "Assume {s}? → {s}", .{ candidate, try self.calendarZonePreview(candidate) }) else "",
-            if (candidate.len > 0) @as([]const u8, "\n") else "",
-            if (candidate.len > 0) candidate else "a zone",
+            if (self.calendar.assumed_zone.len > 0) try std.fmt.allocPrint(a, "Still unresolved reading it as {s}: {s}\n", .{ self.calendar.assumed_zone.slice(), calendarZoneErrorText(text(get(value, "timeError"))) }) else "",
+            if (candidate.len > 0 and written.len > 0) try std.fmt.allocPrint(a, "{s} as written · read as {s}?{s}\n", .{ written, candidate, try self.calendarKeptText() }) else if (written.len > 0) try std.fmt.allocPrint(a, "{s} as written{s}\n", .{ written, try self.calendarKeptText() }) else "",
+            if (candidate.len > 0) try std.fmt.allocPrint(a, "z Use {s} · Z Type another zone · q Back", .{candidate}) else if (choosable) @as([]const u8, "Z Type a zone · q Back") else "Choosing a zone can't fix this time · q Back",
         }) else "";
-        const assumed = if (!zone_problem and self.calendar.assumed_zone.len > 0) try std.fmt.allocPrint(a, "Zone assumed by you: {s}\n", .{self.calendar.assumed_zone.slice()}) else "";
+        const assumed = if (!zone_problem and self.calendar.assumed_zone.len > 0) try self.calendarZoneChoiceText() else "";
         const protocol = if (self.calendar.review_details) try std.fmt.allocPrint(a, "\n\nCalendar ID: {s}\nSource time: {s} {s}\nUID: {s}\n{s}", .{ self.calendar.calendar_id.slice(), text(get(get(source, "start"), "raw")), text(get(get(source, "start"), "zone")), text(get(source, "uid")), text(get(value, "timeError")) }) else "\n\nv Details shows Calendar ID, source time and UID";
         return std.fmt.allocPrint(a, "Action: {s}\n{s}\n{s}{s}\nEvent: {s}\nStart: {s}\nEnd{s}: {s}\nCalendar: {s}{s}\nAccount: {s}{s}\nOrganizer: {s}\nAttendee: {s}\n{s}\n{s}{s}{s}", .{
             if (zone_problem) @as([]const u8, "Choose a time zone before adding") else if (self.calendarBookingAdd()) (if (self.calendarPublishedCopy()) @as([]const u8, "Add calendar event") else "Add booked appointment") else calendar_ui.actionLabel(action),
@@ -18986,6 +19110,10 @@ const App = struct {
             booking_details,
             protocol,
         });
+    }
+    /// Time-zone problems in words; anything else uses calendarErrorText.
+    fn calendarZoneErrorText(code: []const u8) []const u8 {
+        return calendar_text.zoneErrorText(code) orelse calendarErrorText(code);
     }
     /// Calendar sentences for backend error names; the stable code stays in Help.
     fn calendarErrorText(code: []const u8) []const u8 {
@@ -19029,10 +19157,14 @@ const App = struct {
         try request.object.put(a, "messageId", .{ .string = try a.dupe(u8, self.calendar.source_message.slice()) });
         if (operation_id) |id| try request.object.put(a, "operationId", .{ .string = try a.dupe(u8, id) });
         if (self.calendar.assumed_zone.len > 0) {
+            // Only the unresolved or floating endpoints take the chosen zone;
+            // a valid endpoint zone is never overridden. Replacing a named
+            // TZID is an explicit reinterpretation the user chose with z/Z.
             const zone = try a.dupe(u8, self.calendar.assumed_zone.slice());
-            try request.object.put(a, "startTimeZone", .{ .string = zone });
-            try request.object.put(a, "endTimeZone", .{ .string = zone });
+            if (self.calendar.assume_start) try request.object.put(a, "startTimeZone", .{ .string = zone });
+            if (self.calendar.assume_end) try request.object.put(a, "endTimeZone", .{ .string = zone });
             if (self.calendar.assumed_floating) try request.object.put(a, "acceptFloatingTime", .{ .bool = true });
+            if (self.calendar.assume_reinterpret) try request.object.put(a, "reinterpretEmbeddedTimezones", .{ .bool = true });
         }
         return request;
     }
@@ -19043,65 +19175,135 @@ const App = struct {
         if (value == .null or self.calendar.confirmed_review or self.calendar.outcome.len > 0 or self.calendar.unknown) return false;
         return get(value, "resolved") == .null and (text(get(value, "timeError")).len > 0 or same(text(get(value, "decision")), "time_review_required"));
     }
-    /// The zone `z` would assume: the planner's suggestion, else the
-    /// destination calendar's own zone.
+    /// The zone `z` offers, computed when the plan arrived.
     fn calendarZoneCandidate(self: *const App) []const u8 {
-        const suggestion = text(get(self.calendar.review.value, "timeZoneSuggestion"));
-        return if (suggestion.len > 0) suggestion else self.calendar.zone_name.slice();
+        return self.calendar.zone_candidate.slice();
     }
-    /// Wall-clock preview of the source times in `zone_name`, shown in the
-    /// destination calendar's zone. Display only; the plan stays authoritative.
-    fn calendarZonePreview(self: *App, zone_name: []const u8) ![]const u8 {
+    /// A zone problem that choosing a zone can fix (an endpoint without a
+    /// usable zone); DST gaps/folds in a valid zone cannot be chosen away.
+    fn calendarZoneChoosable(self: *const App) bool {
+        return self.calendarZoneProblem() and (self.calendar.assume_start or self.calendar.assume_end);
+    }
+    fn calendarZoneLoadable(self: *App, name: []const u8) bool {
+        if (same(name, "UTC")) return true;
+        var zone = timezone.loadNamed(self.io, self.allocator, self.environ, name) catch return false;
+        zone.deinit(self.allocator);
+        return true;
+    }
+    /// Endpoints a chosen zone must bind: floating ones and zoned ones whose
+    /// TZID cannot be verified here. A loadable end zone keeps its own rules.
+    const ZoneNeeds = struct { start: bool = false, end: bool = false, floating: bool = false, named: bool = false };
+    fn calendarZoneNeeds(self: *App) ZoneNeeds {
+        const source = get(self.calendar.review.value, "invitation");
+        const begins = get(source, "start");
+        const ends = get(source, "end");
+        const embedded = truth(get(source, "has_timezones"));
+        const start_kind = text(get(begins, "kind"));
+        const start_zone = text(get(begins, "zone"));
+        const end_kind = text(get(ends, "kind"));
+        const end_zone = text(get(ends, "zone"));
+        var needs: ZoneNeeds = .{};
+        needs.start = same(start_kind, "floating") or (same(start_kind, "zoned") and (embedded or !self.calendarZoneLoadable(start_zone)));
+        needs.end = ends != .null and (same(end_kind, "floating") or (same(end_kind, "zoned") and (!self.calendarZoneLoadable(end_zone) or (embedded and needs.start and same(end_zone, start_zone)))));
+        needs.floating = (needs.start and same(start_kind, "floating")) or (needs.end and same(end_kind, "floating"));
+        needs.named = (needs.start and same(start_kind, "zoned")) or (needs.end and same(end_kind, "zoned"));
+        return needs;
+    }
+    /// A zone the backend can resolve: it loads and the written wall times it
+    /// would bind are neither skipped nor repeated by daylight saving there.
+    fn calendarZoneResolves(self: *App, name: []const u8, needs: ZoneNeeds) bool {
+        var zone = if (same(name, "UTC")) timezone.Zone{} else timezone.loadNamed(self.io, self.allocator, self.environ, name) catch return false;
+        defer zone.deinit(self.allocator);
+        const source = get(self.calendar.review.value, "invitation");
+        for ([_][]const u8{ "start", "end" }, [_]bool{ needs.start, needs.end }) |field, needed| {
+            if (!needed) continue;
+            const civil = icsCivil(text(get(get(source, field), "raw"))) orelse return false;
+            const candidates = zone.localCandidates(civil) catch return false;
+            if (candidates.count != 1) return false;
+        }
+        return true;
+    }
+    /// After each plan: keep its first zone suggestion for this review and
+    /// pick the zone `z` offers (suggestion first, then the destination
+    /// calendar's zone), skipping one already tried and anything unresolvable.
+    fn calendarRefreshZoneCandidate(self: *App) !void {
+        const suggestion = text(get(self.calendar.review.value, "timeZoneSuggestion"));
+        if (self.calendar.zone_suggestion.len == 0 and suggestion.len > 0) try self.calendar.zone_suggestion.set(suggestion[0..@min(suggestion.len, 512)]);
+        self.calendar.zone_candidate = .{};
+        if (!self.calendarZoneProblem()) return;
+        const needs = self.calendarZoneNeeds();
+        self.calendar.assume_start = needs.start;
+        self.calendar.assume_end = needs.end;
+        self.calendar.assumed_floating = needs.floating;
+        self.calendar.assume_reinterpret = needs.named;
+        if (!needs.start and !needs.end) return;
+        for ([_][]const u8{ self.calendar.zone_suggestion.slice(), self.calendar.zone_name.slice() }) |name| {
+            if (name.len == 0 or same(name, self.calendar.assumed_zone.slice())) continue;
+            if (!self.calendarZoneResolves(name, needs)) continue;
+            try self.calendar.zone_candidate.set(name);
+            return;
+        }
+    }
+    /// The source wall clock exactly as written, for the endpoints a chosen
+    /// zone would bind ("2026-10-25 09:00–10:00"); never a converted time.
+    fn calendarWrittenText(self: *App) ![]const u8 {
         const a = self.frame.allocator();
         const source = get(self.calendar.review.value, "invitation");
-        var zone = if (same(zone_name, "UTC")) timezone.Zone{} else timezone.loadNamed(self.io, a, self.environ, zone_name) catch return "";
-        defer zone.deinit(a);
-        var instants: [2]?i64 = .{ null, null };
-        for ([_][]const u8{ "start", "end" }, 0..) |field, index| {
-            const raw = text(get(get(source, field), "raw"));
-            if (raw.len < 15 or raw[8] != 'T') continue;
-            const civil: timezone.CivilTime = .{
-                .year = std.fmt.parseInt(u16, raw[0..4], 10) catch continue,
-                .month = std.fmt.parseInt(u8, raw[4..6], 10) catch continue,
-                .day = std.fmt.parseInt(u8, raw[6..8], 10) catch continue,
-                .hour = std.fmt.parseInt(u8, raw[9..11], 10) catch continue,
-                .minute = std.fmt.parseInt(u8, raw[11..13], 10) catch continue,
-                .second = std.fmt.parseInt(u8, raw[13..15], 10) catch continue,
-            };
-            const candidates = zone.localCandidates(civil) catch continue;
-            if (candidates.count > 0) instants[index] = candidates.values[0].milliseconds;
-        }
-        const first = instants[0] orelse return "";
-        const start_text = try self.calendar.zone.format(a, first);
-        const last = instants[1] orelse return start_text;
-        const end_text = try self.calendar.zone.format(a, last);
-        return if (start_text.len >= 16 and end_text.len >= 16 and same(start_text[0..10], end_text[0..10])) std.fmt.allocPrint(a, "{s}–{s}", .{ start_text[0..16], end_text[11..] }) else std.fmt.allocPrint(a, "{s} – {s}", .{ start_text, end_text });
+        const first = icsClock(a, text(get(get(source, "start"), "raw"))) orelse return "";
+        const last = icsClock(a, text(get(get(source, "end"), "raw"))) orelse return first;
+        if (!self.calendar.assume_end) return std.fmt.allocPrint(a, "start {s}", .{first});
+        if (!self.calendar.assume_start) return std.fmt.allocPrint(a, "end {s}", .{last});
+        if (same(first[0..10], last[0..10])) return std.fmt.allocPrint(a, "{s}–{s}", .{ first, last[11..] });
+        return std.fmt.allocPrint(a, "{s} – {s}", .{ first, last });
+    }
+    /// The endpoint that keeps its own valid zone, as sent.
+    fn calendarKeptText(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        const source = get(self.calendar.review.value, "invitation");
+        if (self.calendar.assume_start == self.calendar.assume_end) return "";
+        const kept = get(source, if (self.calendar.assume_start) "end" else "start");
+        const clock = icsClock(a, text(get(kept, "raw"))) orelse return "";
+        return std.fmt.allocPrint(a, " · its {s} stays {s} {s}", .{ if (self.calendar.assume_start) @as([]const u8, "end") else "start", clock, text(get(kept, "zone")) });
     }
     /// The time problem in words, from the source stamp and plan error.
     fn calendarZoneProblemText(self: *App) ![]const u8 {
         const source = get(self.calendar.review.value, "invitation");
-        const begins = get(source, "start");
+        const begins = if (self.calendar.assume_start or !self.calendar.assume_end) get(source, "start") else get(source, "end");
         const kind = text(get(begins, "kind"));
-        if (same(kind, "floating")) return std.fmt.allocPrint(self.frame.allocator(), "This invitation gives no time zone (floating time {s}).", .{text(get(begins, "raw"))});
+        if (same(kind, "floating")) return "This invitation gives no time zone (floating time).";
         if (same(kind, "zoned") and text(get(begins, "zone")).len > 0) return std.fmt.allocPrint(self.frame.allocator(), "This invitation's time zone \"{s}\" isn't one Omagma can verify.", .{text(get(begins, "zone"))});
         const code = text(get(self.calendar.review.value, "timeError"));
-        return calendar_text.errorText(code) orelse "This invitation's time needs a time zone before it can be added.";
+        return calendar_text.zoneErrorText(code) orelse calendar_text.errorText(code) orelse "This invitation's time needs a time zone before it can be added.";
+    }
+    /// After a chosen zone resolved the plan: say what was chosen, in words.
+    fn calendarZoneChoiceText(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        const source = get(self.calendar.review.value, "invitation");
+        const bound = if (self.calendar.assume_start or !self.calendar.assume_end) get(source, "start") else get(source, "end");
+        const written = try self.calendarWrittenText();
+        const as_written = if (written.len > 0) try std.fmt.allocPrint(a, " ({s} as written)", .{written}) else "";
+        if (self.calendar.assume_reinterpret and text(get(bound, "zone")).len > 0) return std.fmt.allocPrint(a, "The invitation names \"{s}\". You chose to read its times{s} as {s}.\n", .{ text(get(bound, "zone")), as_written, self.calendar.assumed_zone.slice() });
+        return std.fmt.allocPrint(a, "The invitation gives no time zone. You chose to read its times{s} as {s}.\n", .{ as_written, self.calendar.assumed_zone.slice() });
     }
     /// z/Z: re-plan with an explicitly assumed zone. Nothing is written; the
     /// usual review and confirmation follow.
     fn calendarAssumeZone(self: *App, zone_name: []const u8) !void {
         if (self.job.future != null or self.calendar.source_message.len == 0) return;
         const name = std.mem.trim(u8, zone_name, " \t");
-        if (!same(name, "UTC")) {
-            var probe = timezone.loadNamed(self.io, self.allocator, self.environ, name) catch {
-                try self.calendar.notice.set("Unknown time zone · use an IANA name such as Europe/Vienna");
-                self.say(true, "Unknown time zone · use an IANA name such as Europe/Vienna", .{});
-                return;
-            };
-            probe.deinit(self.allocator);
+        if (name.len == 0) {
+            try self.calendar.notice.set("Type a time zone such as Europe/Vienna · Esc Cancel");
+            return;
+        }
+        if (name.len > 512 or !self.calendarZoneLoadable(name)) {
+            try self.calendar.notice.set("Unknown time zone · use an IANA name such as Europe/Vienna");
+            self.say(true, "Unknown time zone · use an IANA name such as Europe/Vienna", .{});
+            return;
+        }
+        if (!self.calendar.assume_start and !self.calendar.assume_end) {
+            try self.calendar.notice.set("Choosing a zone can't fix this time · nothing was assumed");
+            return;
         }
         try self.calendar.assumed_zone.set(name);
-        self.calendar.assumed_floating = same(text(get(get(get(self.calendar.review.value, "invitation"), "start"), "kind")), "floating") or same(text(get(get(get(self.calendar.review.value, "invitation"), "end"), "kind")), "floating");
         self.calendar.zone_entry = false;
         self.calendar.confirmed_review = false;
         self.calendar.review_ready = false;
@@ -19109,9 +19311,10 @@ const App = struct {
         self.calendar.operation = .{};
         self.calendar.outcome = .{};
         self.calendar.scroll = 0;
+        self.calendar.focus = null;
         self.calendar.error_code = .{};
         try self.start(.calendar_plan, try self.calendarPlanRequest("calendar.invitation-plan", null));
-        try self.calendar.notice.set(try std.fmt.allocPrint(self.frame.allocator(), "Checking times assuming {s}…", .{name}));
+        try self.calendar.notice.set(try std.fmt.allocPrint(self.frame.allocator(), "Checking times read as {s}…", .{name}));
     }
     /// "Already in <calendar>": open that exact event in the main view.
     fn calendarOpenExisting(self: *App) !void {
@@ -19121,7 +19324,7 @@ const App = struct {
         const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), begins, .{ .ignore_unknown_fields = true });
         try self.calendar.select_event.set(text(get(event, "id")));
         self.calendar.source_message = .{};
-        self.calendar.return_to_invitation = false;
+        self.calendar.from_mail = false;
         self.calendar.booking_copy = false;
         self.calendar.single_source = true;
         self.calendar.view = .agenda;
@@ -19273,14 +19476,20 @@ const App = struct {
             self.calendar.zone_entry = false;
             return;
         }
+        // Back from an invitation review returns to the Mail reader, never
+        // into the RSVP drawer: there a single a/t/d would send mail, and `d`
+        // also means Day inside Calendar. I reopens the drawer explicitly.
         if (self.calendar.source_message.len > 0 and (self.calendar.page == .review or self.calendar.page == .permissions) and !self.calendar.picker_chosen) {
-            const drawer = self.calendar.return_to_invitation;
+            const reviewed = self.calendar.from_mail;
+            const closing: []const u8 = if (self.calendar.unknown) "Calendar outcome unknown · A checks it again without adding twice" else if (same(self.calendar.outcome.slice(), "rejected")) "Calendar action not applied · nothing was added" else "Calendar review closed · nothing was added · I reviews the RSVP";
             self.closeCalendar();
-            if (drawer and !self.calendar.open) {
-                self.mode = .invitation;
-                self.dialog_focus.reset(.invitation, 0);
-                self.say(false, "Calendar review closed · nothing was added", .{});
-            }
+            if (reviewed and !self.calendar.open) self.say(self.calendar.unknown, "{s}", .{closing});
+            return;
+        }
+        // After a completed or refused Mail Calendar action, Back returns to
+        // the mail where A was pressed rather than to an unloaded Calendar.
+        if (self.calendar.from_mail and self.calendar.source_message.len == 0 and (self.calendar.page == .review or self.calendar.page == .permissions)) {
+            self.closeCalendar();
             return;
         }
         if (self.calendar.source_message.len > 0 and (self.calendar.page == .review or self.calendar.page == .permissions)) {
@@ -19298,7 +19507,7 @@ const App = struct {
             self.calendar.page = .main;
             self.calendar.scroll = 0;
             self.calendar.focus = null;
-            self.calendar.notice.set(if (self.calendar.stale) "Saved calendar · stale · availability is unknown" else if (!self.calendar.complete) "Incomplete range · events may be missing · Ctrl+R Retry" else self.calendarUpToDateText() catch "Up to date") catch {};
+            self.calendar.notice.set(self.calendarStatusText() catch "") catch {};
         }
     }
     fn calendarLoadCardZone(self: *App) !void {
@@ -19544,16 +19753,20 @@ const App = struct {
                 const anchor = if (self.calendar.week_reveal_selected and selected_day != null) selected_day.? else if (today_in_range) today else selected_day orelse self.calendar.day;
                 self.calendar.view = @fromBackingInt(@intCast(index - 1));
                 self.calendar.day = if (self.calendar.view == .week) calendar_text.mondayOf(anchor) else anchor;
+                self.calendar.week_anchor = null;
+                self.calendar.day_follows_today = false;
                 if ((!self.calendar.week_reveal_selected or selected_day == null) and anchor != today) self.calendar.select_day = anchor;
                 try self.loadCalendarAgenda(false);
             },
             4, 5 => {
-                self.calendar.day += calendar_ui.visiblePeriod(self.calendar.view, self.vx.window().width) * @as(i64, if (index == 4) -1 else 1);
+                try self.calendarStepPeriod(if (index == 4) -1 else 1, self.vx.window().width);
                 try self.loadCalendarAgenda(false);
             },
             6 => {
                 const today = try self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds());
                 self.calendar.day = if (self.calendar.view == .week) calendar_text.mondayOf(today) else today;
+                self.calendar.week_anchor = null;
+                self.calendar.day_follows_today = false;
                 try self.loadCalendarAgenda(false);
             },
             7 => {
@@ -19597,7 +19810,8 @@ const App = struct {
                 }
                 if (self.calendar.page == .review) {
                     if (self.calendar.confirmed_review or self.calendar.unknown) return self.applyCalendarReview();
-                    if (self.calendarZoneProblem()) return self.calendarAssumeZone(self.calendarZoneCandidate());
+                    // Only the focused/clicked [z Use …] button assumes a zone.
+                    if (self.calendarZoneProblem()) return if (self.calendarZoneCandidate().len > 0) self.calendarAssumeZone(self.calendarZoneCandidate()) else {};
                     if (same(text(get(self.calendar.review.value, "decision")), "existing") and self.calendar.outcome.len == 0) return self.calendarOpenExisting();
                     return self.prepareCalendarReview();
                 }
@@ -19618,6 +19832,12 @@ const App = struct {
                 self.calendar.pending_card = true;
                 self.preemptReadOnly();
                 _ = try self.dispatchCalendarPending();
+            },
+            26 => if (self.calendar.page == .review and self.calendarZoneChoosable() and self.job.future == null) {
+                // [Z Type zone]: an empty field; the candidate is only a hint.
+                self.calendar.zone_entry = true;
+                try self.calendar_zone_field.set(self.allocator, "");
+                try self.calendar.notice.set("Type an IANA time zone to read the invitation's times in · Enter Use · Esc Cancel");
             },
             13 => try self.calendarJoin(),
             14 => try self.calendarBrowser(false),
@@ -19645,6 +19865,27 @@ const App = struct {
             },
             else => {},
         }
+    }
+    /// h/l: the next or previous period. Compact Week moves its three visible
+    /// days from an anchor; a wide Week stays Monday-aligned.
+    fn calendarStepPeriod(self: *App, direction: i64, width: u16) !void {
+        self.calendar.day_follows_today = false;
+        if (self.calendar.view == .week and calendar_ui.visiblePeriod(.week, width) == 3) {
+            const anchor = (try self.calendarFirstDay(width)) + 3 * direction;
+            self.calendar.week_anchor = anchor;
+            self.calendar.day = anchor;
+        } else if (self.calendar.view == .week) {
+            self.calendar.day = calendar_text.mondayOf(self.calendar.week_anchor orelse self.calendar.day) + 7 * direction;
+            self.calendar.week_anchor = null;
+        } else self.calendar.day += calendar_ui.period(self.calendar.view) * direction;
+    }
+    /// The window start a Week at `width` should load: the compact anchor,
+    /// or the Monday of its week once the grid is wide. Null: keep the day.
+    fn calendarWeekStart(self: *const App, width: u16) ?i64 {
+        if (self.calendar.view != .week) return null;
+        const anchor = self.calendar.week_anchor orelse return null;
+        const wanted = if (calendar_ui.visiblePeriod(.week, width) == 3) anchor else calendar_text.mondayOf(anchor);
+        return if (wanted == self.calendar.day) null else wanted;
     }
     fn calendarControls(self: *const App) usize {
         if (self.calendar.page == .actions) return 19;
@@ -19703,6 +19944,8 @@ const App = struct {
                     return;
                 };
                 self.calendar.day = if (self.calendar.view == .week) calendar_text.mondayOf(day) else day;
+                self.calendar.week_anchor = null;
+                self.calendar.day_follows_today = false;
                 self.calendar.entering_date = false;
                 self.calendar.select_day = day;
                 try self.loadCalendarAgenda(false);
@@ -19769,7 +20012,7 @@ const App = struct {
             self.calendar.top = 0;
             self.calendar.week_reveal_selected = true;
             self.calendar_week_reveal_bucket = null;
-            try self.calendar.notice.set(try self.calendarUpToDateText());
+            try self.calendar.notice.set(try self.calendarStatusText());
             return;
         }
         if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) {
@@ -19803,6 +20046,15 @@ const App = struct {
                 self.calendar.focus = if (self.calendar.focus != null) controls[(current + if (back) controls.len - 1 else 1) % controls.len] else if (back) controls[controls.len - 1] else controls[0];
                 return;
             }
+            if (self.calendar.page == .review and self.calendarZoneProblem()) {
+                const controls: []const usize = if (self.calendarZoneCandidate().len > 0) &.{ 0, 1, 26 } else if (self.calendarZoneChoosable()) &.{ 0, 26 } else &.{0};
+                var current: usize = 0;
+                for (controls, 0..) |value, i| if (self.calendar.focus == value) {
+                    current = i;
+                };
+                self.calendar.focus = if (self.calendar.focus != null) controls[(current + if (back) controls.len - 1 else 1) % controls.len] else if (back) controls[controls.len - 1] else controls[0];
+                return;
+            }
             const count = self.calendarControls();
             self.calendar.focus = if (self.calendar.focus) |at| (at + if (back) count - 1 else 1) % count else if (back) count - 1 else 0;
             return;
@@ -19817,6 +20069,12 @@ const App = struct {
             }
             if (self.calendar.page == .review and self.calendar.confirmed_review and !self.calendar.unknown and self.calendar.focus == null) {
                 self.say(false, "Press y to confirm (or Tab to Confirm, then Enter)", .{});
+                return;
+            }
+            // A bare Enter never picks a zone: z/Z or a focused button does.
+            if (self.calendar.page == .review and self.calendar.focus == null and self.calendarZoneProblem()) {
+                const candidate = self.calendarZoneCandidate();
+                if (candidate.len > 0) self.calendar.notice.display(try std.fmt.allocPrint(self.frame.allocator(), "Nothing assumed · z reads the times as {s} · Z types a zone · Tab chooses a button", .{candidate})) else try self.calendar.notice.set(if (self.calendarZoneChoosable()) "Nothing assumed · Z types a zone · q Back" else "Choosing a zone can't fix this time · nothing was added · q Back");
                 return;
             }
             const at = self.calendar.focus orelse 10;
@@ -19838,12 +20096,12 @@ const App = struct {
             return;
         }
         if (self.calendar.page == .review and !self.calendar.booking_copy and self.job.future == null) {
-            if (key.matches('z', .{}) and self.calendarZoneProblem()) return self.calendarAssumeZone(self.calendarZoneCandidate());
-            if ((key.matches('Z', .{}) or key.matches('z', .{ .shift = true })) and self.calendarZoneProblem()) {
-                self.calendar.zone_entry = true;
-                try self.calendar_zone_field.set(self.allocator, self.calendar.zone_name.slice());
+            if (key.matches('z', .{}) and self.calendarZoneProblem()) {
+                if (self.calendarZoneCandidate().len > 0) return self.calendarAssumeZone(self.calendarZoneCandidate());
+                try self.calendar.notice.set("No zone to suggest · Z types one");
                 return;
             }
+            if ((key.matches('Z', .{}) or key.matches('z', .{ .shift = true })) and self.calendarZoneChoosable()) return self.calendarActivate(26);
             if (key.matches('v', .{}) and self.calendar.review.value != .null) {
                 self.calendar.review_details = !self.calendar.review_details;
                 return;
@@ -19867,7 +20125,7 @@ const App = struct {
             return;
         }
         if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
-            if (self.calendar.page == .main and self.calendar.selected + 1 >= self.calendarEventCount()) try self.calendar.notice.set("Last event in this range · l Next period");
+            if (self.calendar.page == .main and self.calendarEventCount() == 0) try self.calendar.notice.set("No events in this range · l Next period") else if (self.calendar.page == .main and self.calendar.selected + 1 >= self.calendarEventCount()) try self.calendar.notice.set("Last event in this range · l Next period");
             if (self.calendar.page == .calendars) self.calendar.picker = if (self.calendar.picker >= self.calendarEntries().len) 0 else @min(self.calendar.picker +| 1, self.calendarEntries().len -| 1) else if (self.calendar.page == .actions) self.calendar.focus = @min((self.calendar.focus orelse 0) +| 1, 18) else {
                 self.calendar.selected = @min(self.calendar.selected +| 1, self.calendarEventCount() -| 1);
                 self.calendar.week_reveal_selected = true;
@@ -20125,13 +20383,23 @@ const App = struct {
         return try std.fmt.allocPrint(a, "Incomplete: {s} returned only part of {s} — events may be missing · Ctrl+R Retry", .{ if (partial_count == 0) @as([]const u8, "Calendar") else if (partial_count > 2) try std.fmt.allocPrint(a, "{d} calendars", .{partial_count}) else partial.items, range });
     }
     /// Edit is offered only where Calendar could accept it: a readable,
-    /// writable source and a real (not locked or placeholder) event.
+    /// writable source and a real (not locked or placeholder) event that this
+    /// calendar organizes. A meeting organized by someone else is an attendee
+    /// copy, which the editor refuses (calendar_event.editReason).
     fn calendarEventEditable(self: *const App, event: Value) bool {
-        if (calendarPlaceholder(event) or truth(get(event, "locked")) or truth(get(event, "private_copy"))) return false;
+        if (calendarPlaceholder(event) or truth(get(event, "locked")) or truth(get(event, "private_copy")) or truth(get(event, "cancelled"))) return false;
+        const event_type = text(get(event, "event_type"));
+        if (event_type.len > 0 and !same(event_type, "default")) return false;
         const target = calendar_sources.jsonTarget(event) catch return false;
+        const organizer = text(get(event, "organizer"));
         for (self.calendarEntries()) |entry| {
-            const source = calendar_sources.jsonTarget(get(entry, "calendar")) catch continue;
-            if (source.eql(target)) return truth(get(entry, "canWrite"));
+            const calendar = get(entry, "calendar");
+            const source = calendar_sources.jsonTarget(calendar) catch continue;
+            if (!source.eql(target)) continue;
+            // Organizer evidence: this calendar's own ID, or the account for
+            // its primary calendar (which Google may address as "primary").
+            const own = organizer.len > 0 and (std.ascii.eqlIgnoreCase(organizer, target.calendar_id) or (truth(get(calendar, "primary")) and std.ascii.eqlIgnoreCase(organizer, target.account)));
+            return own and truth(get(entry, "canWrite"));
         }
         return false;
     }
@@ -20846,16 +21114,17 @@ const App = struct {
             if (self.calendar.scroll + content.height < lines) try self.line(body, body.height - 2, try std.fmt.allocPrint(a, "↓ {d} more lines · j or Ctrl+D to read", .{lines - self.calendar.scroll - content.height}), .warning);
             if (self.calendar.page == .review and self.calendar.confirmed_review and content.height > 0 and self.calendar.scroll + content.height >= lines) self.calendar.review_ready = true;
             var x = try self.actionButton(body, body.height - 1, 0, "[q Back]", self.calendar.focus == 0, self.foregroundWorkerAvailable(), .dialog_action, 0);
-            const label: []const u8 = if (self.calendar.page == .review) (if (self.calendar.unknown) "[r Check Calendar]" else if (self.calendar.outcome.len > 0) "" else if (self.calendar.confirmed_review) (if (self.calendarBookingAdd()) @as([]const u8, "[y Add appointment]") else "[y Confirm]") else if (self.calendar.review.value == .null) (if (self.job.future != null) @as([]const u8, "") else "[Enter Try again]") else if (self.calendarZoneProblem()) try std.fmt.allocPrint(a, "[z Use {s}]", .{self.calendarZoneCandidate()}) else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "[Enter Open in Calendar]" else "[Enter Review]") else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "[o Join]") else "") else if (self.calendar.page == .permissions) "[Enter Copy]" else "";
+            const label: []const u8 = if (self.calendar.page == .review) (if (self.calendar.unknown) "[r Check Calendar]" else if (self.calendar.outcome.len > 0) "" else if (self.calendar.confirmed_review) (if (self.calendarBookingAdd()) @as([]const u8, "[y Add appointment]") else "[y Confirm]") else if (self.calendar.review.value == .null) (if (self.job.future != null) @as([]const u8, "") else "[Enter Try again]") else if (self.calendarZoneProblem()) (if (self.calendarZoneCandidate().len > 0) try std.fmt.allocPrint(a, "[z Use {s}]", .{self.calendarZoneCandidate()}) else "") else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "[Enter Open in Calendar]" else "[Enter Review]") else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "[o Join]") else "") else if (self.calendar.page == .permissions) "[Enter Copy]" else "";
             const enabled = self.foregroundWorkerAvailable() and if (self.calendar.page == .review) (self.calendar.unknown or (self.calendar.source_message.len > 0 and (!self.calendar.confirmed_review or self.calendar.review_ready))) else if (self.calendar.page == .detail) std.mem.startsWith(u8, text(get(self.calendar.card.value, "join_url")), "https://") else self.calendar.page == .permissions;
             if (label.len > 0) x = try self.actionButton(body, body.height - 1, x, label, self.calendar.focus == 1, enabled, .dialog_action, 10);
+            if (self.calendar.page == .review and self.calendarZoneChoosable()) x = try self.actionButton(body, body.height - 1, x, "[Z Type zone]", self.calendar.focus == 26, enabled, .dialog_action, 26);
         }
         if (self.calendar.page == .calendars and self.calendar.primary_issue.len > 0 and self.calendar.primary_reason_rows > 0 and self.calendar.primary_reason_lines > self.calendar.primary_reason_rows) {
             const hint = if (win.width < 76) "j/k calendar  Ctrl+D/U reason\nEnter Select  Tab controls  q/Esc Back" else "j/k calendar  Ctrl+D/U reason  Enter Select  Tab controls  q/Esc Back";
             _ = try self.flowTone(win.child(.{ .y_off = win.height - 2, .height = 2 }), hint, 0, 0, .muted);
             return;
         }
-        if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Go to date", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Find in loaded events", &self.calendar_query, true, .selected) else if (self.calendar.zone_entry) try self.editLine(win, win.height - 2, "Assume time zone (IANA, Enter Use, Esc Cancel)", &self.calendar_zone_field, true, .selected) else try self.line(win, win.height - 2, try self.fitLine(win, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) (if (self.calendarBookingAdd()) "j More · Add appointment unlocks at end · q Back" else "j More · Confirm unlocks at end · q Back") else if (self.calendarBookingAdd()) "y Add appointment · Tab Controls · q Back" else "y Confirm · Tab Controls · q Back") else if (self.calendar.review.value == .null) "Enter Try again · g Other calendar · q Back" else if (self.calendarZoneProblem()) "z Use suggested zone · Z Type another zone · v Details · g Other calendar · q Back" else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "Enter Open in Calendar · q Back" else "j/k Scroll · Enter Review action · v Details · g Other calendar · Tab Controls · q Back") else if (self.calendar.page == .overlaps) "j/k Event · Enter Select · Tab Controls · Esc Back" else if (self.calendar.page == .detail) try self.calendarDetailHint() else if (self.calendar.page == .calendars) (if (self.calendar.source_message.len > 0) @as([]const u8, "j/k Calendar · Enter Select · Tab Controls · q Back") else "Space Toggle · Enter Apply · Esc/q Cancel · Tab Controls") else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · g Calendars · ? Help · q Mail", win.width), .muted);
+        if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Go to date", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Find in loaded events", &self.calendar_query, true, .selected) else if (self.calendar.zone_entry) try self.editLine(win, win.height - 2, try std.fmt.allocPrint(a, "Zone, e.g. {s}", .{if (self.calendarZoneCandidate().len > 0) self.calendarZoneCandidate() else "Europe/Vienna"}), &self.calendar_zone_field, true, .selected) else try self.line(win, win.height - 2, try self.fitLine(win, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) (if (self.calendarBookingAdd()) "j More · Add appointment unlocks at end · q Back" else "j More · Confirm unlocks at end · q Back") else if (self.calendarBookingAdd()) "y Add appointment · Tab Controls · q Back" else "y Confirm · Tab Controls · q Back") else if (self.calendar.review.value == .null) "Enter Try again · g Other calendar · q Back" else if (self.calendarZoneProblem()) (if (self.calendarZoneCandidate().len > 0) @as([]const u8, "z Use suggested zone · Z Type zone · Tab Controls · v Details · g Other calendar · q Back") else if (self.calendarZoneChoosable()) "Z Type zone · Tab Controls · v Details · g Other calendar · q Back" else "v Details · g Other calendar · q Back") else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "Enter Open in Calendar · q Back" else "j/k Scroll · Enter Review action · v Details · g Other calendar · Tab Controls · q Back") else if (self.calendar.page == .overlaps) "j/k Event · Enter Select · Tab Controls · Esc Back" else if (self.calendar.page == .detail) try self.calendarDetailHint() else if (self.calendar.page == .calendars) (if (self.calendar.source_message.len > 0) @as([]const u8, "j/k Calendar · Enter Select · Tab Controls · q Back") else "Space Toggle · Enter Apply · Esc/q Cancel · Tab Controls") else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · g Calendars · ? Help · q Mail", win.width), .muted);
         // Stable codes stay in Help; the status line uses words.
         const calendar_diagnostic = if (self.calendar.page == .permissions or self.calendar.error_code.len == 0) @as([]const u8, "") else calendarErrorText(self.calendar.error_code.slice());
         const repeated = calendar_diagnostic.len > 0 and std.mem.indexOf(u8, self.calendar.notice.slice(), calendar_diagnostic) != null;
@@ -21487,6 +21756,7 @@ test "invitation UX: Calendar blockers keep RSVP unsent and require a distinct o
     try app.invitation_review.summary.set("Planning meeting");
     try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"request\",\"canReply\":true,\"startDisplay\":\"2026-10-26 12:30 CET\"}"));
     app.mode = .invitation;
+    app.invitation_letters_armed = true; // opened with I on this message
     var screen = try vaxis.Screen.init(a, .{ .cols = 110, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(a);
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 110, .height = 40, .screen = &screen };
@@ -34733,7 +35003,7 @@ test "calendar import: reviewed published plan uses event wording, inclusive dat
 }
 
 fn calendarUxTestEvent(a: Allocator, id: []const u8, calendar_id: []const u8, summary: []const u8, start_ms: i64, end_ms: i64) !Value {
-    return @import("json.zig").value(a, .{ .target = .{ .account = "personal@example.test", .calendar_id = calendar_id }, .id = id, .etag = "\"fixture\"", .summary = summary, .start = .{ .kind = "instant", .value = start_ms }, .end = .{ .kind = "instant", .value = end_ms } });
+    return @import("json.zig").value(a, .{ .target = .{ .account = "personal@example.test", .calendar_id = calendar_id }, .id = id, .etag = "\"fixture\"", .organizer = calendar_id, .summary = summary, .start = .{ .kind = "instant", .value = start_ms }, .end = .{ .kind = "instant", .value = end_ms } });
 }
 
 fn calendarUxTestCatalogue(app: *App) !void {
@@ -34830,6 +35100,29 @@ test "calendar UI: incomplete and failed windows keep a warning row and never cl
     app.calendar.page = .detail;
     app.calendarBack();
     try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Up to date") == null);
+    // gg (a second g on the untouched picker) uses the same shared status:
+    // saved/stale and incomplete windows never become "Up to date".
+    for ([_]struct { stale: bool, complete: bool, expected: []const u8 }{
+        .{ .stale = true, .complete = true, .expected = "Saved calendar · stale · availability is unknown" },
+        .{ .stale = false, .complete = false, .expected = "Incomplete range · events may be missing · Ctrl+R Retry" },
+        .{ .stale = false, .complete = true, .expected = "Up to date · 2 calendars · / searches loaded events" },
+    }) |case| {
+        app.calendar.stale = case.stale;
+        app.calendar.complete = case.complete;
+        app.calendar.page = .calendars;
+        app.calendar.g_at_ms = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        try app.onCalendarKey(.{ .codepoint = 'g' });
+        try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        try std.testing.expectEqualStrings(case.expected, app.calendar.notice.slice());
+        try std.testing.expectEqualStrings(case.expected, try app.calendarStatusText());
+    }
+    app.calendar.source_loading = true;
+    try std.testing.expect(std.mem.startsWith(u8, try app.calendarStatusText(), "Loading selected calendars…"));
+    app.calendar.source_loading = false;
+    app.calendar.ready = false;
+    try std.testing.expectEqualStrings("Loading calendar…", try app.calendarStatusText());
+    try app.calendar.error_code.set("ConnectionRefused");
+    try std.testing.expectEqualStrings("Calendar could not be loaded · Ctrl+R Retry", try app.calendarStatusText());
 }
 
 test "calendar UI: network errors read as sentences and offline New does not ask for permissions" {
@@ -34867,33 +35160,179 @@ test "calendar UI: invitation review explains failed plans, offers an assumed zo
     try std.testing.expect(std.mem.indexOf(u8, failed, "Checking invitation") == null);
     app.calendar.error_code = .{};
     try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "CalendarTimezoneRequired", .timeZoneSuggestion = "", .invitation = .{ .summary = "Planning", .uid = "planning@example.test", .start = .{ .raw = "20261025T090000", .kind = "floating" }, .end = .{ .raw = "20261025T100000", .kind = "floating" } } }));
+    try app.calendarRefreshZoneCandidate();
     try std.testing.expect(app.calendarZoneProblem());
+    try std.testing.expectEqualStrings("UTC", app.calendarZoneCandidate());
     const zone_text = try app.calendarReviewText();
-    for ([_][]const u8{ "Choose a time zone before adding", "This invitation gives no time zone (floating time 20261025T090000).", "Assume UTC? → 2026-10-25 09:00–10:00 UTC", "z Use UTC · Z Type another zone · q Back", "v Details" }) |expected| try std.testing.expect(std.mem.indexOf(u8, zone_text, expected) != null);
-    for ([_][]const u8{ "in the CLI review", "Calendar ID:", "planning@example.test" }) |hidden| try std.testing.expect(std.mem.indexOf(u8, zone_text, hidden) == null);
+    for ([_][]const u8{ "Choose a time zone before adding", "This invitation gives no time zone (floating time).", "2026-10-25 09:00–10:00 as written · read as UTC?", "z Use UTC · Z Type another zone · q Back", "v Details" }) |expected| try std.testing.expect(std.mem.indexOf(u8, zone_text, expected) != null);
+    // Before the choice no converted time is shown: only the written clock.
+    for ([_][]const u8{ "in the CLI review", "Calendar ID:", "planning@example.test", "→", "Assume" }) |hidden| try std.testing.expect(std.mem.indexOf(u8, zone_text, hidden) == null);
     app.calendar.review_details = true;
     try std.testing.expect(std.mem.indexOf(u8, try app.calendarReviewText(), "UID: planning@example.test") != null);
-    // Every following plan and review request repeats the explicit choice.
+    // Every following plan and review request repeats the explicit choice;
+    // floating endpoints carry consent to fix them, nothing is reinterpreted.
     try app.calendar.assumed_zone.set("Europe/Vienna");
-    app.calendar.assumed_floating = true;
     const request = try app.calendarPlanRequest("calendar.review", "operation-1");
     try std.testing.expectEqualStrings("Europe/Vienna", text(get(request, "startTimeZone")));
     try std.testing.expectEqualStrings("Europe/Vienna", text(get(request, "endTimeZone")));
     try std.testing.expect(truth(get(request, "acceptFloatingTime")));
+    try std.testing.expect(get(request, "reinterpretEmbeddedTimezones") == .null);
     try std.testing.expectEqualStrings("operation-1", text(get(request, "operationId")));
     app.calendar.assumed_zone = .{};
     const plain = try app.calendarPlanRequest("calendar.invitation-plan", null);
-    try std.testing.expect(get(plain, "startTimeZone") == .null and get(plain, "acceptFloatingTime") == .null);
+    try std.testing.expect(get(plain, "startTimeZone") == .null and get(plain, "acceptFloatingTime") == .null and get(plain, "reinterpretEmbeddedTimezones") == .null);
+    // A named but unknown zone (Outlook's Windows names): z is the explicit
+    // consent to reinterpret, and the first plan's suggestion is kept even
+    // when a re-plan that names a zone no longer reports it.
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "InvalidTimezoneName", .timeZoneSuggestion = "UTC", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261025T090000", .kind = "zoned", .zone = "W. Europe Standard Time" }, .end = .{ .raw = "20261025T100000", .kind = "zoned", .zone = "W. Europe Standard Time" } } }));
+    try app.calendarRefreshZoneCandidate();
+    try std.testing.expectEqualStrings("UTC", app.calendar.zone_suggestion.slice());
+    const named_text = try app.calendarReviewText();
+    for ([_][]const u8{ "This invitation's time zone \"W. Europe Standard Time\" isn't one Omagma can verify.", "2026-10-25 09:00–10:00 as written · read as UTC?" }) |expected| try std.testing.expect(std.mem.indexOf(u8, named_text, expected) != null);
     try app.calendar.assumed_zone.set("UTC");
-    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "import_missing", .invitation = .{ .summary = "Planning" }, .resolved = .{ .start = .{ .kind = "instant", .value = 0 }, .end = .{ .kind = "instant", .value = 3600000 } } }));
-    try std.testing.expect(std.mem.indexOf(u8, try app.calendarReviewText(), "Zone assumed by you: UTC") != null);
+    const named = try app.calendarPlanRequest("calendar.invitation-plan", null);
+    try std.testing.expect(truth(get(named, "reinterpretEmbeddedTimezones")) and get(named, "acceptFloatingTime") == .null);
+    try std.testing.expectEqualStrings("UTC", text(get(named, "startTimeZone")));
+    try std.testing.expectEqualStrings("UTC", text(get(named, "endTimeZone")));
+    // The re-plan still failed: the suggestion survives, the tried zone is
+    // not offered again, and the code reads as a sentence.
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "CalendarTimezoneMismatch", .timeZoneSuggestion = "", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261025T090000", .kind = "zoned", .zone = "W. Europe Standard Time" }, .end = .{ .raw = "20261025T100000", .kind = "zoned", .zone = "W. Europe Standard Time" } } }));
+    try app.calendarRefreshZoneCandidate();
+    try std.testing.expectEqualStrings("UTC", app.calendar.zone_suggestion.slice());
+    try std.testing.expectEqualStrings("", app.calendarZoneCandidate());
+    const retry_text = try app.calendarReviewText();
+    try std.testing.expect(std.mem.indexOf(u8, retry_text, "Still unresolved reading it as UTC: The invitation names a different zone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retry_text, "Calendar request failed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, retry_text, "Z Type a zone · q Back") != null);
+    // Mixed endpoints: only the unresolved start takes the chosen zone; the
+    // valid end zone is never overridden.
+    app.calendar.assumed_zone = .{};
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "InvalidTimezoneName", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261125T090000", .kind = "zoned", .zone = "Bogus Zone" }, .end = .{ .raw = "20261125T100000", .kind = "zoned", .zone = "UTC" } } }));
+    try app.calendarRefreshZoneCandidate();
+    try std.testing.expect(app.calendar.assume_start and !app.calendar.assume_end);
+    try std.testing.expect(std.mem.indexOf(u8, try app.calendarReviewText(), "start 2026-11-25 09:00 as written · read as UTC? · its end stays 2026-11-25 10:00 UTC") != null);
+    try app.calendar.assumed_zone.set("UTC");
+    const mixed = try app.calendarPlanRequest("calendar.invitation-plan", null);
+    try std.testing.expect(get(mixed, "endTimeZone") == .null and truth(get(mixed, "reinterpretEmbeddedTimezones")));
+    try std.testing.expectEqualStrings("UTC", text(get(mixed, "startTimeZone")));
+    // After the backend resolved it, the review says what the user chose and
+    // never labels the chosen zone as the organizer's.
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "InvalidTimezoneName", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261025T090000", .kind = "zoned", .zone = "W. Europe Standard Time" }, .end = .{ .raw = "20261025T100000", .kind = "zoned", .zone = "W. Europe Standard Time" } } }));
+    app.calendar.assumed_zone = .{};
+    try app.calendarRefreshZoneCandidate();
+    try app.calendar.assumed_zone.set("UTC");
+    try app.calendar.zone_name.set("Europe/Vienna");
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "import_missing", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261025T090000", .kind = "zoned", .zone = "W. Europe Standard Time" }, .end = .{ .raw = "20261025T100000", .kind = "zoned", .zone = "W. Europe Standard Time" } }, .resolved = .{ .start = .{ .kind = "instant", .value = 0, .zone = "UTC" }, .end = .{ .kind = "instant", .value = 3600000, .zone = "UTC" } } }));
+    try app.calendarRefreshZoneCandidate();
+    const chosen_text = try app.calendarReviewText();
+    try std.testing.expect(std.mem.indexOf(u8, chosen_text, "The invitation names \"W. Europe Standard Time\". You chose to read its times (2026-10-25 09:00–10:00 as written) as UTC.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chosen_text, "zone you chose: UTC") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chosen_text, "organizer's zone") == null);
+    try app.calendar.zone_name.set("UTC");
     // An event already saved is one line; Enter opens it.
     try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "existing", .invitation = .{ .summary = "Planning" }, .event = .{ .id = "saved" } }));
     try std.testing.expectEqualStrings("Already in Personal · Enter opens it in Calendar · q Back", try app.calendarReviewText());
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
-test "calendar UI: q from an invitation review returns to the Mail drawer it came from" {
+test "calendar UI: today follows the calendar zone, n starts today unless moved, compact Week keeps a Monday anchor" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarUxTestCatalogue(&app);
+    // The view opens on the calendar's Today, not the reader's.
+    app.calendar.zone = try timezone.Zone.fromPosix("XYZ-14");
+    const now = Io.Timestamp.now(app.io, .real).toMilliseconds();
+    const today = try app.calendar.zone.localDay(now);
+    app.calendar.day = 0;
+    app.calendar.day_follows_today = true;
+    app.calendarFollowToday();
+    try std.testing.expectEqual(today, app.calendar.day);
+    app.calendar.day = today - 3;
+    app.calendarFollowToday();
+    try std.testing.expectEqual(today - 3, app.calendar.day);
+    // n: the automatic first selection never decides the day; a moved one does.
+    const scratch = app.frame.allocator();
+    const later_ms = (today + 2) * 86400000;
+    const later = try calendarUxTestEvent(scratch, "later", "primary", "Later", later_ms, later_ms + 3600000);
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(scratch, .{ .snapshot = .{ .events = &[_]Value{later}, .complete = true } }));
+    app.calendar.page = .main;
+    app.calendar.view = .agenda;
+    app.calendar.day = today;
+    app.calendar.selected = 0;
+    app.calendar.week_reveal_selected = false;
+    try std.testing.expectEqual(today, try app.calendarNewEventDay(now));
+    app.calendar.week_reveal_selected = true;
+    try std.testing.expectEqual(try app.calendar.zone.localDay(later_ms), try app.calendarNewEventDay(now));
+    app.calendar.week_reveal_selected = false;
+    app.calendar.day = today + 7;
+    try std.testing.expectEqual(today + 7, try app.calendarNewEventDay(now));
+    // j on an empty range does not claim a last event.
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(scratch, .{ .snapshot = .{ .events = &[_]Value{}, .complete = true } }));
+    try app.onCalendarKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqualStrings("No events in this range · l Next period", app.calendar.notice.slice());
+    // Compact (3-day) Week moves by three days from an anchor; widening
+    // derives the Monday week, narrowing returns to the same three days.
+    const monday = try timezone.dateDay("2026-11-09");
+    app.calendar.view = .week;
+    app.calendar.ready = false;
+    app.calendar.day = monday;
+    try app.calendarStepPeriod(1, 82);
+    try std.testing.expectEqual(monday + 3, app.calendar.day);
+    try std.testing.expectEqual(@as(?i64, monday), app.calendarWeekStart(140));
+    try std.testing.expectEqual(@as(?i64, null), app.calendarWeekStart(82));
+    try app.calendarStepPeriod(1, 82);
+    try std.testing.expectEqual(monday + 6, app.calendar.day);
+    try std.testing.expectEqual(@as(?i64, monday), app.calendarWeekStart(140));
+    app.calendar.day = monday;
+    try std.testing.expectEqual(@as(?i64, monday + 6), app.calendarWeekStart(82));
+    // A wide step continues from the anchor's Monday week and drops it.
+    try app.calendarStepPeriod(1, 140);
+    try std.testing.expectEqual(monday + 7, app.calendar.day);
+    try std.testing.expectEqual(@as(?i64, null), app.calendar.week_anchor);
+    try app.calendarStepPeriod(-1, 82);
+    try std.testing.expectEqual(monday + 4, app.calendar.day);
+    try std.testing.expectEqual(@as(?i64, monday), app.calendarWeekStart(140));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar UI: a bare Enter on a zone-problem review assumes nothing; Tab reaches z and Z buttons" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .review;
+    try app.calendar.account.set("personal@example.test");
+    try app.calendar.calendar_id.set("primary");
+    try app.calendar.zone_name.set("UTC");
+    try app.calendar.source_message.set("invite");
+    try app.calendar.review.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .decision = "time_review_required", .timeError = "FloatingTimezoneRequired", .invitation = .{ .summary = "Planning", .start = .{ .raw = "20261025T090000", .kind = "floating" }, .end = .{ .raw = "20261025T100000", .kind = "floating" } } }));
+    try app.calendarRefreshZoneCandidate();
+    try app.onCalendarKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(app.job.future == null and app.calendar.assumed_zone.len == 0);
+    try std.testing.expect(std.mem.startsWith(u8, app.calendar.notice.slice(), "Nothing assumed · z reads the times as UTC"));
+    for ([_]usize{ 0, 1, 26, 0 }) |expected| {
+        try app.onCalendarKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(@as(?usize, expected), app.calendar.focus);
+    }
+    try app.onCalendarKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(?usize, 26), app.calendar.focus);
+    // [Z Type zone] opens an empty field; the candidate is only a hint.
+    try app.onCalendarKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(app.calendar.zone_entry);
+    try std.testing.expectEqualStrings("", app.calendar_zone_field.value());
+    try app.onCalendarKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.calendar.zone_entry and app.calendar.assumed_zone.len == 0);
+    // An unknown typed zone is refused before any request.
+    try app.calendarActivate(26);
+    try app.calendarAssumeZone("Not A/Zone");
+    try std.testing.expect(app.job.future == null and app.calendar.assumed_zone.len == 0);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar UI: q from an invitation review returns to the Mail reader, never into the RSVP drawer" {
     const a = std.testing.allocator;
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
@@ -34901,19 +35340,74 @@ test "calendar UI: q from an invitation review returns to the Mail drawer it cam
     app.calendar.open = true;
     app.calendar.page = .review;
     try app.calendar.source_message.set("invite");
-    app.calendar.return_to_invitation = true;
+    app.calendar.from_mail = true;
     try app.onCalendarKey(.{ .codepoint = 'q' });
     try std.testing.expect(!app.calendar.open);
-    try std.testing.expectEqual(Mode.invitation, app.mode);
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "nothing was added") != null);
     // A destination chosen in the picker returns to that picker instead.
     app.calendar.open = true;
     app.calendar.page = .review;
     try app.calendar.source_message.set("invite");
     app.calendar.picker_chosen = true;
-    app.mode = .browse;
     try app.onCalendarKey(.{ .codepoint = 'q' });
     try std.testing.expect(app.calendar.open);
     try std.testing.expectEqual(calendar_ui.Page.calendars, app.calendar.page);
+    // After a completed import (source cleared), q returns to that mail,
+    // not to an unloaded Calendar view claiming an incomplete range.
+    app.calendar.page = .review;
+    app.calendar.picker_chosen = false;
+    app.calendar.source_message = .{};
+    try app.calendar.outcome.set("applied");
+    try app.onCalendarKey(.{ .codepoint = 'q' });
+    try std.testing.expect(!app.calendar.open);
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar UI: invitation drawer letters re-arm only after interaction, and the current answer is not resent" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .invitation;
+    app.invitation_confirm_ready = true;
+    app.invitation_review.method = .request;
+    try app.invitation_review.attendee.set("personal@example.test");
+    try app.invitation_inspected_id.set(a, "invite");
+    try app.invitation_inspected_account.set(a, "personal@example.test");
+    try std.testing.expect(app.invitation_review.canRespond());
+    // Re-entered without I (e.g. after Calendar): a single d sends nothing.
+    app.invitation_letters_armed = false;
+    try app.onConfirmationKey(.{ .codepoint = 'd' });
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(Mode.invitation, app.mode);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Nothing sent") != null);
+    // Tab is an interaction; the dimmed current answer is still refused.
+    try app.invitation_confirmed_status.set("ACCEPTED");
+    try app.onConfirmationKey(.{ .codepoint = Key.tab });
+    try std.testing.expect(app.invitation_letters_armed);
+    try std.testing.expect(app.dialog_focus.index != 1);
+    try app.onConfirmationKey(.{ .codepoint = 'a' });
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqualStrings("Already accepted · choose another answer to change it", app.status[0..app.status_len]);
+    // Damaged and zone-blocked drawers expose their recovery routes as
+    // Tab-reachable buttons.
+    app.invitation_review.defects = invitation.Defect.organizer;
+    try std.testing.expectEqual(@as(u8, 0b0011), app.invitationRecoveryMask() & 0b0011);
+    app.invitation_review.defects = 0;
+    app.invitation_calendar_blocked = true;
+    try app.invitation_calendar_sync_error.set("CalendarTimezoneMismatch");
+    try std.testing.expect(app.invitationZoneBlocked());
+    if (!browser_target) {
+        try std.testing.expectEqual(@as(u8, 0b1100), app.invitationRecoveryMask() & 0b1100);
+        app.dialog_focus.index = 9;
+        app.invitationFocusMove(false);
+        try std.testing.expectEqual(@as(usize, 10), app.dialog_focus.index);
+        app.invitationFocusMove(false);
+        try std.testing.expectEqual(@as(usize, 11), app.dialog_focus.index);
+    }
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
 test "calendar UI: read-only and Busy events hide Edit, and e explains without a provider read" {
@@ -34933,6 +35427,17 @@ test "calendar UI: read-only and Busy events hide Edit, and e explains without a
     try std.testing.expect(!app.calendarEventEditable(app.calendarEventAt(1).?));
     try std.testing.expect(!app.calendarEventEditable(app.calendarEventAt(2).?));
     try std.testing.expect(App.calendarPlaceholder(app.calendarEventAt(2).?));
+    // A meeting organized by someone else is an attendee copy in a writable
+    // calendar: no Edit, as calendar_event.editReason would refuse it.
+    var invited = try calendarUxTestEvent(scratch, "invited", "primary", "Invited", 0, 3600000);
+    try invited.object.put(scratch, "organizer", .{ .string = "host@example.test" });
+    try std.testing.expect(!app.calendarEventEditable(invited));
+    try invited.object.put(scratch, "organizer", .{ .string = "" });
+    try std.testing.expect(!app.calendarEventEditable(invited));
+    try invited.object.put(scratch, "organizer", .{ .string = "PRIMARY" });
+    try std.testing.expect(app.calendarEventEditable(invited));
+    try invited.object.put(scratch, "event_type", .{ .string = "outOfOffice" });
+    try std.testing.expect(!app.calendarEventEditable(invited));
     var buffer: [13]usize = undefined;
     app.calendar.selected = 0;
     try std.testing.expect(std.mem.indexOfScalar(usize, app.calendarMainControls(&buffer), 18) != null);
