@@ -5,20 +5,27 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const max_bytes = 2 * 1024 * 1024;
 
-const Entity = struct { consumed: usize, codepoint: u21 };
+const html_entities = @import("html_entities.zig");
+
+/// A null code point decodes to nothing: invisible fillers such as &zwnj;.
+const Entity = struct { consumed: usize, codepoint: ?u21 };
 
 fn printable(cp: u21) bool {
     return cp >= 32 and !(cp >= 0x7f and cp <= 0x9f) and
         !(cp >= 0xd800 and cp <= 0xdfff) and cp <= 0x10ffff and
         !(cp >= 0x202a and cp <= 0x202e) and !(cp >= 0x2066 and cp <= 0x2069);
 }
+/// Default-ignorable format characters: no glyph, at most a blank cell.
+fn ignorable(cp: u21) bool {
+    return cp == 0xad or cp == 0x34f or cp == 0x180e or (cp >= 0x200b and cp <= 0x200d) or cp == 0x2060 or cp == 0xfeff;
+}
 
 fn entity(input: []const u8) ?Entity {
     if (input.len < 3 or input[0] != '&') return null;
-    const end = std.mem.indexOfScalar(u8, input[0..@min(input.len, 32)], ';') orelse return null;
-    if (end < 2) return null;
-    const name = input[1..end];
-    if (name[0] == '#') {
+    var found: Entity = undefined;
+    if (input[1] == '#') {
+        const end = std.mem.indexOfScalar(u8, input[0..@min(input.len, 32)], ';') orelse return null;
+        const name = input[1..end];
         const hex = name.len > 2 and (name[1] == 'x' or name[1] == 'X');
         const digits = name[if (hex) 2 else 1..];
         if (digits.len == 0) return null;
@@ -27,24 +34,16 @@ fn entity(input: []const u8) ?Entity {
             !(hex and ((digit >= 'a' and digit <= 'f') or (digit >= 'A' and digit <= 'F')))) return null;
         const value = std.fmt.parseInt(u32, digits, if (hex) 16 else 10) catch return null;
         if (value > 0x10ffff) return null;
-        const cp: u21 = @intCast(value);
-        if (!printable(cp)) return null;
-        return .{ .consumed = end + 1, .codepoint = cp };
+        // As in browsers, 0x80..0x9f references mean Windows-1252 characters.
+        found = .{ .consumed = end + 1, .codepoint = html_entities.numericCodepoint(@intCast(value)) };
+    } else {
+        // Shared table; previews require the terminating semicolon.
+        const match = html_entities.named(input, false) orelse return null;
+        found = .{ .consumed = match.consumed, .codepoint = match.codepoint };
     }
-    const names = [_]struct { []const u8, u21 }{
-        .{ "amp", '&' },      .{ "AMP", '&' },       .{ "lt", '<' },       .{ "LT", '<' },
-        .{ "gt", '>' },       .{ "GT", '>' },        .{ "quot", '"' },     .{ "QUOT", '"' },
-        .{ "apos", '\'' },    .{ "nbsp", 0xa0 },     .{ "copy", 0xa9 },    .{ "reg", 0xae },
-        .{ "trade", 0x2122 }, .{ "euro", 0x20ac },   .{ "pound", 0xa3 },   .{ "yen", 0xa5 },
-        .{ "cent", 0xa2 },    .{ "hellip", 0x2026 }, .{ "ndash", 0x2013 }, .{ "mdash", 0x2014 },
-        .{ "lsquo", 0x2018 }, .{ "rsquo", 0x2019 },  .{ "ldquo", 0x201c }, .{ "rdquo", 0x201d },
-        .{ "laquo", 0xab },   .{ "raquo", 0xbb },    .{ "bull", 0x2022 },  .{ "middot", 0xb7 },
-        .{ "auml", 0xe4 },    .{ "Auml", 0xc4 },     .{ "ouml", 0xf6 },    .{ "Ouml", 0xd6 },
-        .{ "uuml", 0xfc },    .{ "Uuml", 0xdc },     .{ "szlig", 0xdf },
-    };
-    for (names) |pair| if (std.mem.eql(u8, name, pair[0]))
-        return .{ .consumed = end + 1, .codepoint = pair[1] };
-    return null;
+    const cp = found.codepoint.?;
+    if (ignorable(cp) or cp == 0x200e or cp == 0x200f) found.codepoint = null else if (!printable(cp)) return null;
+    return found;
 }
 
 /// Decode metadata preview entities once. No tag removal, recursive decoding,
@@ -57,7 +56,7 @@ pub fn decodePreview(allocator: Allocator, raw: []const u8) !?[]u8 {
     while (index < raw.len) {
         if (entity(raw[index..])) |found| {
             var encoded: [4]u8 = undefined;
-            const count = std.unicode.utf8Encode(found.codepoint, &encoded) catch unreachable;
+            const count = if (found.codepoint) |cp| std.unicode.utf8Encode(cp, &encoded) catch unreachable else 0;
             size -= found.consumed - count;
             changed = true;
             index += found.consumed;
@@ -70,7 +69,7 @@ pub fn decodePreview(allocator: Allocator, raw: []const u8) !?[]u8 {
     while (index < raw.len) {
         if (entity(raw[index..])) |found| {
             var encoded: [4]u8 = undefined;
-            const count = std.unicode.utf8Encode(found.codepoint, &encoded) catch unreachable;
+            const count = if (found.codepoint) |cp| std.unicode.utf8Encode(cp, &encoded) catch unreachable else 0;
             @memcpy(result[written..][0..count], encoded[0..count]);
             written += count;
             index += found.consumed;
@@ -96,13 +95,7 @@ fn rune(raw: []const u8) ?Rune {
 /// inverse mapping, and existing C1 controls never become repair evidence.
 fn cp1252Byte(cp: u21) ?u8 {
     if (cp <= 0x7f or (cp >= 0xa0 and cp <= 0xff)) return @intCast(cp);
-    const upper = [_]u21{
-        0x20ac, 0,      0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
-        0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017d, 0,
-        0,      0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
-        0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0,      0x017e, 0x0178,
-    };
-    for (upper, 0..) |value, index| if (value != 0 and cp == value) return @intCast(index + 0x80);
+    for (html_entities.cp1252_upper, 0..) |value, index| if (value != 0 and cp == value) return @intCast(index + 0x80);
     return null;
 }
 
@@ -224,19 +217,25 @@ pub fn repairMojibakeDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
 }
 
 const PaddingRun = struct { end: usize, newlines: usize, line_start: ?usize, remove: bool };
+/// Characters newsletters repeat to push later body text out of the inbox
+/// preview: blank or zero-width, never part of prose in such quantity.
+fn paddingMember(cp: u21) bool {
+    return switch (cp) {
+        ' ', 0xa0, 0xad, 0x34f, 0x2007, 0x200b, 0x200c, 0x200d, 0x2800, 0x3164, 0xfeff => true,
+        else => false,
+    };
+}
 fn newsletterPadding(raw: []const u8, start: usize) ?PaddingRun {
     const first = rune(raw[start..]) orelse return null;
-    if (first.cp != 0x2007 and first.cp != 0x034f) return null;
-    var figures: usize = 0;
-    var joiners: usize = 0;
+    if (!paddingMember(first.cp)) return null;
+    var members: usize = 0;
+    var exotic: usize = 0;
     var newlines: usize = 0;
     var line_start: ?usize = null;
     var pos = start;
     while (pos < raw.len) {
         const value = rune(raw[pos..]) orelse break;
         switch (value.cp) {
-            0x2007 => figures += 1,
-            0x034f => joiners += 1,
             '\n' => {
                 // Do not consume padding used as a literal indented-code
                 // example on the following line.
@@ -245,15 +244,19 @@ fn newsletterPadding(raw: []const u8, start: usize) ?PaddingRun {
                 newlines += 1;
                 line_start = pos + 1;
             },
-            ' ', '\t', '\r', 0xa0 => {},
-            else => break,
+            '\t', '\r' => {},
+            else => {
+                if (!paddingMember(value.cp)) break;
+                members += 1;
+                exotic += @intFromBool(value.cp > 0x7f);
+            },
         }
         pos += value.consumed;
     }
-    // Newsletter preview extenders alternate figure spaces and invisible
-    // grapheme joiners. A long whitespace-only run is strong evidence; ordinary
-    // spacing, Unicode prose and short intentional examples remain unchanged.
-    return .{ .end = pos, .newlines = @min(newlines, 2), .line_start = line_start, .remove = figures >= 8 and joiners >= 8 };
+    // A long run dominated by non-ASCII blanks is strong evidence. Ordinary
+    // spacing and indentation (ASCII only), Unicode prose, emoji joiners and
+    // short intentional examples remain unchanged.
+    return .{ .end = pos, .newlines = @min(newlines, 2), .line_start = line_start, .remove = members >= 16 and exotic >= 8 };
 }
 
 /// Strip only long invisible newsletter preview padding in a display copy.
@@ -312,16 +315,99 @@ pub fn removeNewsletterPaddingDisplay(allocator: Allocator, raw: []const u8) !?[
     return try output.toOwnedSlice(allocator);
 }
 
-/// The reader owns a display-only snapshot; neither correction affects the
-/// body returned by the CLI or used for quoting/composing a reply.
-pub fn preparePlainBodyDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
-    const unpadded = try removeNewsletterPaddingDisplay(allocator, raw);
-    errdefer if (unpadded) |owned| allocator.free(owned);
-    if (try repairMojibakeDisplay(allocator, unpadded orelse raw)) |repaired| {
-        if (unpadded) |owned| allocator.free(owned);
-        return repaired;
+fn blankRune(cp: u21) bool {
+    return cp == ' ' or cp == '\t' or cp == '\r' or cp == 0xa0 or (cp >= 0x2000 and cp <= 0x200a) or cp == 0x202f or cp == 0x205f or
+        cp == 0x2800 or cp == 0x3000 or cp == 0x3164 or ignorable(cp);
+}
+fn blankLine(line: []const u8) bool {
+    var pos: usize = 0;
+    while (pos < line.len) {
+        const value = rune(line[pos..]) orelse return false;
+        if (!blankRune(value.cp)) return false;
+        pos += value.consumed;
     }
-    return unpadded;
+    return true;
+}
+fn indentedCode(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "    ") or std.mem.startsWith(u8, line, "\t");
+}
+
+/// Display copy without invisible clutter: a line of only whitespace and
+/// default-ignorable characters becomes empty, more than two consecutive
+/// empty lines become one, and zero-width fillers that would each occupy a
+/// blank terminal cell disappear (joiners only where nothing precedes them to
+/// join). Fenced blocks, code lines and blank runs inside indented code stay
+/// byte-exact. Never applied to stored mail or reply sources.
+pub fn tidyBlankLinesDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
+    if (raw.len > max_bytes or !std.unicode.utf8ValidateSlice(raw)) return null;
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    // Every step copies or removes input bytes, so the input length suffices.
+    try output.ensureTotalCapacityPrecise(allocator, raw.len);
+    var start: usize = 0;
+    var fence: ?u8 = null;
+    var blank_start: usize = 0;
+    var blank_lines: usize = 0;
+    var previous_code = false;
+    while (start < raw.len) {
+        const end = std.mem.indexOfScalarPos(u8, raw, start, '\n') orelse raw.len;
+        const line = raw[start..end];
+        const next = @min(end + 1, raw.len);
+        const clean = std.mem.trimStart(u8, line, " \t\r");
+        const boundary: ?u8 = if (std.mem.startsWith(u8, clean, "```")) '`' else if (std.mem.startsWith(u8, clean, "~~~")) '~' else null;
+        const literal = fence != null or boundary != null;
+        if (boundary) |kind| {
+            if (fence == null) fence = kind else if (fence.? == kind) fence = null;
+        }
+        // An indented line of exotic padding is a code example, not a blank.
+        if (!literal and (std.mem.trim(u8, line, " \t\r").len == 0 or (!indentedCode(line) and blankLine(line)))) {
+            if (blank_lines == 0) blank_start = start;
+            // An unterminated final blank segment is not a line of its own.
+            blank_lines += @intFromBool(end < raw.len);
+            start = next;
+            continue;
+        }
+        if (blank_lines > 0) {
+            if (previous_code and indentedCode(line)) output.appendSliceAssumeCapacity(raw[blank_start..start]) else output.appendNTimesAssumeCapacity('\n', if (blank_lines > 2) 1 else blank_lines);
+            blank_lines = 0;
+        }
+        if (literal or codeLine(line)) output.appendSliceAssumeCapacity(line) else {
+            var pos: usize = 0;
+            var previous: u21 = ' ';
+            while (pos < line.len) {
+                const value = rune(line[pos..]).?;
+                const joiner = value.cp == 0x34f or value.cp == 0x200c or value.cp == 0x200d;
+                if (!(ignorable(value.cp) and (!joiner or blankRune(previous)))) {
+                    output.appendSliceAssumeCapacity(line[pos..][0..value.consumed]);
+                    previous = value.cp;
+                }
+                pos += value.consumed;
+            }
+        }
+        if (end < raw.len) output.appendAssumeCapacity('\n');
+        previous_code = !literal and indentedCode(line);
+        start = next;
+    }
+    if (blank_lines > 0) output.appendNTimesAssumeCapacity('\n', if (blank_lines > 2) 1 else blank_lines);
+    if (std.mem.eql(u8, output.items, raw)) {
+        output.deinit(allocator);
+        return null;
+    }
+    return try output.toOwnedSlice(allocator);
+}
+
+/// The reader owns a display-only snapshot; no correction affects the body
+/// returned by the CLI or used for quoting/composing a reply.
+pub fn preparePlainBodyDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
+    var current: ?[]u8 = null;
+    errdefer if (current) |owned| allocator.free(owned);
+    inline for (.{ removeNewsletterPaddingDisplay, tidyBlankLinesDisplay, repairMojibakeDisplay }) |pass| {
+        if (try pass(allocator, current orelse raw)) |next| {
+            if (current) |owned| allocator.free(owned);
+            current = next;
+        }
+    }
+    return current;
 }
 
 fn repeatedForTest(comptime value: []const u8, comptime count: usize) [value.len * count]u8 {
@@ -335,7 +421,7 @@ test "mail display: repeated invisible newsletter padding disappears without rew
     const padding = &(comptime repeatedForTest("\u{2007} \u{034f} ", 20));
     const raw = "Fictional release preview. " ++ padding ++ "\n" ++ padding ++
         "\n\n\nHello from the team.\nRead: https://example.test/release\n";
-    const expected = "Fictional release preview. \n\nHello from the team.\nRead: https://example.test/release\n";
+    const expected = "Fictional release preview.\n\nHello from the team.\nRead: https://example.test/release\n";
     const display = (try preparePlainBodyDisplay(allocator, raw)).?;
     defer allocator.free(display);
     try std.testing.expectEqualStrings(expected, display);
@@ -345,7 +431,7 @@ test "mail display: repeated invisible newsletter padding disappears without rew
     const mojibake = "F\u{c3}\u{a4}rben und gr\u{c3}\u{bc}nen. " ++ padding ++ "\n\nNext.";
     const combined = (try preparePlainBodyDisplay(allocator, mojibake)).?;
     defer allocator.free(combined);
-    try std.testing.expectEqualStrings("Färben und grünen. \n\nNext.", combined);
+    try std.testing.expectEqualStrings("Färben und grünen.\n\nNext.", combined);
     const inline_padding = (try preparePlainBodyDisplay(allocator, "Before" ++ padding ++ "after.")).?;
     defer allocator.free(inline_padding);
     try std.testing.expectEqualStrings("Before after.", inline_padding);
@@ -356,9 +442,9 @@ test "mail display: newsletter heuristic preserves short runs code combining scr
     const padding = &(comptime repeatedForTest("\u{2007} \u{034f} ", 8));
     for ([_][]const u8{
         "a\u{034f}\u{301} café 👩‍💻 text.",
-        &(comptime repeatedForTest("\u{2007} \u{034f} ", 7)),
-        &(comptime repeatedForTest("\u{2007}", 100)),
-        &(comptime repeatedForTest("\u{034f}", 100)),
+        &(comptime repeatedForTest("\u{2007} \u{034f} ", 3)),
+        "Seven\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007}\u{2007} figure spaces align digits.",
+        "Plain indentation:" ++ (comptime repeatedForTest(" ", 40)) ++ "value\n" ++ (comptime repeatedForTest(" ", 20)) ++ "next",
         "```text\n" ++ padding ++ "\n```\nLiteral example.",
         "~~~\n" ++ padding ++ "\n~~~\nLiteral example.",
         "    " ++ padding ++ "\nIndented code.",
@@ -366,6 +452,51 @@ test "mail display: newsletter heuristic preserves short runs code combining scr
     }) |raw| try std.testing.expect((try removeNewsletterPaddingDisplay(allocator, raw)) == null);
     const invalid = [_]u8{0xff};
     try std.testing.expect((try preparePlainBodyDisplay(allocator, &invalid)) == null);
+    // Any long run dominated by non-ASCII blanks is padding, whatever its mix.
+    for ([_][]const u8{
+        &(comptime repeatedForTest("\u{2007} \u{034f} ", 7)),
+        &(comptime repeatedForTest("\u{2007}", 100)),
+        &(comptime repeatedForTest("\u{034f}", 100)),
+        &(comptime repeatedForTest("\u{200c}\u{a0}", 8)),
+        &(comptime repeatedForTest("\u{2800}\u{3164}\u{ad}\u{feff}\u{200b}\u{200d} ", 3)),
+    }) |filler| {
+        const raw = try std.mem.concat(allocator, u8, &.{ "Preview", filler, "body." });
+        defer allocator.free(raw);
+        const display = (try removeNewsletterPaddingDisplay(allocator, raw)).?;
+        defer allocator.free(display);
+        try std.testing.expectEqualStrings("Preview body.", display);
+    }
+}
+
+test "mail display: blank-looking lines empty, long empty runs collapse and standalone fillers vanish" {
+    const allocator = std.testing.allocator;
+    const raw = "A\n\n\n\n\nB\n \t \r\nC\n\u{200b}\u{a0}\u{3000}\nD\n\n\nE\u{200b} \u{200d}F\u{ad}G a\u{034f}\u{301} 👩‍💻 x\u{200c}y\n\u{feff}\n \n\n\u{2060}";
+    const display = (try preparePlainBodyDisplay(allocator, raw)).?;
+    defer allocator.free(display);
+    try std.testing.expectEqualStrings("A\n\nB\n\nC\n\nD\n\n\nE FG a\u{034f}\u{301} 👩‍💻 x\u{200c}y\n\n", display);
+    // Stored bytes are untouched; code keeps its exact blank runs and fillers.
+    try std.testing.expect(std.mem.indexOf(u8, raw, "\u{200b}") != null);
+    for ([_][]const u8{
+        "Already tidy.\n\nTwo empty lines follow.\n\n\nEnd.\n",
+        "```text\n\n\n\n\nx\u{200b}\n \n```\n",
+        "~~~\n\u{200b}\n\n\n\n~~~",
+        "    first\n\n\n\n    second\u{200b}\n\tthird\n",
+        "const padded = \"\u{200b}\";\n",
+    }) |unchanged| try std.testing.expect((try tidyBlankLinesDisplay(allocator, unchanged)) == null);
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(backing: Allocator) !void {
+            const value = (try preparePlainBodyDisplay(backing, "F\u{c3}\u{a4}rben und gr\u{c3}\u{bc}nen.\n\n\n\n" ++ (comptime repeatedForTest("\u{200c}\u{a0}", 8)) ++ "\nNext.\u{200b}")).?;
+            defer backing.free(value);
+            try std.testing.expectEqualStrings("Färben und grünen.\n\nNext.", value);
+        }
+    }.run, .{});
+}
+
+test "mail display: previews share the entity table, drop invisible fillers and map Windows-1252 references" {
+    const a = std.testing.allocator;
+    const value = (try decodePreview(a, "&zwnj;&#847;&shy;Caf&eacute; &hellip; it&#146;s &bdquo;x&ldquo; &#x80;5 &Omega; &check; &copy 2026 &#129; &lrm;end")).?;
+    defer a.free(value);
+    try std.testing.expectEqualStrings("Café … it’s „x“ €5 Ω ✓ &copy 2026 &#129; end", value);
 }
 
 test "mail display: metadata apostrophe and numeric entities decode once without stripping tags" {

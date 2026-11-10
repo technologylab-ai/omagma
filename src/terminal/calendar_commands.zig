@@ -59,7 +59,9 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
     if (executionCommand(command)) return executeReview(service, request, host, target, command);
     const calendar = try selectedCalendar(service, target);
     if (std.mem.eql(u8, command, "calendar.event")) {
-        const document = try service.document(calendar, try j.required(request, "eventId"));
+        // A view, never a write target: calendar.event-review re-reads the
+        // event strictly, and a repaired event arrives here locked.
+        const document = try service.documentForRead(calendar, try j.required(request, "eventId"));
         const zone_name = if (document.event.start) |point| if (point.zone.len > 0) point.zone else calendar.time_zone else calendar.time_zone;
         var draft: ?ordinary.Draft = null;
         var draft_error: []const u8 = "";
@@ -249,25 +251,15 @@ pub fn requestPlan(service: svc.Service, request: j.Value, host: HostInputs, cal
     var start_name = try sourceZone(request, "startTimeZone", source.start);
     var end_name = try sourceZone(request, "endTimeZone", source.end);
     var time_error: []const u8 = "";
+    var suggestion: []const u8 = "";
     var start_zone: ?timezone.Zone = if (start_name) |name| loadZone(service.a, host, name) catch |err| blk: {
         time_error = @errorName(err);
-        // Outlook can name a Windows timezone. The calendar zone is only a
-        // candidate here; it becomes usable after embedded-rule equivalence
-        // is proved over the whole event. No name-only fallback is accepted.
-        if (source.has_timezones and j.get(request, "startTimeZone") == null) {
-            start_name = calendar.time_zone;
-            break :blk loadZone(service.a, host, calendar.time_zone) catch null;
-        }
-        break :blk null;
+        break :blk if (j.get(request, "startTimeZone") == null) candidateZone(service.a, host, calendar, source, source.start, &start_name, &suggestion) else null;
     } else null;
     defer if (start_zone) |*zone| zone.deinit(service.a);
     var end_zone: ?timezone.Zone = if (end_name) |name| loadZone(service.a, host, name) catch |err| blk: {
         time_error = @errorName(err);
-        if (source.has_timezones and j.get(request, "endTimeZone") == null) {
-            end_name = calendar.time_zone;
-            break :blk loadZone(service.a, host, calendar.time_zone) catch null;
-        }
-        break :blk null;
+        break :blk if (j.get(request, "endTimeZone") == null) candidateZone(service.a, host, calendar, source, source.end, &end_name, &suggestion) else null;
     } else null;
     defer if (end_zone) |*zone| zone.deinit(service.a);
     const floating = try j.boolean(request, "acceptFloatingTime", false);
@@ -280,7 +272,36 @@ pub fn requestPlan(service: svc.Service, request: j.Value, host: HostInputs, cal
     verifyEmbedded(source, &start, &end);
     var planned = try service.invitationPlan(calendar, input.source, input.verified_aliases, .{ .start = start, .end = end });
     if (planned.span == null and time_error.len != 0) planned.time_error = time_error;
+    if (planned.span == null) planned.zone_suggestion = suggestion;
     return planned;
+}
+
+/// The source TZID did not load. Outlook names Windows zones and some
+/// producers prefix a vendor path; timezone.canonicalId turns both into a
+/// zoneinfo candidate. A candidate is used only when the source's own
+/// VTIMEZONE agrees at the event (verifyEmbedded then proves the whole
+/// span). Without embedded rules the mapping is our assumption about the
+/// sender's meaning: it is reported as a suggestion and nothing is resolved.
+/// The calendar zone remains the last candidate for embedded rules.
+fn candidateZone(a: std.mem.Allocator, host: HostInputs, calendar: t.Calendar, source: t.Invitation, stamp: ?t.time.Stamp, name: *?[]const u8, suggestion: *[]const u8) ?timezone.Zone {
+    const value = stamp orelse return null;
+    if (value.kind == .zoned) {
+        const mapped = timezone.canonicalId(value.zone);
+        if (!std.mem.eql(u8, mapped, value.zone)) if (loadZone(a, host, mapped)) |loaded| {
+            var zone = loaded;
+            if (source.has_timezones) {
+                const instant: ?i64 = zone.fromLocal(value.civil) catch null;
+                if (instant) |at| if (embedded_zone.matches(source.unfolded, value.zone, &zone, at, at)) {
+                    name.* = mapped;
+                    return zone;
+                };
+            } else suggestion.* = mapped;
+            zone.deinit(a);
+        } else |_| {};
+    }
+    if (!source.has_timezones) return null;
+    name.* = calendar.time_zone;
+    return loadZone(a, host, calendar.time_zone) catch null;
 }
 
 fn verifyEmbedded(source: t.Invitation, start: *?t.time.Binding, end: *?t.time.Binding) void {
@@ -336,7 +357,7 @@ fn planValue(a: std.mem.Allocator, planned: svc.InvitationPlan, pending: ?Recove
         .existing, .review_update, .review_cancel, .previously_cancelled, .reconciled => |event| event,
         else => null,
     };
-    return j.value(a, .{ .calendar = planned.calendar, .invitation = planned.source, .resolved = planned.span, .decision = @tagName(std.meta.activeTag(planned.decision)), .writable = planned.writable, .lookupComplete = planned.lookup.complete, .timeError = planned.time_error, .event = existing, .operation = planned.state.operation, .recovery = pending });
+    return j.value(a, .{ .calendar = planned.calendar, .invitation = planned.source, .resolved = planned.span, .decision = @tagName(std.meta.activeTag(planned.decision)), .writable = planned.writable, .lookupComplete = planned.lookup.complete, .timeError = planned.time_error, .timeZoneSuggestion = planned.zone_suggestion, .event = existing, .operation = planned.state.operation, .recovery = pending });
 }
 fn reviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
     const hash = std.fmt.bytesToHex(review.review_hash, .lower);

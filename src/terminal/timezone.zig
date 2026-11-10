@@ -467,6 +467,129 @@ pub fn load(io: Io, allocator: Allocator, environ: *const std.process.Environ.Ma
     }
     return Zone.fromPosix(value);
 }
+/// CLDR windowsZones default ("001") territory rows. A mapped name is only a
+/// candidate: callers still prove embedded rules or disclose the assumption.
+const windows_zones = [_][2][]const u8{
+    .{ "Dateline Standard Time", "Etc/GMT+12" },                      .{ "UTC-11", "Etc/GMT+11" },
+    .{ "Aleutian Standard Time", "America/Adak" },                    .{ "Hawaiian Standard Time", "Pacific/Honolulu" },
+    .{ "Marquesas Standard Time", "Pacific/Marquesas" },              .{ "Alaskan Standard Time", "America/Anchorage" },
+    .{ "UTC-09", "Etc/GMT+9" },                                       .{ "Pacific Standard Time (Mexico)", "America/Tijuana" },
+    .{ "UTC-08", "Etc/GMT+8" },                                       .{ "Pacific Standard Time", "America/Los_Angeles" },
+    .{ "US Mountain Standard Time", "America/Phoenix" },              .{ "Mountain Standard Time (Mexico)", "America/Mazatlan" },
+    .{ "Mountain Standard Time", "America/Denver" },                  .{ "Yukon Standard Time", "America/Whitehorse" },
+    .{ "Central America Standard Time", "America/Guatemala" },        .{ "Central Standard Time", "America/Chicago" },
+    .{ "Easter Island Standard Time", "Pacific/Easter" },             .{ "Central Standard Time (Mexico)", "America/Mexico_City" },
+    .{ "Canada Central Standard Time", "America/Regina" },            .{ "SA Pacific Standard Time", "America/Bogota" },
+    .{ "Eastern Standard Time (Mexico)", "America/Cancun" },          .{ "Eastern Standard Time", "America/New_York" },
+    .{ "Haiti Standard Time", "America/Port-au-Prince" },             .{ "Cuba Standard Time", "America/Havana" },
+    .{ "US Eastern Standard Time", "America/Indiana/Indianapolis" },  .{ "Turks And Caicos Standard Time", "America/Grand_Turk" },
+    .{ "Paraguay Standard Time", "America/Asuncion" },                .{ "Atlantic Standard Time", "America/Halifax" },
+    .{ "Venezuela Standard Time", "America/Caracas" },                .{ "Central Brazilian Standard Time", "America/Cuiaba" },
+    .{ "SA Western Standard Time", "America/La_Paz" },                .{ "Pacific SA Standard Time", "America/Santiago" },
+    .{ "Newfoundland Standard Time", "America/St_Johns" },            .{ "Tocantins Standard Time", "America/Araguaina" },
+    .{ "E. South America Standard Time", "America/Sao_Paulo" },       .{ "SA Eastern Standard Time", "America/Cayenne" },
+    .{ "Argentina Standard Time", "America/Argentina/Buenos_Aires" }, .{ "Montevideo Standard Time", "America/Montevideo" },
+    .{ "Magallanes Standard Time", "America/Punta_Arenas" },          .{ "Saint Pierre Standard Time", "America/Miquelon" },
+    .{ "Bahia Standard Time", "America/Bahia" },                      .{ "UTC-02", "Etc/GMT+2" },
+    .{ "Mid-Atlantic Standard Time", "Etc/GMT+2" },                   .{ "Azores Standard Time", "Atlantic/Azores" },
+    .{ "Cape Verde Standard Time", "Atlantic/Cape_Verde" },           .{ "GMT Standard Time", "Europe/London" },
+    // "UTC" is itself a zoneinfo name and is deliberately not remapped.
+    .{ "Greenwich Standard Time", "Atlantic/Reykjavik" },             .{ "Sao Tome Standard Time", "Africa/Sao_Tome" },
+    .{ "Morocco Standard Time", "Africa/Casablanca" },                .{ "W. Europe Standard Time", "Europe/Berlin" },
+    .{ "Central Europe Standard Time", "Europe/Budapest" },           .{ "Romance Standard Time", "Europe/Paris" },
+    .{ "Central European Standard Time", "Europe/Warsaw" },           .{ "W. Central Africa Standard Time", "Africa/Lagos" },
+    .{ "Jordan Standard Time", "Asia/Amman" },                        .{ "GTB Standard Time", "Europe/Bucharest" },
+    .{ "Middle East Standard Time", "Asia/Beirut" },                  .{ "Egypt Standard Time", "Africa/Cairo" },
+    .{ "E. Europe Standard Time", "Europe/Chisinau" },                .{ "Syria Standard Time", "Asia/Damascus" },
+    .{ "West Bank Standard Time", "Asia/Hebron" },                    .{ "South Africa Standard Time", "Africa/Johannesburg" },
+    .{ "FLE Standard Time", "Europe/Kiev" },                          .{ "Israel Standard Time", "Asia/Jerusalem" },
+    .{ "South Sudan Standard Time", "Africa/Juba" },                  .{ "Kaliningrad Standard Time", "Europe/Kaliningrad" },
+    .{ "Sudan Standard Time", "Africa/Khartoum" },                    .{ "Libya Standard Time", "Africa/Tripoli" },
+    .{ "Namibia Standard Time", "Africa/Windhoek" },                  .{ "Arabic Standard Time", "Asia/Baghdad" },
+    .{ "Turkey Standard Time", "Europe/Istanbul" },                   .{ "Arab Standard Time", "Asia/Riyadh" },
+    .{ "Belarus Standard Time", "Europe/Minsk" },                     .{ "Russian Standard Time", "Europe/Moscow" },
+    .{ "E. Africa Standard Time", "Africa/Nairobi" },                 .{ "Volgograd Standard Time", "Europe/Volgograd" },
+    .{ "Iran Standard Time", "Asia/Tehran" },                         .{ "Arabian Standard Time", "Asia/Dubai" },
+    .{ "Astrakhan Standard Time", "Europe/Astrakhan" },               .{ "Azerbaijan Standard Time", "Asia/Baku" },
+    .{ "Russia Time Zone 3", "Europe/Samara" },                       .{ "Mauritius Standard Time", "Indian/Mauritius" },
+    .{ "Saratov Standard Time", "Europe/Saratov" },                   .{ "Georgian Standard Time", "Asia/Tbilisi" },
+    .{ "Caucasus Standard Time", "Asia/Yerevan" },                    .{ "Afghanistan Standard Time", "Asia/Kabul" },
+    .{ "West Asia Standard Time", "Asia/Tashkent" },                  .{ "Ekaterinburg Standard Time", "Asia/Yekaterinburg" },
+    .{ "Pakistan Standard Time", "Asia/Karachi" },                    .{ "Qyzylorda Standard Time", "Asia/Qyzylorda" },
+    .{ "India Standard Time", "Asia/Kolkata" },                       .{ "Sri Lanka Standard Time", "Asia/Colombo" },
+    .{ "Nepal Standard Time", "Asia/Kathmandu" },                     .{ "Bangladesh Standard Time", "Asia/Dhaka" },
+    .{ "Omsk Standard Time", "Asia/Omsk" },                           .{ "Myanmar Standard Time", "Asia/Yangon" },
+    .{ "SE Asia Standard Time", "Asia/Bangkok" },                     .{ "Altai Standard Time", "Asia/Barnaul" },
+    .{ "W. Mongolia Standard Time", "Asia/Hovd" },                    .{ "North Asia Standard Time", "Asia/Krasnoyarsk" },
+    .{ "N. Central Asia Standard Time", "Asia/Novosibirsk" },         .{ "Tomsk Standard Time", "Asia/Tomsk" },
+    .{ "China Standard Time", "Asia/Shanghai" },                      .{ "North Asia East Standard Time", "Asia/Irkutsk" },
+    .{ "Singapore Standard Time", "Asia/Singapore" },                 .{ "W. Australia Standard Time", "Australia/Perth" },
+    .{ "Taipei Standard Time", "Asia/Taipei" },                       .{ "Ulaanbaatar Standard Time", "Asia/Ulaanbaatar" },
+    .{ "Aus Central W. Standard Time", "Australia/Eucla" },           .{ "Transbaikal Standard Time", "Asia/Chita" },
+    .{ "Tokyo Standard Time", "Asia/Tokyo" },                         .{ "North Korea Standard Time", "Asia/Pyongyang" },
+    .{ "Korea Standard Time", "Asia/Seoul" },                         .{ "Yakutsk Standard Time", "Asia/Yakutsk" },
+    .{ "Cen. Australia Standard Time", "Australia/Adelaide" },        .{ "AUS Central Standard Time", "Australia/Darwin" },
+    .{ "E. Australia Standard Time", "Australia/Brisbane" },          .{ "AUS Eastern Standard Time", "Australia/Sydney" },
+    .{ "West Pacific Standard Time", "Pacific/Port_Moresby" },        .{ "Tasmania Standard Time", "Australia/Hobart" },
+    .{ "Vladivostok Standard Time", "Asia/Vladivostok" },             .{ "Lord Howe Standard Time", "Australia/Lord_Howe" },
+    .{ "Bougainville Standard Time", "Pacific/Bougainville" },        .{ "Russia Time Zone 10", "Asia/Srednekolymsk" },
+    .{ "Magadan Standard Time", "Asia/Magadan" },                     .{ "Norfolk Standard Time", "Pacific/Norfolk" },
+    .{ "Sakhalin Standard Time", "Asia/Sakhalin" },                   .{ "Central Pacific Standard Time", "Pacific/Guadalcanal" },
+    .{ "Russia Time Zone 11", "Asia/Kamchatka" },                     .{ "New Zealand Standard Time", "Pacific/Auckland" },
+    .{ "UTC+12", "Etc/GMT-12" },                                      .{ "Fiji Standard Time", "Pacific/Fiji" },
+    .{ "Chatham Islands Standard Time", "Pacific/Chatham" },          .{ "UTC+13", "Etc/GMT-13" },
+    .{ "Tonga Standard Time", "Pacific/Tongatapu" },                  .{ "Samoa Standard Time", "Pacific/Apia" },
+    .{ "Line Islands Standard Time", "Pacific/Kiritimati" },
+};
+/// Normalize a calendar TZID to a zoneinfo candidate: Windows zone names map
+/// through CLDR and vendor path prefixes are removed. The result is not
+/// validated; loadNamed still refuses anything that is not a zone identifier.
+pub fn canonicalId(raw: []const u8) []const u8 {
+    const value = std.mem.trim(u8, raw, " \t");
+    for (windows_zones) |row| if (std.ascii.eqlIgnoreCase(value, row[0])) return row[1];
+    if (value.len == 0 or value[0] != '/') return value;
+    var rest = value[1..];
+    inline for (.{ .{ "freeassociation.sourceforge.net/", false }, .{ "mozilla.org/", true }, .{ "softwarestudio.org/", true }, .{ "citadel.org/", true } }) |vendor| {
+        if (std.ascii.startsWithIgnoreCase(rest, vendor[0])) {
+            rest = rest[vendor[0].len..];
+            if (std.ascii.startsWithIgnoreCase(rest, "Tzfile/")) {
+                rest = rest[7..];
+            } else if (vendor[1]) {
+                // "<stamp>/Area/Location": the stamp is a release label.
+                if (std.mem.indexOfScalar(u8, rest, '/')) |slash| rest = rest[slash + 1 ..];
+            }
+            return rest;
+        }
+    }
+    return rest;
+}
+/// True when canonicalId changed the name by a table lookup rather than by
+/// removing a path prefix; such a zone is an assumption until proved.
+pub fn mappedWindowsName(raw: []const u8) bool {
+    const value = std.mem.trim(u8, raw, " \t");
+    for (windows_zones) |row| if (std.ascii.eqlIgnoreCase(value, row[0])) return true;
+    return false;
+}
+test "timezone: canonicalId maps Windows names and strips vendor prefixes without validating" {
+    try std.testing.expectEqualStrings("Europe/Berlin", canonicalId("W. Europe Standard Time"));
+    try std.testing.expectEqualStrings("Europe/Paris", canonicalId("romance standard time"));
+    try std.testing.expectEqualStrings("Europe/Budapest", canonicalId("Central Europe Standard Time"));
+    try std.testing.expectEqualStrings("Europe/Warsaw", canonicalId("Central European Standard Time"));
+    try std.testing.expectEqualStrings("America/New_York", canonicalId("Eastern Standard Time"));
+    try std.testing.expectEqualStrings("America/Cancun", canonicalId("Eastern Standard Time (Mexico)"));
+    try std.testing.expectEqualStrings("Asia/Kolkata", canonicalId("India Standard Time"));
+    try std.testing.expectEqualStrings("Europe/Vienna", canonicalId("/freeassociation.sourceforge.net/Europe/Vienna"));
+    try std.testing.expectEqualStrings("Europe/Vienna", canonicalId("/freeassociation.sourceforge.net/Tzfile/Europe/Vienna"));
+    try std.testing.expectEqualStrings("America/Argentina/Buenos_Aires", canonicalId("/mozilla.org/20070129_1/America/Argentina/Buenos_Aires"));
+    try std.testing.expectEqualStrings("Asia/Tokyo", canonicalId("/softwarestudio.org/Olson_20011030_5/Asia/Tokyo"));
+    try std.testing.expectEqualStrings("Europe/Vienna", canonicalId("/Europe/Vienna"));
+    try std.testing.expectEqualStrings("Europe/Vienna", canonicalId("Europe/Vienna"));
+    try std.testing.expectEqualStrings("Custom/Office", canonicalId("Custom/Office"));
+    try std.testing.expect(mappedWindowsName("Tokyo Standard Time") and !mappedWindowsName("/mozilla.org/20070129_1/Asia/Tokyo") and !mappedWindowsName("Asia/Tokyo"));
+    // A hostile path stays a candidate string only; the loader refuses it.
+    try std.testing.expect(!zoneIdentifier(canonicalId("/mozilla.org/x/../../etc/passwd")));
+    for (windows_zones) |row| try std.testing.expect(zoneIdentifier(row[1]));
+}
 fn zoneIdentifier(raw: []const u8) bool {
     if (raw.len == 0) return false;
     for (raw) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '/' and byte != '_' and byte != '-' and byte != '+' and byte != '.') return false;

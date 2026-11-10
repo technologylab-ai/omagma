@@ -122,7 +122,10 @@ identical-request retry and uncertainty archival. The TUI adds agenda/day/week
 views and a guest picker using the destination account's Contacts (with an
 explicit bounded `contacts.search`). Its Guests field accepts Mail address-list
 paste; CLI callers supply bare guest emails in `event.attendees`. See the
-[Calendar event guide](CALENDAR-EVENTS.md).
+[Calendar event guide](CALENDAR-EVENTS.md). A new Google Meet event can also
+turn on automatic AI notes and transcription through `calendar.meet-event-review`
+and `calendar.meet-event-apply`; see
+[Automatic Meet AI notes](CALENDAR-EVENTS.md#automatic-meet-ai-notes).
 Native Calendar persistence pages settled invitation identities and operation
 receipts instead of expiring UID/version or cancellation protection after 256
 events. Pending reviews and uncertain claims remain in the bounded active
@@ -606,7 +609,9 @@ Contact updates use CONTACT-source etags and reject conflicts. Supported edits p
 
 **Bulk and undo:** bulk actions preserve independent per-message outcomes and never submit sends. Up to 16 account-scoped undo receipts persist under the private cache quota. The receipt records actual pre-action membership only for touched labels. Undo therefore preserves unrelated labels changed later. Rejected, pending, unknown and already restored entries are skipped; an uncertain undo is not repeated automatically. Cache clear preserves these receipts. Apply bulk actions only to IDs explicitly selected for the intended account; a batch is a bounded sequence with partial outcomes, not a transaction.
 
-**Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and `application/octet-stream` with a `.ics` filename, including named external Outlook/Teams attachments. Calendar data is limited to 128 KiB. Inspection displays requests, responses, published events and cancellations; a multi-event or ambiguous-attendee notice remains read-only. Sending a response requires exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
+**Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and named `.ics` files labelled `application/octet-stream` or `text/plain` (case-insensitive filename suffix), including external attachment bodies. A filename alone is insufficient: the bounded content must be a calendar. Calendar data is limited to 128 KiB. Inspection displays requests, responses, published events and cancellations; a multi-event or ambiguous-attendee notice remains read-only. Sending a response requires exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
+
+**Calendar attachments without invitations:** an attendee-free `METHOD:PUBLISH` event, or an ordinary event without `METHOD`, can use the existing message-based `calendar invitation-plan` → `calendar review` → `calendar import` flow. Select the receiving account's verified writable primary calendar. Inspection and review do not write; apply only the returned exact review hash after authorization. These are personal copies with no guests or RSVP. All-day `DTEND` remains exclusive in the provider payload. Review includes copied popup `reminders` and an `unsupported_reminders` count; disclose omitted alarms before confirming. Passive, minute-aligned DISPLAY alarms relative to start are copied (at most five, up to four weeks); nominal day/week, absolute, repeating, email/audio and other unsupported alarms are not executed. Recurring or multi-event files retain the existing import limits. A changed or previously removed copy is never silently replaced or recreated.
 
 Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP.
 
@@ -621,7 +626,7 @@ Configurable body prefetch defaults to the smaller of the display page and 32. `
 ## One-shot interface
 
 One-shot command families are `mail`, `labels`, `draft`, `queue`, `attachment`,
-`contacts`, `invitations`, `cache`, `operation` and `terminal-auth`. Common names map to the shared API:
+`contacts`, `invitations`, `calendar`, `cache`, `operation` and `terminal-auth`. Common names map to the shared API:
 `mail compose` creates a local draft and `mail drafts` lists them.
 `mail labels` lists existing labels, and `mail identities`
 discovers sending identities.

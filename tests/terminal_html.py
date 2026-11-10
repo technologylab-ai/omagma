@@ -528,9 +528,11 @@ def resource_case(binary, directory, cycles, idle):
         path = deep_dir / "html-metrics.json"
         terminal = start(binary, deep_dir, fixture, path, extra=("--fixture-scenario", "offline-refresh"))
         terminal.until(lambda: reader_contains(terminal.screen, f"Fictional {ACCOUNTS[0]}: deep café 👋."))
-        require("Plain text · HTML layout unavailable" in terminal.text(), "bounded HTML failure omitted explicit full-text fallback status")
+        # Nesting beyond the frame limit is rendered with transparent overflow
+        # elements; it no longer discards the formatted view.
+        require("formatted view unavailable" not in terminal.text(), "deep received HTML fell back to plain text")
         terminal.finish()
-        require(html_metrics(path)["htmlFallbacks"] > 0, "deep HTML parser refusal was not counted")
+        require(html_metrics(path)["htmlFallbacks"] == 0, "deep HTML within the input bound was counted as a fallback")
     except Exception as failure:
         wrapped = failed_view(failure, terminal, path)
         terminal = None

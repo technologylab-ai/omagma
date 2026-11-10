@@ -892,26 +892,28 @@ test "browser cache: decoder upgrade retries only eligible older refusals and pr
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(u32, 5), decoder_policy.decoder_revision);
+    try std.testing.expectEqual(@as(u32, 7), decoder_policy.decoder_revision);
     const refused_rows =
         \\[{"id":"charset","threadId":"thread","from":{"address":"peer@example.test","name":"Retained sender"},"subject":"Retained subject","snippet":"Retained preview","labels":["INBOX","UNREAD"],"unread":true,"receivedAt":3000,"bodyCached":true,"bodyCacheError":"UnsupportedCharset","decodeWarning":"UnsupportedCharset","metadataPartial":true},
         \\{"id":"auth","threadId":"auth-thread","bodyCacheError":"NotConnected"},
         \\{"id":"unknown","threadId":"unknown-thread","bodyCacheError":"UnknownFutureRefusal"},
         \\{"id":"unfixed","threadId":"unfixed-thread","bodyCacheError":"InvalidBase64"},
         \\{"id":"quota","threadId":"quota-thread","bodyCacheError":"DiskQuotaExceeded"},
-        \\{"id":"resources","threadId":"resource-thread","bodyCacheError":"TooManyAttachments"}]
+        \\{"id":"resources","threadId":"resource-thread","bodyCacheError":"TooManyAttachments"},
+        \\{"id":"headers","threadId":"header-thread","bodyCacheError":"InvalidHeaders"}]
     ;
     const legacy = try document(a, refused_rows, "[]", false);
-    for ([_]?u32{ null, 3, 4, 5, 6 }) |recorded| {
+    for ([_]?u32{ null, 3, 4, 5, 6, 7 }) |recorded| {
         var raw = try parse(a, legacy);
         if (recorded) |revision| try raw.object.put(a, "decoderRevision", .{ .integer = revision });
         var store = cache.Store.init(std.testing.allocator);
         defer store.deinit();
         try store.bind(0, actor);
         try store.restore(0, try std.json.Stringify.valueAlloc(a, raw, .{}), false);
-        // Charset compatibility last changed in revision 4. The revision 5
-        // resource-count migration must not retry unrelated final refusals.
-        const retry = recorded == null or recorded.? < 4;
+        // Revision 7 degrades received parts instead of refusing messages,
+        // so every earlier charset, resource-count and header refusal is
+        // retried once; unrelated and current refusals stay final.
+        const retry = recorded == null or recorded.? < 7;
         if (retry) {
             try std.testing.expect(try store.read(0, "charset") == null);
             const row = store.retained(0)[0];
@@ -925,13 +927,23 @@ test "browser cache: decoder upgrade retries only eligible older refusals and pr
         try std.testing.expectEqualStrings("NotConnected", (try store.read(0, "auth")).?.bodyCacheError);
         try std.testing.expectEqualStrings("UnknownFutureRefusal", (try store.read(0, "unknown")).?.bodyCacheError);
         try std.testing.expectEqualStrings("DiskQuotaExceeded", (try store.read(0, "quota")).?.bodyCacheError);
-        if (recorded == null or recorded.? < 5) {
+        if (recorded == null or recorded.? < 7) {
             try std.testing.expect(try store.read(0, "resources") == null);
         } else try std.testing.expectEqualStrings("TooManyAttachments", (try store.read(0, "resources")).?.bodyCacheError);
+        if (recorded == null or recorded.? < 7) {
+            try std.testing.expect(try store.read(0, "headers") == null);
+        } else try std.testing.expectEqualStrings("InvalidHeaders", (try store.read(0, "headers")).?.bodyCacheError);
         if (recorded != null) try std.testing.expectEqualStrings("InvalidBase64", (try store.read(0, "unfixed")).?.bodyCacheError);
         const persisted = try snapshot(a, &store, 0);
         try std.testing.expectEqual(@as(i64, @max(recorded orelse 0, decoder_policy.decoder_revision)), try j.integer(try parse(a, persisted), "decoderRevision", 0));
         try store.restore(0, persisted, false);
+        if (recorded == null or recorded.? < 7) {
+            // A new refusal is final after the migrated snapshot is saved.
+            try store.saveRead(0, .{ .id = "headers", .threadId = "header-thread", .bodyCacheError = "InvalidHeaders" });
+            const refused_again = try snapshot(a, &store, 0);
+            try store.restore(0, refused_again, false);
+        }
+        try std.testing.expectEqualStrings("InvalidHeaders", (try store.read(0, "headers")).?.bodyCacheError);
         if (retry) try std.testing.expect(try store.read(0, "charset") == null) else try std.testing.expectEqualStrings("UnsupportedCharset", (try store.read(0, "charset")).?.bodyCacheError);
     }
 }

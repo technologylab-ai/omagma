@@ -16,9 +16,11 @@ pub fn matches(account: []const u8, rfc_id: []const u8, submitted: []const u8, m
     const received = message.invitation orelse return false;
     var expected: invitation.Invitation = .{};
     var actual: invitation.Invitation = .{};
-    invitation.parseDisplay(submitted, account, &.{}, &expected) catch return false;
-    invitation.parseDisplay(received, account, &.{}, &actual) catch return false;
-    if (expected.method != .reply or actual.method != .reply or expected.cancelled or actual.cancelled or
+    // Proof, not presentation: anything the display parser would only
+    // degrade is uncertainty here, and uncertainty never resolves a send.
+    invitation.parseProof(submitted, account, &.{}, &expected) catch return false;
+    invitation.parseProof(received, account, &.{}, &actual) catch return false;
+    if (expected.defects != 0 or actual.defects != 0 or expected.method != .reply or actual.method != .reply or expected.cancelled or actual.cancelled or
         expected.response_blocked or actual.response_blocked or expected.additional_events != 0 or actual.additional_events != 0 or
         expected.attendee.len == 0 or expected.attendee_status.len == 0 or expected.sequence != actual.sequence) return false;
     inline for (.{ "uid", "stamp", "recurrence_id", "recurrence_parameters", "start", "start_parameters", "end", "end_parameters", "duration" }) |field| {
@@ -55,6 +57,26 @@ test "invitation receipt: only exact Sent identity and reviewed RSVP resolve unc
         defer std.testing.allocator.free(changed);
         message.invitation = changed;
         try std.testing.expect(!matches(account, id, ics, message));
+    }
+    // Copies the display parser can still show never count as evidence.
+    inline for (.{
+        .{ "DTSTAMP:20261013T120000Z\r\n", "DTSTAMP:20261013T120000Z\r\nDTSTAMP:20261013T120000Z\r\n" },
+        .{ "VERSION:2.0\r\n", "" },
+        .{ "ORGANIZER:mailto:host@example.test", "ORGANIZER:invalid:nomail" },
+        .{ "SEQUENCE:2\r\n", "SEQUENCE:2\r\nnot a content line\r\n" },
+        .{ "UID:planning@example.test\r\n", "UID:planning@example.test\r\r\n" },
+        .{ "END:VCALENDAR\r\n", "" },
+    }) |change| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, ics, change[0], change[1]);
+        defer std.testing.allocator.free(changed);
+        var shown: invitation.Invitation = .{};
+        try invitation.parseDisplay(changed, account, &.{}, &shown);
+        try std.testing.expect(shown.defects != 0);
+        message.invitation = changed;
+        try std.testing.expect(!matches(account, id, ics, message));
+        message.invitation = ics;
+        try std.testing.expect(!matches(account, id, changed, message));
+        try std.testing.expect(!matches(account, id, changed, .{ .id = "provider-id", .threadId = "thread", .messageId = id, .invitation = changed, .labels = &.{"SENT"} }));
     }
     try validateMessageId(id);
     try std.testing.expectError(error.InvalidMessageId, validateMessageId("<x> OR in:inbox"));

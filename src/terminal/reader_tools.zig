@@ -127,7 +127,8 @@ pub fn links(text: []const u8, html: []const u8, allocator: std.mem.Allocator) !
     // Semantic parsing retains exact entity-decoded hrefs. Guessing them from
     // converted display text could remove meaningful terminal punctuation.
     if (html.len > 0) {
-        const document = html_document.parse(html, allocator) catch return result;
+        // Lenient like the reader itself: a viewer limit keeps the links found.
+        const document = html_document.parseLenient(html, allocator) catch return result;
         var anchors: AnchorTitles = .{ .result = &result, .allocator = allocator };
         var container: usize = 0;
         for (document.blocks) |block| {

@@ -1145,21 +1145,18 @@ def failures(binary, directory):
         save(client, SENT, part, targets / "recovered.pdf", payload(row))
         no_writes(client)
 
-    # A genuinely refused body must stay an honest metadata placeholder. A
-    # descriptor absent from it must never cause success with empty/wrong data.
+    # A body whose declared size disagrees with its bytes stays readable and
+    # carries an explicit warning.
     fixture = LifecycleFixture(directory / "refused")
     source = fixture.message(SENT)["payload"]["parts"][0]
     source["body"]["size"] += 11
     fixture.save()
     with Client(binary, directory / "refused-client", extra=fixture.options()) as client:
         message = client.request("mail.read", messageId=SENT)
-        require(message["bodyCacheError"] == "BodySizeMismatch" and not message["bodyText"],
-                "malformed body did not remain an explicit metadata-only refusal")
-        destination = directory / "body-refusal-must-not-exist.pdf"
-        error = client.request("mail.attachment-save", messageId=SENT, attachmentId=row["providerId"],
-                               path=str(destination), ok=False)
-        require(error["code"] in {"AttachmentNotFound", "BodySizeMismatch", "MessageBodyUnavailable"}
-                and not destination.exists(), "refused body produced a false successful attachment")
+        # A declared size that disagrees with the returned bytes is a named
+        # warning on a readable message, never a silent success.
+        require(not message["bodyCacheError"] and message["decodeWarning"] == "BodySizeMismatch",
+                "size-mismatched body lost its explicit warning")
         no_writes(client)
     return {"preservedRegularSymlinkFifo": True, "symlinkParentRefused": True,
             "corruptDownloadsAtomic": True, "bodyRefusalHonest": True, "fixtureSends": 0}

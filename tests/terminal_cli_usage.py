@@ -455,6 +455,110 @@ def help_examples(runner):
             "printed send dry-run example is not executable offline")
 
 
+def meet_help_examples(runner):
+    from terminal_calendar import Invitations
+
+    root = runner.directory / "meet-help-examples"
+    fixture = Invitations(root)
+    cache = root / "cache"
+    common = ["--fixtures", *fixture.options(), "--fixture-scenario", "meet-ready", "--cache-dir", str(cache)]
+
+    def run(arguments):
+        result = runner.run([*arguments, *common])
+        require(result.returncode == 0, f"Meet help example failed: {result.stderr.decode()}")
+        response = json.loads(result.stdout)
+        require(response.get("ok") is True, f"Meet help example was refused: {response}")
+        return response["data"]
+
+    account = ACCOUNTS[0]
+    calendars = run(["calendar", "list", "--account", account])["calendars"]
+    calendar_id = next(row["calendar"]["target"]["calendar_id"] for row in calendars if row["calendar"]["primary"])
+    event_file = root / "meeting.json"
+    event_file.write_text(json.dumps(dict(summary="Fictional help-example meeting", start="2026-11-10T12:30",
+        end="2026-11-10T13:00", timeZone="Europe/Vienna", attendees=["maya@example.org"], conference="google_meet")))
+    reviewed = None
+
+    def example(verb):
+        text = runner.run(["calendar", verb, "--help"], without_configuration=True).stdout.decode()
+        argv = shlex.split(text.split("Shell example", 1)[1].splitlines()[1].strip())
+        require(argv[:3] == ["omagma", "calendar", verb], "Meet shell example changed its operation")
+        argv = argv[1:]
+        if verb == "meet-event-pending":
+            require("--operation-id" not in argv and "--review-hash" not in argv,
+                    "local pending discovery incorrectly requires a saved apply confirmation")
+        replacements = {"--account": account, "--calendar-id": calendar_id,
+                        "--event-file": str(event_file), "--operation-id": "meet-help-example"}
+        if reviewed is not None:
+            replacements["--operation-id"] = reviewed["operationId"]
+            replacements["--review-hash"] = reviewed["reviewHash"]
+        for index, value in enumerate(argv[:-1]):
+            if value in replacements:
+                argv[index + 1] = replacements[value]
+        return run(argv)
+
+    def states():
+        calendar = next(json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")
+                        if json.loads(path.read_text())["account"] == account)
+        paths = list(cache.rglob("meet-provider-fixture.json"))
+        meet = json.loads(paths[0].read_text()) if paths else {"writes": 0, "patch_attempts": 0}
+        return calendar, meet
+
+    reviewed = example("meet-event-review")
+    require(reviewed["event"]["attendees"] == ["maya@example.org"] and reviewed["sendUpdates"] == "all",
+            "Meet review example lost its exact guest notification choice")
+    require(states()[0]["writes"] == states()[1]["writes"] == 0, "Meet review example performed a provider write")
+    example("meet-event-pending")
+    require(states()[0]["writes"] == states()[1]["writes"] == 0, "Meet pending example performed a provider write")
+    applied = example("meet-event-apply")
+    calendar, meet = states()
+    require(applied["state"] == "applied" and applied["current"]["notes"] == applied["current"]["transcription"] == "on",
+            "Meet apply example did not confirm both Google settings")
+    require(calendar["writes"] == meet["writes"] == 1 and len(meet["spaces"]) == 1
+            and meet["spaces"][0]["notes"] and meet["spaces"][0]["transcription"],
+            "Meet examples did not create exactly one event with both settings")
+    before = (calendar["writes"], meet["writes"], meet["patch_attempts"])
+    example("meet-event-reconcile")
+    example("meet-event-apply")
+    calendar, meet = states()
+    require((calendar["writes"], meet["writes"], meet["patch_attempts"]) == before,
+            "Meet reconcile or repeated exact confirmation replayed a provider write")
+    stats = run(["cache", "stats", "--account", account])
+    require(stats["fixtureSends"] == 0, "Meet help examples sent a separate email")
+
+    # The schema examples are a second discovery path, with independent state.
+    cache = root / "schema-cache"
+    common = ["--fixtures", *fixture.options(), "--fixture-scenario", "meet-ready", "--cache-dir", str(cache)]
+    reviewed = None
+
+    def schema_example(verb):
+        schema = runner.run(["cli", "--schema", "calendar." + verb], without_configuration=True)
+        request = json.loads(schema.stdout)["examples"][0]
+        request.update(account=account, calendarId=calendar_id)
+        if reviewed is not None and "reviewHash" in request:
+            request.update(operationId=reviewed["operationId"], reviewHash=reviewed["reviewHash"])
+        result = runner.run(["cli", *common], (json.dumps(request) + "\n").encode())
+        response = json.loads(result.stdout)
+        require(result.returncode == 0 and response.get("ok") is True,
+                f"printed {verb} schema example was refused: {response}")
+        return response["data"]
+
+    reviewed = schema_example("meet-event-review")
+    schema_example("meet-event-pending")
+    require(states()[0]["writes"] == states()[1]["writes"] == 0, "schema review/pending example wrote provider state")
+    applied = schema_example("meet-event-apply")
+    require(applied["state"] == "applied" and applied["current"]["notes"] == applied["current"]["transcription"] == "on",
+            "schema example did not enable and confirm both settings")
+    calendar, meet = states()
+    require(calendar["writes"] == meet["writes"] == 1 and meet["spaces"][0]["notes"] and meet["spaces"][0]["transcription"],
+            "schema examples lack independent exact-once/settings proof")
+    before = (calendar["writes"], meet["writes"], meet["patch_attempts"])
+    schema_example("meet-event-reconcile")
+    schema_example("meet-event-apply")
+    calendar, meet = states()
+    require((calendar["writes"], meet["writes"], meet["patch_attempts"]) == before,
+            "schema reconcile or duplicate apply repeated a provider write")
+
+
 def protocol(runner):
     fixture_cache = runner.directory / "fixture-cache"
     common = ["--fixtures", "--cache-dir", str(fixture_cache)]
@@ -563,7 +667,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
         for name, exercise in (("guidance", guidance), ("options", options), ("file-option-guidance", file_option_guidance), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
-                               ("protocol", protocol), ("rsvp-contract", rsvp_contract),
+                               ("meet-help-examples", meet_help_examples), ("protocol", protocol), ("rsvp-contract", rsvp_contract),
                                ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)

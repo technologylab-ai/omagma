@@ -1,6 +1,6 @@
 ---
 name: omagma
-description: Use an existing Omagma installation to read and organize mail, prepare or send messages and attachments, manage contacts and Calendar, or guide TUI use through its native CLI. Use omagma-setup for installation, OAuth onboarding or credential repair.
+description: Use an existing Omagma installation to read and organize mail, prepare or send messages and attachments, manage contacts and Calendar (including new Google Meet meetings with AI notes), or guide TUI use through its native CLI. Use omagma-setup for installation, OAuth onboarding or credential repair.
 ---
 
 # Use Omagma
@@ -76,6 +76,55 @@ explicitly and with the original ID. Cancel a pending queue intent before
 editing/discarding its source. A countdown/queued intent is local. The TUI owns
 its interactive countdown; CLI `queue.resume` only resets it and needs an
 explicit `queue.process` or `queue.send-now` to execute. It is not Gmail scheduling.
+
+## New meeting with Meet AI notes
+
+For a new meeting the user organizes with Google Meet AI notes, use
+`calendar meet-event-review` and `meet-event-apply`; ordinary `event-review`
+cannot turn notes on. A received booking confirmation (your own copy, no guests)
+or invitation uses the message-based `calendar review` or `invitations reply`.
+An attendee-free `.ics` attachment with `METHOD:PUBLISH` or no `METHOD` uses
+`calendar invitation-plan` → `calendar review` → `calendar import`, targeting
+the receiving account's verified primary calendar. Inspect copied `reminders`
+and disclose `unsupported_reminders` before applying the exact review hash.
+These are personal events, with no guests or RSVP; never use `invitations reply`
+for them. Unsupported recurrence/multiple events remain blocked.
+
+1. Use any address the user chose explicitly. Otherwise take each guest's
+   current address from the newest relevant thread, adding `contacts.search`
+   only when the thread does not settle it; never rely on older history or
+   memory. Ask only if the person or intended address remains ambiguous.
+2. Derive absolute local start/end (`YYYY-MM-DDTHH:MM`), an IANA `timeZone` and
+   the duration from the user or thread; ask rather than guess.
+3. The owning account needs `meet-settings` and a Calendar write capability in
+   `accounts.list`. If either is missing, report it; change grants only through
+   the setup workflow on explicit request.
+4. In that account's `calendar.list`, use the entry whose `calendar.primary` is
+   true (its `calendar.target.calendar_id`); other calendars are refused.
+5. Follow `omagma calendar meet-event-review --help`: a bare event file with
+   summary, start, end, timeZone, attendees and `"conference":"google_meet"`,
+   `--meet-ai-notes on` (the only setting: AI notes and transcription together),
+   `--send-updates all` for guests and a new `--operation-id`. Review only
+   reads and saves locally; it creates and sends nothing.
+6. Check the review's account, calendar, resolved times and guests. Apply only
+   when the request covers inviting them: `meet-event-apply` with the same
+   operation ID and returned `reviewHash` creates the event, Google emails the
+   guests, then the AI notes setting is sent.
+7. Inspect `state`, `meetAiNotes.state` and `current` even when `ok` is true.
+   `partial` means the event is saved but AI notes are not confirmed. For any
+   `unknown`, run read-only `meet-event-reconcile`; never create the event again
+   or use a new operation ID. An unknown AI notes outcome is never resent. For
+   `waiting_for_link`, reconcile; once it reports `meetAiNotes.phase: ready`,
+   rerun apply with the same ID and hash, which sends only the first Meet
+   settings request. `meet-event-pending` reads the local journal only.
+
+`on` is Google's read-back at that moment, not a guarantee: Google takes notes
+when the organizer or a co-host joins Meet on the web, subject to consent and
+admin policy. Omagma never joins or monitors the meeting. Emailing the thread is
+a separate, explicitly authorized action: `mail.reply` on the latest message
+keeps threading; choose the sender per the user's rules and repeat the Meet URL
+from `calendar.event`. Never add `mail-send` or other grants for it. Details:
+[Automatic Meet AI notes](https://github.com/technologylab-ai/omagma/blob/main/docs/CALENDAR-EVENTS.md#automatic-meet-ai-notes).
 
 ## File delivery
 

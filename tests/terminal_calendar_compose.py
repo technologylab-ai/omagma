@@ -115,7 +115,10 @@ def open_new(terminal):
     terminal.send(b"C")
     wait_calendar(terminal)
     terminal.send(b"n")
-    terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
+    # The fields render during pending-operation discovery; they become
+    # clickable only once the existing Working footer clears.
+    terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title")
+                   and "[Ctrl+S Review]" in terminal.text() and "[Working…]" not in terminal.text())
 
 
 def destination_editable(terminal, account):
@@ -798,7 +801,8 @@ def cancel_fresh(binary, directory, captures):
             terminal.send(b"\x1b")
             wait_calendar(terminal)
             terminal.send(b"n")
-            terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title"))
+            terminal.until(lambda: "New event" in terminal.text() and focused_field(terminal, "Title")
+                           and "[Ctrl+S Review]" in terminal.text() and "[Working…]" not in terminal.text())
             cancel_point = point(terminal, "[Esc Cancel]")
             click(terminal, *cancel_point)
             wait_calendar(terminal)

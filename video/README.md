@@ -13,6 +13,11 @@ Omagma.
 
 ## Release films
 
+- [v0.2.18 — Heavy Lifting](short0218/README.md): inline image paste,
+  booking emails added to Calendar, restricted Drive delivery for large files,
+  automatic Google Meet notes and transcription for new events, and the red
+  current-time marker. Covers visible changes since v0.2.10, using the published
+  v0.2.18 executable, actual Opus direction and the unchanged approved v0.2.7 soundtrack.
 - [v0.2.10 — one meeting, one combined week](short0210/README.md):
   combined calendars, persistent calendar priority, compact overlaps, event
   creation with Contacts and Google Meet, rescheduling, all-day events and

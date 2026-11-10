@@ -67,17 +67,20 @@ def run(binary, root, captures):
             terminal.until(lambda: 'Notice ' + method in terminal.text())
             terminal.gap(.3)
             terminal.send(b'I')
-            terminal.until(lambda: 'Calendar notice' in terminal.text())
+            # The reader now also has a Calendar event badge; wait for the
+            # dialog's unique heading before asserting its controls.
+            heading = 'Calendar event · details' if method == 'publish' else 'Calendar notice'
+            terminal.until(lambda: heading in terminal.text())
             require('a Accept' not in terminal.screen.lines()[-2], 'notice footer advertises RSVP')
             require('[Esc Close]' in terminal.text(), 'notice close control could be mistaken for cancelling the event')
             if method == 'reply':
                 require("Attendee's RSVP · nothing to answer" in terminal.text(), 'received response does not explain why no answer is needed')
             if method == 'publish':
-                require('Published event · no RSVP requested' in terminal.text(), 'published event asks for an RSVP')
+                require('Calendar event · no RSVP' in terminal.text() and '[A Add to calendar]' in terminal.text(), 'published event lost personal import or asks for RSVP')
                 require('Attendee:' not in terminal.text() and 'Organizer:' not in terminal.text(), 'notice displays blank identities')
             terminal.send(b'atd')
             terminal.gap(.15)
-            require('Calendar notice' in terminal.text(), 'notice response shortcut escaped the review')
+            require(heading in terminal.text(), 'notice response shortcut escaped the review')
             if captures:
                 captures.mkdir(parents=True, exist_ok=True)
                 (captures / ('notice-' + method + '.json')).write_text(json.dumps(screen_capture(terminal)) + '\n')

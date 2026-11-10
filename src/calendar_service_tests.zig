@@ -503,3 +503,107 @@ test "calendar booking: a wrong UID cannot settle a personal-copy success or rec
         try std.testing.expectEqual(@as(usize, 1), host.writes);
     }
 }
+
+fn agendaItems(a: std.mem.Allocator, prefix: []const u8, count: usize, token: []const u8, padding: usize) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    try body.appendSlice(a, "{\"items\":[");
+    const notes = try a.alloc(u8, padding);
+    @memset(notes, 'n');
+    for (0..count) |index| try body.appendSlice(a, try std.fmt.allocPrint(a, "{s}{{\"id\":\"{s}{d}\",\"status\":\"confirmed\",\"description\":\"{s}\",\"start\":{{\"dateTime\":\"2026-10-13T10:00:00Z\"}},\"end\":{{\"dateTime\":\"2026-10-13T11:00:00Z\"}}}}", .{ if (index == 0) "" else ",", prefix, index, notes }));
+    try body.appendSlice(a, "]");
+    if (token.len != 0) try body.appendSlice(a, try std.fmt.allocPrint(a, ",\"nextPageToken\":\"{s}\"", .{token}));
+    try body.appendSlice(a, "}");
+    return body.items;
+}
+
+test "calendar service: agenda bounds return the collected events as an incomplete uncached window" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const window = try dayWindow();
+    // Six full pages exceed the retained event bound on the last one.
+    var steps: [6]Step = undefined;
+    for (&steps, 0..) |*step, index| step.* = .{ .kind = .agenda, .body = try agendaItems(a, try std.fmt.allocPrint(a, "p{d}-", .{index}), t.Limits.page_events, "more", 0) };
+    for (&steps, 0..) |*step, index| step.body = try std.mem.replaceOwned(u8, a, step.body, "\"more\"", try std.fmt.allocPrint(a, "\"page-{d}\"", .{index}));
+    const old: t.Event = .{ .target = target, .id = "old-event", .summary = "Retained" };
+    var host: Host = .{ .steps = &steps, .cached = .{ .target = target, .window = window, .events = &.{old}, .fetched_at_ms = 100, .complete = true } };
+    const result = try host.service(a).agenda(calendar, window);
+    try std.testing.expectEqual(@as(usize, t.Limits.snapshot_events), result.snapshot.events.len);
+    try std.testing.expect(!result.snapshot.complete and !result.snapshot.stale);
+    try std.testing.expectEqualStrings("", result.refresh_error);
+    try std.testing.expectEqualStrings("", result.cache_error);
+    try std.testing.expectEqualStrings("p4-99", result.snapshot.events[t.Limits.snapshot_events - 1].id);
+    try result.snapshot.validate();
+    // The last complete cache is neither replaced nor claimed as fresh.
+    try std.testing.expectEqual(@as(usize, 0), host.cached_writes);
+    try std.testing.expectEqualStrings("old-event", host.cached.?.events[0].id);
+    try std.testing.expectEqual(@as(usize, 6), host.index);
+    // Retained bytes: large notes end the read with what already fits.
+    var heavy: [8]Step = undefined;
+    for (&heavy, 0..) |*step, index| step.* = .{ .kind = .agenda, .body = try agendaItems(a, try std.fmt.allocPrint(a, "h{d}-", .{index}), 16, try std.fmt.allocPrint(a, "heavy-{d}", .{index}), 60 * 1024) };
+    var heavy_host: Host = .{ .steps = &heavy };
+    const cut = (try heavy_host.service(a).agenda(calendar, window)).snapshot;
+    try std.testing.expect(!cut.complete and cut.events.len >= 48 and cut.events.len < 8 * 16);
+    try std.testing.expectEqual(@as(usize, 0), heavy_host.cached_writes);
+    // Every continuation page used: incomplete, not CalendarSnapshotIncomplete.
+    var endless: [t.Limits.pages]Step = undefined;
+    for (&endless, 0..) |*step, index| step.* = .{ .kind = .agenda, .body = try agendaItems(a, try std.fmt.allocPrint(a, "e{d}-", .{index}), 1, try std.fmt.allocPrint(a, "endless-{d}", .{index}), 0) };
+    var endless_host: Host = .{ .steps = &endless };
+    const paged = (try endless_host.service(a).agenda(calendar, window)).snapshot;
+    try std.testing.expect(!paged.complete);
+    try std.testing.expectEqual(@as(usize, t.Limits.pages), paged.events.len);
+    // An availability answer needs a complete window.
+    try std.testing.expect(!(try @import("terminal/calendar_agenda.zig").availability(&.{paged}, .{ .kind = .instant, .value = window.start_ms }, .{ .kind = .instant, .value = window.end_ms }, "")).complete);
+}
+
+test "calendar service: an oversized agenda response is retried with smaller pages and defects stay per event" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const window = try dayWindow();
+    const oversized = try a.alloc(u8, t.Limits.response_bytes + 1);
+    @memset(oversized, ' ');
+    const placeholder_page = "{\"items\":[{\"id\":\"good\",\"status\":\"confirmed\",\"start\":{\"date\":\"2026-10-13\"},\"end\":{\"date\":\"2026-10-14\"}},{\"id\":\"odd\",\"status\":\"confirmed\",\"sequence\":\"x\",\"start\":{\"date\":\"2026-10-13\"},\"end\":{\"date\":\"2026-10-14\"}}],\"nextPageToken\":\"second\"}";
+    var host: Host = .{ .steps = &.{ .{ .kind = .agenda, .body = oversized }, .{ .kind = .agenda, .body = placeholder_page }, .{ .kind = .agenda, .body = oversized }, .{ .kind = .agenda } } };
+    const result = try host.service(a).agenda(calendar, window);
+    try std.testing.expectEqual(@as(usize, 4), host.index);
+    try std.testing.expect(std.mem.indexOf(u8, host.last_request.?.url, "&maxResults=6&") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.last_request.?.url, "pageToken=second") != null);
+    // A placeholder keeps the window complete: every event is accounted for.
+    try std.testing.expect(result.snapshot.complete);
+    try std.testing.expectEqual(@as(usize, 2), result.snapshot.events.len);
+    try std.testing.expect(!result.snapshot.events[0].locked and result.snapshot.events[1].locked);
+    try std.testing.expectEqualStrings(provider.unavailable_summary, result.snapshot.events[1].summary);
+    try std.testing.expectEqual(@as(usize, 1), host.cached_writes);
+    // The smallest page still too large is a real provider failure.
+    var hopeless: Host = .{ .steps = &.{ .{ .kind = .agenda, .body = oversized }, .{ .kind = .agenda, .body = oversized }, .{ .kind = .agenda, .body = oversized } } };
+    try std.testing.expectError(error.CalendarResponseTooLarge, hopeless.service(a).agenda(calendar, window));
+    try std.testing.expectEqual(@as(usize, 3), hopeless.index);
+    // An event with neither a usable id nor a time cannot be shown at all:
+    // the rest of the window is, and the window says it is incomplete.
+    // Later pages are still read.
+    var dropping: Host = .{ .steps = &.{ .{ .kind = .agenda, .body = "{\"items\":[{\"id\":\"good\",\"status\":\"confirmed\",\"start\":{\"date\":\"2026-10-13\"},\"end\":{\"date\":\"2026-10-14\"}},{\"status\":\"confirmed\",\"summary\":\"No identity\"}],\"nextPageToken\":\"after-drop\"}" }, .{ .kind = .agenda, .body = "{\"items\":[{\"id\":\"later\",\"status\":\"confirmed\",\"start\":{\"date\":\"2026-10-13\"},\"end\":{\"date\":\"2026-10-14\"}}]}" } } };
+    const dropped = try dropping.service(a).agenda(calendar, window);
+    try std.testing.expectEqual(@as(usize, 2), dropped.snapshot.events.len);
+    try std.testing.expectEqualStrings("later", dropped.snapshot.events[1].id);
+    try std.testing.expect(!dropped.snapshot.complete);
+    try std.testing.expectEqual(@as(usize, 0), dropping.cached_writes);
+    // Lookup decides writes: the same defective page refuses there.
+    var looking: Host = .{ .steps = &.{.{ .kind = .event_lookup, .body = placeholder_page }} };
+    if (looking.service(a).lookup(calendar, "uid")) |_| return error.LookupAcceptedDefect else |_| {}
+}
+
+test "calendar service: a repaired event is viewable but its review re-reads strictly and refuses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const truncated = try std.fmt.allocPrint(a, "{{\"id\":\"event\",\"etag\":\"\\\"v1\\\"\",\"status\":\"confirmed\",\"organizer\":{{\"email\":\"self@example.test\",\"self\":true}},\"summary\":\"Notes\",\"description\":\"{s}\",\"start\":{{\"dateTime\":\"2026-10-13T10:00:00Z\"}},\"end\":{{\"dateTime\":\"2026-10-13T11:00:00Z\"}}}}", .{&@as([64 * 1024 + 1]u8, @splat('n'))});
+    var host: Host = .{ .steps = &.{ .{ .kind = .event_get, .body = truncated }, .{ .kind = .event_get, .body = truncated } } };
+    const shown = try host.service(a).documentForRead(calendar, "event");
+    try std.testing.expect(shown.event.locked);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), shown.event.description.len);
+    try std.testing.expect(!host.service(a).eventEditable(calendar, shown));
+    // The write path never sees the shortened notes it could copy back.
+    if (host.service(a).document(calendar, "event")) |_| return error.StrictDocumentAcceptedDefect else |_| {}
+    try std.testing.expectEqual(@as(usize, 0), host.writes + host.claims);
+}

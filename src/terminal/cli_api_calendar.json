@@ -197,7 +197,7 @@
     },
     {
       "cmd": "calendar.invitation-plan",
-      "summary": "Inspect an account mail invitation and locate its provider UID before any write.",
+      "summary": "Preview what a received invitation or .ics event would do in a calendar. Read-only: shows the decision, resolved times and reminders.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -240,7 +240,8 @@
         "The host loads original invitation bytes from messageId in this explicit account and supplies only verified account aliases. The command does not accept caller-provided source bytes or verifiedAliases. Without verified aliases, only the selected account may match the attendee.",
         "Returns calendar, invitation, resolved, decision, writable, lookupComplete, timeError and any event/operation. The complete original source and unknown properties remain preserved; plan inspection does not claim or dispatch a Calendar write.",
         "UID lookup includes hidden invitations and deleted events. Bounded or incomplete lookup never means absent. Existing recurrences can be located; recurrence imports/updates remain unsupported.",
-        "Floating times, embedded VTIMEZONE reinterpretation and DST gaps/folds require explicit review. Unresolved source times remain visible in timeError and do not enable writes."
+        "Floating times, embedded VTIMEZONE reinterpretation and DST gaps/folds require explicit review. Unresolved source times remain visible in timeError and do not enable writes.",
+        "An .ics event without attendees (METHOD:PUBLISH or no METHOD) becomes your own event on the account's primary calendar: no guests are added and no RSVP is sent. Run `calendar review` first, then `calendar import` with the exact hash it returned."
       ],
       "examples": [
         {
@@ -253,7 +254,7 @@
     },
     {
       "cmd": "calendar.review",
-      "summary": "Prepare and durably preserve one exact invitation change for review.",
+      "summary": "Freeze the exact Calendar change for a received invitation or .ics event and return its review hash. Writes nothing.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -299,7 +300,8 @@
         "Loads the original source from this account's messageId and performs read-only lookup/current-event checks. A writable calendar plus the matching owned/shared capability is required; no Calendar mutation or unknown claim occurs during review.",
         "Returns reviewHash plus account, calendarId, calendarName, operationId, action, uid, version, eventId, expectedEtag, invitation and resolved. Inspect these exact values before calendar.apply. Mutation action is import_event, update_event or cancel_event.",
         "The saved review includes the complete source and exact prepared request. Reusing its operationId with altered identity or bytes is refused. Conditional updates/cancellations bind a fresh provider ETag.",
-        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault.",
+        "An .ics event without attendees (METHOD:PUBLISH or no METHOD) becomes your own event on the account's primary calendar: no guests are added and no RSVP is sent. Run `calendar review` first, then `calendar import` with the exact hash it returned."
       ],
       "examples": [
         {
@@ -357,7 +359,7 @@
     },
     {
       "cmd": "calendar.import",
-      "summary": "Apply a saved import review with exact confirmation.",
+      "summary": "Add a reviewed invitation or .ics event to Google Calendar. Requires the exact review hash; sends no email.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -385,7 +387,8 @@
         "Same saved-review and durable-claim contract as calendar.apply, additionally requiring review.intent.kind to equal import_event before provider access. The alias never converts a saved review to a different action.",
         "Use the exact operationId and reviewHash returned by calendar.review; request body/source/ETag overrides are refused. Inspect applied/rejected/unknown state and errorCode.",
         "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
-        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault.",
+        "An .ics event without attendees (METHOD:PUBLISH or no METHOD) becomes your own event on the account's primary calendar: no guests are added and no RSVP is sent. Run `calendar review` first, then `calendar import` with the exact hash it returned."
       ],
       "examples": [
         {
@@ -667,7 +670,7 @@
     },
     {
       "cmd": "calendar.open",
-      "summary": "Open Google Calendar in this account\u2019s configured Chrome profile.",
+      "summary": "Open Google Calendar in this account’s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -685,12 +688,12 @@
       },
       "required": [],
       "notes": [
-        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account\u2019s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account’s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
       "cmd": "calendar.event-open",
-      "summary": "Open an exact Calendar event in this account\u2019s configured Chrome profile.",
+      "summary": "Open an exact Calendar event in this account’s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -714,7 +717,7 @@
         "eventId"
       ],
       "notes": [
-        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account\u2019s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account’s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
@@ -885,7 +888,26 @@
         "If the meet-settings permission is missing, the review is refused here (MeetSettingsPermissionRequired), before any Calendar write. Google checks API enablement, plan and admin policy only when the setting is sent after the event is saved.",
         "The Meet change names only the AI notes and transcription settings in its field mask, never a wildcard. Recording and all other Meet settings stay unchanged."
       ],
-      "examples": []
+      "examples": [
+        {
+          "cmd": "calendar.meet-event-review",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "meet-event-review-1",
+          "event": {
+            "summary": "Project kickoff",
+            "start": "2026-10-22T10:00",
+            "end": "2026-10-22T10:45",
+            "timeZone": "Europe/Vienna",
+            "attendees": [
+              "colleague@example.com"
+            ],
+            "conference": "google_meet"
+          },
+          "sendUpdates": "all",
+          "meetAiNotes": "on"
+        }
+      ]
     },
     {
       "cmd": "calendar.meet-event-apply",
@@ -918,7 +940,15 @@
         "on is a dated observation of Google's read-back, not a guarantee that the setting stays on. refused is final and does not show the current setting.",
         "If meetAiNotes.state is waiting_for_link and meet-event-reconcile reports the link is ready, running meet-event-apply again with the same operation ID and review hash sends only the first Meet settings request. It never writes Calendar again. An unknown AI notes outcome is never resent."
       ],
-      "examples": []
+      "examples": [
+        {
+          "cmd": "calendar.meet-event-apply",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "meet-event-review-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
     },
     {
       "cmd": "calendar.meet-event-reconcile",
@@ -950,7 +980,15 @@
         "Sends only Google GET requests and updates the local journal. It never writes Calendar, never changes Meet settings and never emails guests.",
         "It reports the same states as meet-event-apply. on is reported only when Google's read-back matches both settings. Otherwise an unknown outcome stays unknown; this release has no retry."
       ],
-      "examples": []
+      "examples": [
+        {
+          "cmd": "calendar.meet-event-reconcile",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "meet-event-review-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
     },
     {
       "cmd": "calendar.meet-event-pending",
@@ -975,7 +1013,13 @@
       "notes": [
         "Reads the local journal only. Recorded states are what Omagma last observed, not Google's current settings."
       ],
-      "examples": []
+      "examples": [
+        {
+          "cmd": "calendar.meet-event-pending",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com"
+        }
+      ]
     }
   ],
   "$defs": {

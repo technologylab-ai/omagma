@@ -9,6 +9,10 @@ const text_layout = @import("text_layout.zig");
 
 const max_lines = 16384;
 const max_runs = 65536;
+/// Held back from received-mail content so the truncation notice always fits.
+const reserved_lines = 64;
+const reserved_runs = 128;
+pub const truncation_notice = "[Formatted view truncated at viewer limit · p shows plain text]";
 const blanks: [240]u8 = @splat(' ');
 pub const Role = enum { text, heading, quote, marker, border, link, code, table_header };
 pub const Run = struct { text: []const u8, columns: u16, flags: html.Style = .{}, role: Role = .text };
@@ -99,29 +103,49 @@ fn safeText(allocator: std.mem.Allocator, text: []const u8, pre: bool) ![]const 
     return normalized;
 }
 
-fn preparedSpan(allocator: std.mem.Allocator, spans: *std.ArrayList(html.Span), span: html.Span, count: *usize) !void {
-    if (span.text.len == 0) return;
-    if (count.* >= html.Limits.spans) return error.HtmlLayoutUnavailable;
-    count.* += 1;
+/// Document-wide sanitizing budget. Received mail stops at a limit and keeps
+/// what fits; strict (locally generated) input still reports the limit.
+const Sanitize = struct {
+    strict: bool,
+    total: usize = 0,
+    count: usize = 0,
+    truncated: bool = false,
+    fn limit(self: *Sanitize) !void {
+        if (self.strict) return error.HtmlLayoutUnavailable;
+        self.truncated = true;
+    }
+};
+fn preparedSpan(allocator: std.mem.Allocator, spans: *std.ArrayList(html.Span), span: html.Span, state: *Sanitize) !void {
+    if (span.text.len == 0 or state.truncated) return;
+    if (state.count >= html.Limits.spans) return state.limit();
+    state.count += 1;
     var result = span;
     // Semantic appearance only; never populate terminal OSC8 metadata.
     if (result.link != null) result.style.underline = true;
     try spans.append(allocator, result);
 }
-fn sanitizeSpans(allocator: std.mem.Allocator, source: []const html.Span, pre: bool, total: *usize, count: *usize) ![]const html.Span {
+fn sanitizeSpans(allocator: std.mem.Allocator, source: []const html.Span, pre: bool, state: *Sanitize) ![]const html.Span {
     var spans: std.ArrayList(html.Span) = .empty;
     for (source) |span| {
-        const clean = try safeText(allocator, span.text, pre);
+        if (state.truncated) break;
+        const clean = safeText(allocator, span.text, pre) catch |err| {
+            if (err != error.HtmlLayoutUnavailable) return err;
+            try state.limit();
+            break;
+        };
         const display = try reader_tools.displayLinks(allocator, clean);
-        if (display.text.len > 2 * 1024 * 1024 -| total.*) return error.HtmlLayoutUnavailable;
-        total.* += display.text.len;
+        if (display.text.len > 2 * 1024 * 1024 -| state.total) {
+            try state.limit();
+            break;
+        }
+        state.total += display.text.len;
         var offset: usize = 0;
         for (display.ranges) |range| {
-            try preparedSpan(allocator, &spans, .{ .text = display.text[offset..range.start], .style = span.style, .link = span.link }, count);
-            try preparedSpan(allocator, &spans, .{ .text = display.text[range.start..range.end], .style = span.style, .link = span.link orelse range.url }, count);
+            try preparedSpan(allocator, &spans, .{ .text = display.text[offset..range.start], .style = span.style, .link = span.link }, state);
+            try preparedSpan(allocator, &spans, .{ .text = display.text[range.start..range.end], .style = span.style, .link = span.link orelse range.url }, state);
             offset = range.end;
         }
-        try preparedSpan(allocator, &spans, .{ .text = display.text[offset..], .style = span.style, .link = span.link }, count);
+        try preparedSpan(allocator, &spans, .{ .text = display.text[offset..], .style = span.style, .link = span.link }, state);
     }
     return spans.toOwnedSlice(allocator);
 }
@@ -136,9 +160,12 @@ pub const Prepared = struct {
     method: vaxis.gwidth.Method = .unicode,
     failed: bool = false,
     layout_builds: usize = 0,
+    strict: bool = false,
 
+    /// Received mail: viewer limits truncate with a visible notice. Only
+    /// oversized or invalid input and allocation failure are errors.
     pub fn init(allocator: std.mem.Allocator, input: []const u8) !Prepared {
-        return initWithOptions(allocator, input, .{});
+        return initWithOptions(allocator, input, .{ .lenient = true });
     }
     /// The caller must provide locally escaped Markdown HTML, never mail read
     /// from a provider. Only the four fixed code token classes gain appearance.
@@ -150,24 +177,34 @@ pub const Prepared = struct {
         errdefer arena.deinit();
         const owned = arena.allocator();
         var document = try html.parseWithOptions(input, owned, options);
-        var semantic_bytes: usize = 0;
-        var semantic_spans: usize = 0;
+        var state: Sanitize = .{ .strict = !options.lenient };
         const blocks = try owned.alloc(html.Block, document.blocks.len);
         for (document.blocks, blocks) |source, *dest| {
             dest.* = source;
-            dest.spans = try sanitizeSpans(owned, source.spans, source.kind == .pre, &semantic_bytes, &semantic_spans);
+            dest.spans = try sanitizeSpans(owned, source.spans, source.kind == .pre, &state);
             if (source.table) |table| {
                 const rows = try owned.alloc(html.Row, table.rows.len);
                 for (table.rows, rows) |row, *result_row| {
                     const cells = try owned.alloc(html.Cell, row.cells.len);
-                    for (row.cells, cells) |cell, *result_cell| result_cell.* = .{ .spans = try sanitizeSpans(owned, cell.spans, false, &semantic_bytes, &semantic_spans), .header = cell.header };
+                    for (row.cells, cells) |cell, *result_cell| result_cell.* = .{ .spans = try sanitizeSpans(owned, cell.spans, false, &state), .header = cell.header };
                     result_row.* = .{ .cells = cells };
                 }
                 dest.table = .{ .rows = rows };
             }
         }
         document.blocks = blocks;
-        return .{ .allocator = allocator, .document_arena = arena, .layout_arena = .init(allocator), .document = document };
+        document.truncated = document.truncated or state.truncated;
+        return .{ .allocator = allocator, .document_arena = arena, .layout_arena = .init(allocator), .document = document, .strict = !options.lenient };
+    }
+    /// Nothing would be drawn: no rule, and no span or cell with a visible
+    /// character. The caller should then prefer a non-empty plain alternative.
+    pub fn blank(self: *const Prepared) bool {
+        for (self.document.blocks) |block| {
+            if (block.kind == .rule) return false;
+            for (block.spans) |span| if (std.mem.trim(u8, span.text, " \t\r\n").len != 0) return false;
+            if (block.table) |table| for (table.rows) |row| for (row.cells) |cell| for (cell.spans) |span| if (std.mem.trim(u8, span.text, " \t\r\n").len != 0) return false;
+        }
+        return true;
     }
     pub fn deinit(self: *Prepared) void {
         self.layout_arena.deinit();
@@ -182,7 +219,7 @@ pub const Prepared = struct {
         self.failed = true;
         self.cached = .{ .lines = &.{}, .runs = &.{} };
         _ = self.layout_arena.reset(.retain_capacity);
-        self.cached = buildLayout(self.layout_arena.allocator(), self.allocator, self.document, width, method) catch |err| {
+        self.cached = buildLayout(self.layout_arena.allocator(), self.allocator, self.document, width, method, self.strict) catch |err| {
             _ = self.layout_arena.reset(.free_all);
             return err;
         };
@@ -303,11 +340,21 @@ const Builder = struct {
     pending_space: bool = false,
     pending_flags: html.Style = .{},
     pending_role: Role = .text,
+    /// Received mail stops at a row/run cap with HtmlLayoutTruncated, keeping
+    /// a reserve that only the closing truncation notice may use.
+    lenient: bool = false,
+    closing: bool = false,
 
+    fn capped(self: *const Builder) error{ HtmlLayoutTruncated, HtmlLayoutUnavailable } {
+        return if (self.lenient and !self.closing) error.HtmlLayoutTruncated else error.HtmlLayoutUnavailable;
+    }
+    fn lineCap(self: *const Builder) usize {
+        return if (self.lenient and !self.closing) max_lines - reserved_lines else max_lines;
+    }
     fn add(self: *Builder, text: []const u8, columns: u16, flags: html.Style, role: Role) !void {
         if (text.len == 0) return;
         if (columns > self.width -| self.column) return error.HtmlLayoutUnavailable;
-        if (self.runs.items.len == max_runs) return error.HtmlLayoutUnavailable;
+        if (self.runs.items.len >= if (self.lenient and !self.closing) @as(usize, max_runs - reserved_runs) else max_runs) return self.capped();
         try self.runs.append(self.allocator, .{ .text = text, .columns = columns, .flags = flags, .role = role });
         self.column += columns;
     }
@@ -337,13 +384,15 @@ const Builder = struct {
     }
     fn finishLine(self: *Builder) !void {
         if (!self.open) return;
-        if (self.lines.items.len == max_lines) return error.HtmlLayoutUnavailable;
+        if (self.lines.items.len >= self.lineCap()) return self.capped();
         try self.lines.append(self.allocator, .{ .first = self.first, .count = self.runs.items.len - self.first, .columns = self.column, .join = self.join, .prefix_bytes = self.prefix_bytes });
         self.open = false;
     }
     fn blank(self: *Builder) !void {
         try self.finishLine();
-        if (self.lines.items.len == max_lines) return error.HtmlLayoutUnavailable;
+        // At most one empty row separates visible content, and none leads.
+        if (self.lines.items.len == 0 or self.lines.items[self.lines.items.len - 1].count == 0) return;
+        if (self.lines.items.len >= self.lineCap()) return self.capped();
         try self.lines.append(self.allocator, .{ .first = self.runs.items.len, .count = 0, .columns = 0 });
     }
     fn chunk(self: *Builder, bytes: []const u8, flags: html.Style, role: Role) !void {
@@ -503,7 +552,7 @@ fn renderTable(builder: *Builder, table: html.Table) !void {
         const layouts = try allocator.alloc(Layout, count);
         var height: usize = 1;
         for (0..count) |column| {
-            var cell: Builder = .{ .allocator = allocator, .scratch_allocator = builder.scratch_allocator, .width = widths[column], .method = builder.method };
+            var cell: Builder = .{ .allocator = allocator, .scratch_allocator = builder.scratch_allocator, .width = widths[column], .method = builder.method, .lenient = builder.lenient };
             try cell.begin(0, "", .text);
             if (column < row.cells.len) try cell.spans(row.cells[column].spans, false, row.cells[column].header);
             layouts[column] = try cell.result();
@@ -531,56 +580,84 @@ fn renderTable(builder: *Builder, table: html.Table) !void {
     try tableRule(builder, widths[0..count], "└", "┴", "┘");
 }
 
+/// Lenient, as for received mail: row/run caps end with the muted notice.
 pub fn layout(allocator: std.mem.Allocator, document: html.Document, width: u16, method: vaxis.gwidth.Method) !Layout {
-    return buildLayout(allocator, allocator, document, width, method);
+    return buildLayout(allocator, allocator, document, width, method, false);
 }
 
-fn buildLayout(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, document: html.Document, width: u16, method: vaxis.gwidth.Method) !Layout {
+fn layoutBlock(builder: *Builder, allocator: std.mem.Allocator, document: html.Document, index: usize, width: u16, method: vaxis.gwidth.Method) !void {
+    const block = document.blocks[index];
+    if (index > 0) {
+        const previous = document.blocks[index - 1];
+        const list_gap = block.kind == .list_item and
+            ((block.list_continuation and block.list_paragraph) or
+                previous.kind != .list_item or
+                (block.list_start and block.level == 0 and !block.list_continuation) or
+                (block.list_loose and !block.list_continuation and previous.level >= block.level));
+        // Tight wrapper/cell blocks continue directly below their predecessor.
+        if (if (block.kind == .list_item) list_gap else !block.tight) try builder.blank();
+    }
+    switch (block.kind) {
+        .table => if (block.table) |table| try renderTable(builder, table),
+        .rule => {
+            try builder.begin(0, "", .border);
+            for (0..width) |_| try builder.add("─", 1, .{}, .border);
+            try builder.finishLine();
+        },
+        else => {
+            const quoted_list = block.kind == .list_item and block.quote_depth > 0;
+            const role: Role = if (block.kind == .heading) .heading else if (block.kind == .quote or quoted_list) .quote else if (block.kind == .pre) .code else .text;
+            const list_indent: u16 = @min(@as(u16, block.level) * 2, @min(@as(u16, 12), width / 4));
+            const indent: u16 = if (quoted_list) @min(@as(u16, block.quote_depth) * 2, @min(@as(u16, 12), width / 4)) else if (block.kind == .list_item or block.kind == .quote) list_indent else if (block.kind == .pre) @min(@as(u16, 2), width / 4) else 0;
+            const item_marker = if (block.kind == .quote) "│ " else if (block.kind == .list_item) (if (block.ordered) try std.fmt.allocPrint(allocator, "{d}. ", .{block.ordinal}) else "• ") else "";
+            const list_marker = if (block.kind == .list_item and block.list_continuation) blanks[0..textWidth(item_marker, method, width)] else item_marker;
+            const marker = if (quoted_list) try std.fmt.allocPrint(allocator, "│ {s}{s}", .{ blanks[0..list_indent], list_marker }) else list_marker;
+            try builder.begin(indent, marker, role);
+            try builder.spans(block.spans, block.kind == .pre, false);
+            try builder.finishLine();
+        },
+    }
+}
+
+fn buildLayout(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, document: html.Document, width: u16, method: vaxis.gwidth.Method, strict: bool) !Layout {
     if (width == 0 or width > 240) return error.HtmlLayoutUnavailable;
-    // Explicit breaks in independent blocks are an unavoidable lower bound.
-    // Table columns run side by side, so their cell counts are not summed.
-    // Reject before allocating vectors rather than approaching the heap cap
-    // for a document that can never fit the semantic row budget.
+    // Strict (locally generated) documents are refused whole. Explicit breaks
+    // in independent blocks are an unavoidable lower bound; table columns run
+    // side by side, so their cell counts are not summed. Reject before
+    // allocating vectors rather than approaching the heap cap for a document
+    // that can never fit the semantic row budget.
     var minimum_lines: usize = 0;
-    for (document.blocks) |block| {
+    if (strict) for (document.blocks) |block| {
         if (block.kind == .table) continue;
         minimum_lines += 1;
         for (block.spans) |span| minimum_lines += std.mem.count(u8, span.text, "\n");
         if (minimum_lines > max_lines) return error.HtmlLayoutUnavailable;
-    }
-    var builder: Builder = .{ .allocator = allocator, .scratch_allocator = scratch_allocator, .width = width, .method = method };
-    for (document.blocks, 0..) |block, index| {
-        if (index > 0) {
-            const previous = document.blocks[index - 1];
-            const list_gap = block.kind == .list_item and
-                ((block.list_continuation and block.list_paragraph) or
-                    previous.kind != .list_item or
-                    (block.list_start and block.level == 0 and !block.list_continuation) or
-                    (block.list_loose and !block.list_continuation and previous.level >= block.level));
-            if (block.kind != .list_item or list_gap) try builder.blank();
-        }
-        switch (block.kind) {
-            .table => if (block.table) |table| try renderTable(&builder, table),
-            .rule => {
-                try builder.begin(0, "", .border);
-                for (0..width) |_| try builder.add("─", 1, .{}, .border);
-                try builder.finishLine();
-            },
-            else => {
-                const quoted_list = block.kind == .list_item and block.quote_depth > 0;
-                const role: Role = if (block.kind == .heading) .heading else if (block.kind == .quote or quoted_list) .quote else if (block.kind == .pre) .code else .text;
-                const list_indent: u16 = @min(@as(u16, block.level) * 2, @min(@as(u16, 12), width / 4));
-                const indent: u16 = if (quoted_list) @min(@as(u16, block.quote_depth) * 2, @min(@as(u16, 12), width / 4)) else if (block.kind == .list_item or block.kind == .quote) list_indent else if (block.kind == .pre) @min(@as(u16, 2), width / 4) else 0;
-                const item_marker = if (block.kind == .quote) "│ " else if (block.kind == .list_item) (if (block.ordered) try std.fmt.allocPrint(allocator, "{d}. ", .{block.ordinal}) else "• ") else "";
-                const list_marker = if (block.kind == .list_item and block.list_continuation) blanks[0..textWidth(item_marker, method, width)] else item_marker;
-                const marker = if (quoted_list) try std.fmt.allocPrint(allocator, "│ {s}{s}", .{ blanks[0..list_indent], list_marker }) else list_marker;
-                try builder.begin(indent, marker, role);
-                try builder.spans(block.spans, block.kind == .pre, false);
-                try builder.finishLine();
-            },
-        }
+    };
+    var builder: Builder = .{ .allocator = allocator, .scratch_allocator = scratch_allocator, .width = width, .method = method, .lenient = !strict };
+    var truncated = document.truncated;
+    for (0..document.blocks.len) |index| layoutBlock(&builder, allocator, document, index, width, method) catch |err| {
+        if (err != error.HtmlLayoutTruncated) return err;
+        truncated = true;
+        break;
+    };
+    if (truncated) {
+        // Received mail keeps every completed row and says what happened.
+        // The reserve holds the notice; a failure here only shortens it.
+        builder.closing = true;
+        truncationNotice(&builder) catch |err| if (err == error.OutOfMemory) return err;
+        builder.finishLine() catch |err| {
+            if (err == error.OutOfMemory) return err;
+            builder.open = false;
+        };
     }
     return builder.result();
+}
+fn truncationNotice(builder: *Builder) !void {
+    try builder.finishLine();
+    try builder.blank();
+    try builder.begin(0, "", .border);
+    try builder.spans(&.{.{ .text = truncation_notice }}, false, false);
+    try builder.finishLine();
 }
 
 test "semantic style maps flags and roles without hyperlink metadata" {
@@ -606,7 +683,7 @@ fn expectWindowLines(win: vaxis.Window, expected: []const []const u8) !void {
     }
 }
 
-test "reader polish: HTML zero width clusters render actual blank cells in normal and highlighted paths" {
+test "reader polish: HTML zero width fillers leave no blank cells in normal and highlighted paths" {
     const allocator = std.testing.allocator;
     var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(allocator);
@@ -617,13 +694,13 @@ test "reader polish: HTML zero width clusters render actual blank cells in norma
     for ([_]bool{ false, true }) |highlight| {
         win.fill(.{});
         _ = if (highlight) prepared.drawHighlightedFolded(win, 0, 0, .{}, false, false, false, "A") else prepared.draw(win, 0, 0, .{}, false);
+        // A standalone filler is dropped, never drawn as a blank cell. The
+        // complete, meaningful Unicode clusters survive in their own cells,
+        // rather than losing attached accents or ZWJ sequences.
         const first = screen.readCell(0, 0).?.char;
-        try std.testing.expectEqualStrings(" ", first.grapheme);
+        try std.testing.expectEqualStrings("A\u{301}", first.grapheme);
         try std.testing.expectEqual(@as(u8, 1), first.width);
-        // The complete, meaningful Unicode clusters survive in their own
-        // cells, rather than replacing attached accents or ZWJ sequences.
-        try std.testing.expectEqualStrings("A\u{301}", screen.readCell(2, 0).?.char.grapheme);
-        try std.testing.expectEqualStrings("👩‍💻", screen.readCell(4, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("👩‍💻", screen.readCell(2, 0).?.char.grapheme);
     }
 }
 
@@ -816,10 +893,96 @@ test "semantic marker and layout row caps degrade without inconsistent widths" {
     const text = try allocator.alloc(u8, 32770);
     defer allocator.free(text);
     for (0..16385) |index| @memcpy(text[index * 2 ..][0..2], "x\n");
-    const tall: html.Document = .{ .blocks = &.{.{ .kind = .pre, .spans = &.{.{ .text = text }} }} };
-    try std.testing.expectError(error.HtmlLayoutUnavailable, layout(arena.allocator(), tall, 40, .unicode));
+    const tall: html.Document = .{ .blocks = &.{ .{ .kind = .pre, .spans = &.{.{ .text = text }} }, .{ .kind = .paragraph, .spans = &.{.{ .text = "Beyond" }} } } };
+    // Locally generated documents are still refused whole, before allocating.
+    try std.testing.expectError(error.HtmlLayoutUnavailable, buildLayout(arena.allocator(), arena.allocator(), tall, 40, .unicode, true));
     var no_vectors: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.HtmlLayoutUnavailable, layout(no_vectors.allocator(), tall, 40, .unicode));
+    try std.testing.expectError(error.HtmlLayoutUnavailable, buildLayout(no_vectors.allocator(), no_vectors.allocator(), tall, 40, .unicode, true));
+    // Received mail keeps the rows that fit and ends with the muted notice.
+    for ([_]u16{ 40, 7, 1 }) |width| {
+        const kept = try layout(arena.allocator(), tall, width, .unicode);
+        try std.testing.expect(kept.lines.len > max_lines - reserved_lines and kept.lines.len <= max_lines and kept.runs.len <= max_runs);
+        var notice: std.ArrayList(u8) = .empty;
+        for (kept.lines[max_lines - reserved_lines ..]) |line| for (kept.runs[line.first..][0..line.count]) |run| {
+            if (run.role == .border) for (run.text) |c| if (c != ' ') try notice.append(arena.allocator(), c);
+        };
+        if (width == 40) {
+            try std.testing.expectEqualStrings("[Formattedviewtruncatedatviewerlimit·pshowsplaintext]", notice.items);
+            try std.testing.expectEqualStrings("x", kept.runs[kept.lines[0].first + 1].text);
+        } else try std.testing.expect(std.mem.startsWith(u8, notice.items, "[Formatted"));
+        for (kept.lines) |line| try std.testing.expect(line.columns <= width);
+    }
+    var runs: std.ArrayList(u8) = .empty;
+    for (0..max_runs) |_| try runs.appendSlice(arena.allocator(), "<b>x</b> y ");
+    var wide = try Prepared.init(allocator, runs.items);
+    defer wide.deinit();
+    try std.testing.expect(wide.document.truncated);
+    try wide.ensure(240, .unicode);
+    const last = wide.cached.lines[wide.cached.lines.len - 1];
+    try std.testing.expectEqualStrings("text]", wide.cached.runs[last.first + last.count - 1].text);
+    try std.testing.expectError(error.HtmlTooComplex, Prepared.initGeneratedMarkdown(allocator, runs.items));
+    const crowded_spans = try arena.allocator().alloc(html.Span, 40000);
+    @memset(crowded_spans, .{ .text = "x " });
+    const crowded = try layout(arena.allocator(), .{ .blocks = &.{.{ .kind = .paragraph, .spans = crowded_spans }} }, 240, .unicode);
+    try std.testing.expect(crowded.runs.len > max_runs - reserved_runs and crowded.runs.len <= max_runs);
+    try std.testing.expectEqualStrings("text]", crowded.runs[crowded.runs.len - 1].text);
+}
+
+test "HTML reader layout keeps at most one blank row between visible content" {
+    const allocator = std.testing.allocator;
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 30, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 30, .height = 24, .screen = &screen };
+    var prepared = try Prepared.init(allocator, "<div><br></div><div>A</div><div>B</div><div><br></div><div>&nbsp;</div><div>C<br><br><br><br>D<br><br></div><p>E</p><p>&nbsp;</p><p>\u{200b}</p><p>F</p>" ++
+        "<table role='presentation'><tr><td>G</td></tr><tr><td>&nbsp;<img src='https://tracker.example.test/p' width='1' height='1'></td></tr><tr><td>H</td><td>I</td></tr></table><blockquote><div>Q1</div><div>Q2</div></blockquote><div>J</div><hr><div>K</div>");
+    defer prepared.deinit();
+    try prepared.ensure(30, .unicode);
+    _ = prepared.draw(win, 0, 0, .{}, false);
+    try expectWindowLines(win, &.{ "A", "B", "", "C", "", "D", "", "E", "", "F", "", "G", "H", "I", "", "  │ Q1", "  │ Q2", "", "J", "", "──────────────────────────────", "", "K" });
+    var empty: usize = 0;
+    for (prepared.cached.lines) |line| {
+        if (line.count == 0) empty += 1 else empty = 0;
+        try std.testing.expect(empty <= 1);
+    }
+    try std.testing.expect(!prepared.blank());
+    var nothing = try Prepared.init(allocator, "<html><head><style>p{}</style><div style='display:none'>Preheader</div><p>&nbsp;\u{200b}<br></p><img src='https://tracker.example.test/p'>");
+    defer nothing.deinit();
+    try std.testing.expect(nothing.blank());
+}
+
+test "HTML reader view degrades deep, truncated and limit-sized received mail to a noticed view" {
+    const allocator = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var deep: std.ArrayList(u8) = .empty;
+    for (0..300) |_| try deep.appendSlice(arena.allocator(), "<div>");
+    try deep.appendSlice(arena.allocator(), "<b>Deep</b> body");
+    var nested = try Prepared.init(allocator, deep.items);
+    defer nested.deinit();
+    try nested.ensure(40, .unicode);
+    try std.testing.expect(!nested.document.truncated);
+    try std.testing.expectEqual(@as(usize, 1), nested.cached.lines.len);
+    try std.testing.expectError(error.HtmlTooComplex, Prepared.initGeneratedMarkdown(allocator, deep.items));
+    var many: std.ArrayList(u8) = .empty;
+    for (0..html.Limits.blocks + 50) |index| try many.appendSlice(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "<p>Row {d}</p>", .{index}));
+    var prepared = try Prepared.init(allocator, many.items);
+    defer prepared.deinit();
+    try std.testing.expect(prepared.document.truncated);
+    try prepared.ensure(80, .unicode);
+    const lines = prepared.cached.lines;
+    try std.testing.expect(lines.len <= max_lines);
+    try std.testing.expectEqualStrings("Row", prepared.cached.runs[lines[0].first].text);
+    const last = lines[lines.len - 1];
+    var notice: std.ArrayList(u8) = .empty;
+    for (prepared.cached.runs[last.first..][0..last.count]) |run| {
+        try std.testing.expectEqual(Role.border, run.role);
+        try notice.appendSlice(arena.allocator(), run.text);
+    }
+    try std.testing.expectEqualStrings(truncation_notice, notice.items);
+    try std.testing.expectEqual(@as(usize, 0), lines[lines.len - 2].count);
+    const oversized = try arena.allocator().alloc(u8, html.Limits.input_bytes + 1);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.HtmlTooLarge, Prepared.init(allocator, oversized));
 }
 
 test "semantic sanitizer reserves one exact buffer and rejects tab expansion before allocation" {
@@ -999,8 +1162,9 @@ test "reader polish: anchor closing and image gaps stay outside link underline a
     const Case = struct { input: []const u8, expected: []const u8, labels: []const Range, bold_gap: bool = false };
     for ([_]Case{
         .{ .input = "<p><a href='https://example.test/'>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
-        .{ .input = "<p><a>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
-        .{ .input = "<p><a href='javascript:unused'>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
+        // A missing or rejected destination is ordinary, undecorated text.
+        .{ .input = "<p><a>label </a>after.</p>", .expected = "label after.", .labels = &.{} },
+        .{ .input = "<p><a href='javascript:unused'>label </a>after.</p>", .expected = "label after.", .labels = &.{} },
         .{ .input = "<p><a href='https://example.test/'><strong>label </strong></a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }}, .bold_gap = true },
         .{ .input = "<p>Please <a href='https://example.test/'>\n confirm\n</a> to continue.</p>", .expected = "Please confirm to continue.", .labels = &.{.{ .start = 7, .end = 14 }} },
         .{ .input = "<p><a href='https://example.test/'><img alt='Logo'></a>Welcome.</p>", .expected = "[Image: Logo] Welcome.", .labels = &.{.{ .start = 0, .end = 13 }} },

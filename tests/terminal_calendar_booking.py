@@ -111,8 +111,8 @@ def tui_case(binary, directory, mono=False, lost=False, rejected=False, long_not
             terminal.send(b"A")
         else:
             terminal.send(b"I")
-            terminal.until(lambda: "Booked appointment" in terminal.text() and "[A Calendar]" in terminal.text())
-            click(terminal, *point(terminal, "[A Calendar]"))
+            terminal.until(lambda: "Booked appointment" in terminal.text() and "[A Add to calendar]" in terminal.text())
+            click(terminal, *point(terminal, "[A Add to calendar]"))
         ready = "Adds this as your own appointment. No reply is sent."
         terminal.until(lambda: ready in terminal.text() or "Read to the end of the notes" in terminal.text())
         shown = terminal.text()

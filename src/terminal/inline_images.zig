@@ -7,7 +7,44 @@ const A = std.mem.Allocator;
 pub const Marker = struct { label: []const u8, url: []const u8, end: usize };
 pub const Removed = struct { source: []const u8, count: usize, cursor: usize };
 pub const Span = struct { start: usize, end: usize };
-pub const Capture = struct { source: []const u8, spans: *std.ArrayList(Span), allocator: A };
+/// A normalized line may have new indentation but keeps its content bytes.
+/// Scopes are stack-owned by the renderer; aliases are sorted by view address.
+pub const SourceAlias = struct { view: []const u8, start: usize };
+pub const SourceScope = struct { aliases: []const SourceAlias, parent: ?*const SourceScope = null };
+pub const Capture = struct {
+    source: []const u8,
+    spans: *std.ArrayList(Span),
+    allocator: A,
+    scope: ?*const SourceScope = null,
+
+    pub fn offset(self: Capture, token: []const u8) !usize {
+        const base = @intFromPtr(self.source.ptr);
+        const address = @intFromPtr(token.ptr);
+        if (address >= base and address - base <= self.source.len and token.len <= self.source.len - (address - base)) return address - base;
+        var scope = self.scope;
+        // Rendering depth is bounded; malformed/cyclic scope metadata cannot
+        // turn source-position recovery into an unbounded walk.
+        for (0..32) |_| {
+            const current = scope orelse return error.InvalidMarkerOrigin;
+            var low: usize = 0;
+            var high = current.aliases.len;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                if (@intFromPtr(current.aliases[middle].view.ptr) <= address) low = middle + 1 else high = middle;
+            }
+            if (low > 0) {
+                const alias = current.aliases[low - 1];
+                const relative = address - @intFromPtr(alias.view.ptr);
+                if (relative <= alias.view.len and token.len <= alias.view.len - relative) {
+                    if (alias.start > self.source.len or alias.view.len > self.source.len - alias.start) return error.InvalidMarkerOrigin;
+                    return alias.start + relative;
+                }
+            }
+            scope = current.parent;
+        }
+        return error.InvalidMarkerOrigin;
+    }
+};
 
 pub fn clipboardCid(value: []const u8) bool {
     const id = mime.contentId(value) catch return false;
@@ -138,11 +175,9 @@ pub const Plan = struct {
     /// quotes, lists, tables and emphasis without a second Markdown grammar.
     pub fn record(self: *Plan, token: []const u8) !void {
         const capture = self.capture orelse return;
-        const base = @intFromPtr(capture.source.ptr);
-        const address = @intFromPtr(token.ptr);
-        if (address < base or address - base > capture.source.len or token.len > capture.source.len - (address - base)) return error.InvalidMarkerOrigin;
+        const start = try capture.offset(token);
         if (capture.spans.items.len == t.Limits.related_resources * 16) return error.MarkdownTooComplex;
-        try capture.spans.append(capture.allocator, .{ .start = address - base, .end = address - base + token.len });
+        try capture.spans.append(capture.allocator, .{ .start = start, .end = start + token.len });
     }
 };
 
@@ -174,4 +209,20 @@ pub fn removeSpans(a: A, source: []const u8, found: []const Span, old_cursor: us
     }
     try out.appendSlice(a, source[cursor..]);
     return .{ .source = try out.toOwnedSlice(a), .count = found.len, .cursor = mapped };
+}
+
+test "parser tabs: normalized image origins exclude generated indentation and preserve bounds" {
+    const source = "image-token";
+    const view = try std.testing.allocator.dupe(u8, "  image-token");
+    defer std.testing.allocator.free(view);
+    var aliases = [_]SourceAlias{.{ .view = view[2..], .start = 0 }};
+    const scope: SourceScope = .{ .aliases = &aliases };
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(std.testing.allocator);
+    const capture: Capture = .{ .source = source, .spans = &spans, .allocator = std.testing.allocator, .scope = &scope };
+    try std.testing.expectEqual(@as(usize, 0), try capture.offset(view[2..]));
+    try std.testing.expectEqual(@as(usize, 6), try capture.offset(view[8..]));
+    try std.testing.expectError(error.InvalidMarkerOrigin, capture.offset(view[0..3]));
+    aliases[0].start = source.len;
+    try std.testing.expectError(error.InvalidMarkerOrigin, capture.offset(view[2..]));
 }

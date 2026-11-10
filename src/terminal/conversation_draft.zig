@@ -25,6 +25,12 @@ pub const ForwardOptions = struct {
 };
 pub fn requireBody(message: t.Message) !void {
     if (message.bodyCacheError.len != 0) return error.MessageBodyUnavailable;
+    // Reading degrades gracefully; writing does not. A source known to be
+    // incomplete is shown with its warning but is never quoted or forwarded
+    // as though it were the whole message.
+    for ([_][]const u8{ "BodySizeMismatch", "ContentTruncated" }) |incomplete| {
+        if (std.mem.eql(u8, message.decodeWarning, incomplete)) return error.MessageBodyUnavailable;
+    }
 }
 pub fn listAddresses(a: std.mem.Allocator, list: *const recipients.List) ![]const t.Address {
     const result = try a.alloc(t.Address, list.count);
@@ -207,4 +213,19 @@ test "message isolation: body refusals block reply all and forwards before desti
     try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{}));
     try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{ .body_text = "Stale source", .omitted_attachments = 3 }));
     try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{ .original = .{ .sourceMessageId = message.id, .bodyHtml = "<p>Stale source</p>" } }));
+}
+
+test "parser leniency: an incomplete readable source is never quoted or forwarded as complete" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var message: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "sender@example.test" }, .to = &.{.{ .address = "self@example.test" }}, .subject = "Readable", .bodyText = "Shown part", .messageId = "<source@example.test>" };
+    _ = try reply(a, message, .{ .account = "self@example.test" });
+    for ([_][]const u8{ "BodySizeMismatch", "ContentTruncated" }) |warning| {
+        message.decodeWarning = warning;
+        try std.testing.expectError(error.MessageBodyUnavailable, reply(a, message, .{ .account = "self@example.test" }));
+    }
+    // Replacement characters are visible in the quote the author reviews.
+    message.decodeWarning = "UnsupportedCharset";
+    _ = try reply(a, message, .{ .account = "self@example.test" });
 }

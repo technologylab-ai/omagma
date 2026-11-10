@@ -107,9 +107,11 @@ test "live message body: other short inline text stays an explicit refusal" {
     }) |case| {
         var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try wire(a, case.headers, case.size) }} };
         const refused = try gmail.dispatchAuthorized(std.testing.io, a, account, &.{"mail-read"}, peer.transport(), "mail.read", try j.value(a, .{ .messageId = "m1" }));
-        try std.testing.expectEqualStrings("BodySizeMismatch", j.text(refused, "bodyCacheError"));
+        // The returned bytes are shown with an explicit incomplete-body warning.
+        try std.testing.expectEqualStrings("", j.text(refused, "bodyCacheError"));
+        try std.testing.expectEqualStrings("BodySizeMismatch", j.text(refused, "decodeWarning"));
         try std.testing.expectEqualStrings("m1", j.text(refused, "id"));
-        try std.testing.expectEqualStrings("", j.text(refused, "bodyText"));
+        try std.testing.expect(j.text(refused, "bodyText").len != 0);
         try std.testing.expectEqual(@as(usize, 1), peer.calls);
         try std.testing.expectEqual(@as(usize, 0), peer.writes);
     }

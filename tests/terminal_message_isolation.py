@@ -70,7 +70,8 @@ def exercise(binary, directory):
         unusual = client.request("mail.read", messageId="unusual")
         require(unusual["decodeWarning"] == "AmbiguousSender" and unusual["metadataPartial"], "unusual envelope lacks visible status")
         require(unusual["bodyText"] == "Visible body of unusual.\n", "legal unusual envelope concealed the body")
-        require(not unusual["from"]["address"] and not any(unusual[key] for key in ("to", "cc", "replyTo")), "display fallback invented reply recipients")
+        require(not unusual["from"]["address"], "ambiguous senders produced a guessed reply target")
+        require([row["address"] for row in unusual["to"]] == [ACCOUNTS[0]], "an ambiguous sender discarded the unrelated recipients")
         require(client.request("mail.reply", messageId="unusual", ok=False)["code"] == "UnsafeReplyMetadata", "unsafe envelope reached reply preparation")
         require(set(by_id(client.request("mail.thread", threadId="isolation-thread"))) == set(baseline), "thread dropped unusual envelope or neighbor")
 
@@ -82,13 +83,18 @@ def exercise(binary, directory):
         save()
         delta = by_id(client.request("mail.refresh", label="INBOX", limit=10, prefetchLimit=10))
         require(set(delta) == {"good1", "unusual", "good2", "calendar", "charset", "good3"}, "history merge lost a message")
-        require(delta["calendar"]["bodyCacheError"] == "CalendarTooLarge", "calendar bound omitted final refusal")
-        require(delta["charset"]["bodyCacheError"] == "UnsupportedCharset", "charset bound omitted final refusal")
+        # Neither an oversized calendar nor an unmapped charset label refuses
+        # the message any more: both stay readable rows.
+        require(not delta["calendar"]["bodyCacheError"] and not delta["charset"]["bodyCacheError"], "a degradable part refused its whole message")
+        charset = client.request("mail.read", messageId="charset")
+        require(charset["bodyText"] == "Visible body of charset.\n" and not charset["decodeWarning"], "ASCII text under an unmapped charset label was not shown")
+        charset_reply = client.request("mail.reply", messageId="charset")
+        client.request("draft.discard", draftId=charset_reply["id"])
         stats = client.request("cache.stats", cacheOnly=True)
         require(stats["historyId"] == "101", "message-local refusal pinned account history")
         before = stats["syncBodyGets"]
         drafts = client.request("draft.list")
-        for identifier in ("calendar", "charset"):
+        for identifier in ("calendar",):
             for command, options in (
                 ("mail.reply", {}), ("mail.reply", {"all": True}),
                 ("mail.reply", {"preserveFormatting": True, "bodyFormat": "markdown"}),
@@ -109,7 +115,9 @@ def exercise(binary, directory):
         require(client.request("cache.stats", cacheOnly=True)["fixtureSends"] == 0, "refused-body actions dispatched mail")
         for cached in (False, True):
             calendar = client.request("mail.read", messageId="calendar", cacheOnly=cached)
-            require(calendar["bodyCacheError"] == "CalendarTooLarge" and not calendar["bodyText"], "reader omitted bounded placeholder")
+            require(not calendar["bodyCacheError"] and calendar["decodeWarning"] == "BodySizeMismatch"
+                    and not calendar.get("invitation") and [row["filename"] for row in calendar["attachments"]] == ["invite.ics"],
+                    "oversized calendar was not kept as a plain file with its warning")
             thread = by_id(client.request("mail.thread", threadId="isolation-thread", cacheOnly=cached))
             require(set(thread) == set(delta), "refused body removed thread neighbors")
         client.request("mail.refresh", label="INBOX", limit=10, prefetchLimit=10)

@@ -28,6 +28,71 @@ Before a heavy build, benchmark or runtime suite on a shared host, reserve the h
 
 This is cooperative exclusion, not CPU isolation or proof of a quiet host. Recheck the host and acquire a fresh reservation for later work. If a coordinator owns the reservation, run only work it delegates and leave release to that owner. Keep local ownership metadata private.
 
+## Calendar attachment and parser whitespace checks
+
+`python3 tests/terminal_subject_newlines.py --binary /path/to/omagma`
+checks decoded newlines in Gmail Subject fields, recovery of persisted decoder
+refusals, unchanged structured-header validation, reply preparation and the
+owned-PTY reader. `--old-binary` first reproduces the refusal with an earlier
+decoder. Raw RFC headers and outgoing header validation remain strict; only the
+provider's bounded, unstructured Subject scalar accepts display line breaks.
+
+`python3 tests/terminal_calendar_attachments.py --binary /path/to/omagma`
+checks an external or inline uppercase `.ICS` attachment labelled `text/plain`,
+published and no-METHOD personal events, all-day exclusive dates, popup reminders,
+unsupported alarms, long-note consent, durable review, deduplication and unknown
+outcomes. The fixture deliberately includes literal tabs in DESCRIPTION, a
+leading escaped newline in SUMMARY and no final CRLF. `--old-binary` additionally
+checks recovery of a source missed by the previous decoder. These are synthetic
+providers and owned PTYs; opening/reviewing must produce no writes or RSVP mail.
+The suite is part of `terminal_workflow_regressions.py`; retain the existing
+booking, invitation and RSVP suites alongside it.
+
+Correctness tests prefixed `parser tabs:` cover presentation names, escaped
+recipient/filename quoted-pairs and Markdown separators and tab-stop indentation,
+including partial tabs and ordinary allocator ownership. Both calendar property
+parsers accept RFC whitespace; identifier/token/date validators remain strict.
+Mail headers, HTML, JSON/JSONL, configuration and contacts retain their existing
+whitespace decoding or normalization policies. Parser compatibility requires
+checking each format's grammar, not globally allowing control bytes.
+
+## Received-content leniency
+
+Reading degrades per field and per part; writing stays strict. Correctness
+tests prefixed `parser leniency:`, `charsets:`, `invitation tolerant:` and
+`calendar tolerant:` cover the rules below, and the canonical workflow suites
+assert the same outcomes end to end.
+
+- **Mail headers.** Only the headers the decoder consults are read; routing
+  chains of any size or count are ignored. Decoded line breaks and control
+  bytes are display whitespace, repeated recipient headers merge, the first of
+  any other repeated header wins, and long values are clipped. Text after a
+  decoded line break never becomes a header or a recipient.
+- **Addresses.** Every readable mailbox is kept and unreadable text is dropped.
+  An unreadable or multi-author sender is display-only (`SenderUnavailable`,
+  `AmbiguousSender`) and is never a reply target.
+- **Bodies and parts.** Unknown or mislabelled charsets decode with aliases,
+  single-byte tables or replacement characters (`UnsupportedCharset` only when
+  replacement characters are shown). Oversized calendars and text parts stay
+  downloadable files, odd media types become opaque files, long filenames are
+  shortened, and part, depth and attachment counts leave out the excess
+  (`ContentTruncated`). A declared size that disagrees with the returned bytes
+  is shown with `BodySizeMismatch`. Hard memory bounds are unchanged.
+- **Writes.** Reply and forward refuse a source marked `BodySizeMismatch` or
+  `ContentTruncated`; forwarding the original `.eml` remains available. RSVP
+  and receipt matching use the strict invitation parser and require an
+  invitation read without any tolerated defect. Calendar events repaired while
+  reading are locked against edits.
+- **Formatted reader.** Viewer limits truncate with a notice instead of
+  discarding the formatted view; empty blocks, tracking pixels and invisible
+  padding are dropped.
+- **Stale warnings.** Decoder revision 7 re-reads, once, every retained row
+  whose recorded warning or refusal a newer decoder accepts.
+
+`scripts/gen_charset_tables.py` regenerates `src/terminal/charset_tables.zig`
+from the Python standard-library codecs; it is a maintainer tool, not a runtime
+helper.
+
 ## Release correctness inventory
 
 The following commands use synthetic accounts and never authorize Gmail or edit installed desktop configuration:

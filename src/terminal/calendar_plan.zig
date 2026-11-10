@@ -192,7 +192,8 @@ pub fn plan(input: Input) !Decision {
             if (event.sequence > invitation.version.sequence) return .stale_source;
             if (event.cancelled) return .{ .previously_cancelled = event };
             if (invitation.version.order(tracked.version) == .eq) return .{ .existing = event };
-            if (event.locked or event.etag.len == 0) return .{ .existing = event };
+            // Published files are personal copies, never organizer updates.
+            if (invitation.method == .publish or event.locked or event.etag.len == 0) return .{ .existing = event };
             if (cancelling) return .{ .review_cancel = event };
             if (!input.times_resolved) return .time_review_required;
             return .{ .review_update = event };

@@ -73,11 +73,17 @@ pub fn lookup(a: std.mem.Allocator, target: t.Target, uid: []const u8, page_toke
 }
 
 pub fn agenda(a: std.mem.Allocator, target: t.Target, window: t.Window, page_token: []const u8) !Request {
+    return agendaSized(a, target, window, page_token, t.Limits.page_events);
+}
+/// A smaller page lets a window of unusually large events fit the response
+/// byte budget instead of failing the complete agenda.
+pub fn agendaSized(a: std.mem.Allocator, target: t.Target, window: t.Window, page_token: []const u8, page_events: usize) !Request {
+    if (page_events == 0 or page_events > t.Limits.page_events) return error.InvalidCalendarRequest;
     try target.validate();
     try window.validate();
     const start = try time.format(a, .{ .kind = .instant, .value = window.start_ms });
     const end = try time.format(a, .{ .kind = .instant, .value = window.end_ms });
-    const url = try std.fmt.allocPrint(a, "{s}/events?timeMin={s}&timeMax={s}&timeZone={s}&singleEvents=true&orderBy=startTime&showHiddenInvitations=true&maxResults=100&maxAttendees=1&fields=items({s}),nextPageToken{s}", .{ try calendarPath(a, target), try encode(a, start), try encode(a, end), try encode(a, window.time_zone), event_fields, try tokenSuffix(a, page_token) });
+    const url = try std.fmt.allocPrint(a, "{s}/events?timeMin={s}&timeMax={s}&timeZone={s}&singleEvents=true&orderBy=startTime&showHiddenInvitations=true&maxResults={d}&maxAttendees=1&fields=items({s}),nextPageToken{s}", .{ try calendarPath(a, target), try encode(a, start), try encode(a, end), try encode(a, window.time_zone), page_events, event_fields, try tokenSuffix(a, page_token) });
     // Bounded window refreshes intentionally do not mix syncToken with
     // timeMin/timeMax, which Google forbids.
     return .{ .target = target, .kind = .agenda, .method = .GET, .url = url };
@@ -110,6 +116,8 @@ pub fn prepareResolvedImport(a: std.mem.Allocator, source: t.Invitation, intent:
     const source_hex = std.fmt.bytesToHex(source.source_hash, .lower);
     const Attendee = struct { email: []const u8, responseStatus: []const u8 };
     const attendees: ?[]const Attendee = if (source.attendee.len == 0) null else &.{.{ .email = source.attendee, .responseStatus = "needsAction" }};
+    const Reminders = struct { useDefault: bool, overrides: []const t.Reminder };
+    const reminders: ?Reminders = if (source.method == .publish and (source.reminders.len != 0 or source.unsupported_reminders != 0)) .{ .useDefault = false, .overrides = source.reminders } else null;
     const body = try std.json.Stringify.valueAlloc(a, .{
         .iCalUID = source.uid,
         .organizer = .{ .email = if (source.attendee.len == 0) source.account else source.organizer },
@@ -122,6 +130,7 @@ pub fn prepareResolvedImport(a: std.mem.Allocator, source: t.Invitation, intent:
         // No guest is invented for an attendee-free booking. A Calendar copy
         // and a verified-attendee RSVP are deliberately separate operations.
         .attendees = attendees,
+        .reminders = reminders,
         .transparency = if (source.transparent) @as([]const u8, "transparent") else "opaque",
         .visibility = if (source.private) @as([]const u8, "private") else "default",
         .extendedProperties = .{ .private = .{ .omagmaOperation = intent.operation_id, .omagmaSource = source_hex[0..], .omagmaOriginalOrganizer = if (source.attendee.len == 0) @as(?[]const u8, source.organizer) else null, .omagmaPersonalCopy = if (source.attendee.len == 0) @as(?[]const u8, "1") else null } },
@@ -177,7 +186,8 @@ fn validateInvitationText(source: t.Invitation, description: []const u8) !void {
 }
 
 fn validSpan(span: invitation.Span) !void {
-    if (span.start.kind != span.end.kind or span.end.value <= span.start.value) return error.InvalidCalendarTime;
+    // Google accepts a zero-length timed event; an all-day end is exclusive.
+    if (span.start.kind != span.end.kind or span.end.value < span.start.value or (span.start.kind == .date and span.end.value == span.start.value)) return error.InvalidCalendarTime;
 }
 
 fn sourceMatches(source: t.Invitation, intent: plan.Intent) bool {
@@ -237,7 +247,45 @@ fn diagnosticText(a: std.mem.Allocator, raw: []const u8, limit: usize) ![]const 
             index += 1;
             continue;
         };
-        if (cp >= 0x20 and !(cp >= 0x7f and cp <= 0x9f) and !(cp >= 0x202a and cp <= 0x202e) and !(cp >= 0x2066 and cp <= 0x2069)) try out.appendSlice(a, raw[index..][0..count]);
+        if (!control(cp) and !bidiOverride(cp)) try out.appendSlice(a, raw[index..][0..count]);
+        index += count;
+    }
+    return out.toOwnedSlice(a);
+}
+fn control(cp: u21) bool {
+    return cp < 0x20 or (cp >= 0x7f and cp <= 0x9f);
+}
+fn bidiOverride(cp: u21) bool {
+    return (cp >= 0x202a and cp <= 0x202e) or (cp >= 0x2066 and cp <= 0x2069);
+}
+/// Tolerant counterpart of diagnosticText for provider presentation text.
+/// C0, DEL and C1 controls become spaces, bidirectional overrides and
+/// undecodable bytes are removed, and the result is cut at a code point
+/// boundary. `changed` reports that the returned text is not the provider's.
+fn displayText(a: std.mem.Allocator, raw: []const u8, limit: usize, kind: enum { line, notes }, changed: *bool) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var index: usize = 0;
+    while (index < raw.len) {
+        const count = std.unicode.utf8ByteSequenceLength(raw[index]) catch 0;
+        const cp: ?u21 = if (count == 0 or count > raw.len - index) null else std.unicode.utf8Decode(raw[index..][0..count]) catch null;
+        const value = cp orelse {
+            changed.* = true;
+            index += 1;
+            continue;
+        };
+        if (count > limit - out.items.len) {
+            changed.* = true;
+            break;
+        }
+        if (value == '\n' or value == '\t' or (value == '\r' and kind == .notes)) {
+            try out.append(a, @intCast(value));
+        } else if (control(value)) {
+            changed.* = true;
+            try out.append(a, ' ');
+        } else if (bidiOverride(value)) {
+            changed.* = true;
+        } else try out.appendSlice(a, raw[index..][0..count]);
         index += count;
     }
     return out.toOwnedSlice(a);
@@ -271,7 +319,56 @@ pub fn decodePage(a: std.mem.Allocator, target: t.Target, bytes: []const u8, fet
     return .{ .target = owned_target, .events = events, .next_page_token = try field(a, value, "nextPageToken", 4096, true), .fetched_at_ms = fetched_at_ms };
 }
 
-pub const CalendarPage = struct { calendars: []const t.Calendar, next_page_token: []const u8 };
+/// Agenda and week reads only. An event the strict decoder refuses becomes a
+/// locked placeholder when its id and start are readable, and is otherwise
+/// dropped and counted, so one provider defect never hides the whole window.
+/// Lookup and every write target keep decodePage/decodeDocument.
+pub fn decodeAgendaPage(a: std.mem.Allocator, target: t.Target, bytes: []const u8, fetched_at_ms: i64) !t.Page {
+    try target.validate();
+    const value = try parseJson(a, bytes);
+    const items = j.get(value, "items") orelse return error.InvalidCalendarResponse;
+    if (items != .array or items.array.items.len > t.Limits.page_events) return error.TooManyCalendarEvents;
+    const events = try a.alloc(t.Event, items.array.items.len);
+    const owned_target: t.Target = .{ .account = try a.dupe(u8, target.account), .calendar_id = try a.dupe(u8, target.calendar_id) };
+    var count: usize = 0;
+    var dropped: usize = 0;
+    for (items.array.items) |item| {
+        const event = decodeEventMode(a, owned_target, item, true) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => placeholder(a, owned_target, item) orelse {
+                dropped += 1;
+                continue;
+            },
+        };
+        // A repeated id would be a paging contradiction for the whole
+        // snapshot; within one tolerant page the first reading is kept.
+        const repeated = for (events[0..count]) |previous| {
+            if (std.mem.eql(u8, previous.id, event.id)) break true;
+        } else false;
+        if (repeated) {
+            dropped += 1;
+            continue;
+        }
+        events[count] = event;
+        count += 1;
+    }
+    return .{ .target = owned_target, .events = events[0..count], .next_page_token = try field(a, value, "nextPageToken", 4096, true), .fetched_at_ms = fetched_at_ms, .dropped = dropped };
+}
+pub const unavailable_summary = "Event details unavailable";
+fn placeholder(a: std.mem.Allocator, target: t.Target, item: j.Value) ?t.Event {
+    const id = field(a, item, "id", 1024, false) catch return null;
+    const start = point(a, j.get(item, "start") orelse return null, true) catch return null;
+    var end = if (j.get(item, "end")) |raw| point(a, raw, true) catch start else start;
+    if (end.kind != start.kind or end.value < start.value) end = start;
+    // No etag and locked: visible and busy, never an edit or RSVP target.
+    return .{ .target = target, .id = id, .summary = unavailable_summary, .start = start, .end = end, .locked = true };
+}
+
+/// `skipped` entries had no usable id; the list is then incomplete.
+pub const CalendarPage = struct { calendars: []const t.Calendar, next_page_token: []const u8, skipped: usize = 0 };
+/// Discovery is a read: one unreadable entry is skipped and counted, and an
+/// entry with an unknown role or no timezone is listed without access it
+/// cannot prove. decodeCalendar stays strict.
 pub fn decodeCalendars(a: std.mem.Allocator, account: []const u8, bytes: []const u8) !CalendarPage {
     try b.address(account);
     const value = try parseJson(a, bytes);
@@ -279,8 +376,15 @@ pub fn decodeCalendars(a: std.mem.Allocator, account: []const u8, bytes: []const
     if (items != .array or items.array.items.len > t.Limits.calendar_page) return error.TooManyCalendars;
     const calendars = try a.alloc(t.Calendar, items.array.items.len);
     const owned_account = try a.dupe(u8, account);
-    for (items.array.items, calendars) |item, *calendar| calendar.* = try decodeCalendarValue(a, owned_account, item);
-    return .{ .calendars = calendars, .next_page_token = try field(a, value, "nextPageToken", 4096, true) };
+    var count: usize = 0;
+    for (items.array.items) |item| {
+        calendars[count] = decodeCalendarValue(a, owned_account, item, true) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        count += 1;
+    }
+    return .{ .calendars = calendars[0..count], .next_page_token = try field(a, value, "nextPageToken", 4096, true), .skipped = items.array.items.len - count };
 }
 
 pub fn getCalendar(a: std.mem.Allocator, target: t.Target) !Request {
@@ -288,25 +392,51 @@ pub fn getCalendar(a: std.mem.Allocator, target: t.Target) !Request {
     return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList/{s}", .{try encode(a, target.calendar_id)}) };
 }
 pub fn decodeCalendar(a: std.mem.Allocator, target: t.Target, bytes: []const u8) !t.Calendar {
-    const calendar = try decodeCalendarValue(a, target.account, try parseJson(a, bytes));
+    return boundCalendar(target, try decodeCalendarValue(a, target.account, try parseJson(a, bytes), false));
+}
+/// A named calendar opened for reading. Any tolerated defect leaves it at
+/// most readable, so the same value can never authorize a write.
+pub fn decodeCalendarForRead(a: std.mem.Allocator, target: t.Target, bytes: []const u8) !t.Calendar {
+    return boundCalendar(target, try decodeCalendarValue(a, target.account, try parseJson(a, bytes), true));
+}
+fn boundCalendar(target: t.Target, calendar: t.Calendar) !t.Calendar {
     if (!calendar.target.eql(target) and !(std.mem.eql(u8, target.calendar_id, "primary") and calendar.primary)) return error.CalendarIdentityMismatch;
     return calendar;
 }
-fn decodeCalendarValue(a: std.mem.Allocator, account: []const u8, item: j.Value) !t.Calendar {
+/// Shown and used for display windows when the provider states no usable
+/// calendar timezone; such a calendar is never writable.
+pub const fallback_time_zone = "UTC";
+fn decodeCalendarValue(a: std.mem.Allocator, account: []const u8, item: j.Value, tolerant: bool) !t.Calendar {
     try b.address(account);
-    const role = try field(a, item, "accessRole", 32, false);
-    const access: t.Access = if (std.mem.eql(u8, role, "owner")) .owner else if (std.mem.eql(u8, role, "writer")) .writer else if (std.mem.eql(u8, role, "writerWithoutPrivateAccess")) .writer_without_private else if (std.mem.eql(u8, role, "reader")) .reader else if (std.mem.eql(u8, role, "freeBusyReader")) .free_busy else if (std.mem.eql(u8, role, "none")) .none else return error.InvalidCalendarResponse;
-    var calendar: t.Calendar = .{ .target = .{ .account = try a.dupe(u8, account), .calendar_id = try field(a, item, "id", 1024, false) }, .summary = try field(a, item, "summary", 1024, true), .time_zone = try field(a, item, "timeZone", 512, false), .access = access, .primary = try j.boolean(item, "primary", false), .selected = try j.boolean(item, "selected", false) };
+    const role = field(a, item, "accessRole", 32, false) catch |err| if (tolerant) "" else return err;
+    var access: t.Access = if (std.mem.eql(u8, role, "owner")) .owner else if (std.mem.eql(u8, role, "writer")) .writer else if (std.mem.eql(u8, role, "writerWithoutPrivateAccess")) .writer_without_private else if (std.mem.eql(u8, role, "reader")) .reader else if (std.mem.eql(u8, role, "freeBusyReader")) .free_busy else if (std.mem.eql(u8, role, "none") or tolerant) .none else return error.InvalidCalendarResponse;
+    var unused = false;
+    const summary = calendarSummary(a, item) catch |err| if (!tolerant or err == error.OutOfMemory) return err else try displayText(a, j.text(item, "summary"), 1024, .line, &unused);
+    var time_zone = field(a, item, "timeZone", 512, false) catch |err| if (tolerant) "" else return err;
+    time.validateZoneName(time_zone) catch |err| {
+        if (!tolerant) return err;
+        time_zone = fallback_time_zone;
+        // Writes resolve wall times in the calendar's zone; a guess is not one.
+        if (@backingInt(access) > @backingInt(t.Access.reader)) access = .reader;
+    };
+    var calendar: t.Calendar = .{ .target = .{ .account = try a.dupe(u8, account), .calendar_id = try field(a, item, "id", 1024, false) }, .summary = if (tolerant) try @import("mime.zig").sanitizeHeaderText(summary, a) else summary, .time_zone = time_zone, .access = access, .primary = j.boolean(item, "primary", false) catch |err| if (tolerant) false else return err, .selected = j.boolean(item, "selected", false) catch |err| if (tolerant) false else return err };
     if (j.get(item, "conferenceProperties")) |properties| if (j.get(properties, "allowedConferenceSolutionTypes")) |allowed| {
-        if (allowed != .array or allowed.array.items.len > 16) return error.InvalidCalendarResponse;
-        for (allowed.array.items) |solution| if (std.mem.eql(u8, try j.string(solution), "hangoutsMeet")) {
+        if (allowed != .array or allowed.array.items.len > 16) {
+            if (!tolerant) return error.InvalidCalendarResponse;
+        }
+        // Tolerant reads inspect the first sixteen; missing Meet support
+        // only withholds an optional conference, never adds a capability.
+        if (allowed == .array) for (allowed.array.items[0..@min(allowed.array.items.len, 16)]) |solution| if (std.mem.eql(u8, j.string(solution) catch |err| if (tolerant) "" else return err, "hangoutsMeet")) {
             calendar.supports_meet = true;
         };
     };
-    calendar.data_owner = try field(a, item, "dataOwner", 512, true);
-    if (calendar.data_owner.len != 0) try b.address(calendar.data_owner);
+    calendar.data_owner = field(a, item, "dataOwner", 512, true) catch |err| if (tolerant) "" else return err;
+    if (calendar.data_owner.len != 0) b.address(calendar.data_owner) catch |err| {
+        if (!tolerant) return err;
+        // Unverified ownership: the owned-events scope does not apply.
+        calendar.data_owner = "";
+    };
     calendar.owned_scope_verified = calendar.primary or std.ascii.eqlIgnoreCase(calendar.data_owner, account);
-    try time.validateZoneName(calendar.time_zone);
     return calendar;
 }
 
@@ -361,16 +491,37 @@ pub fn decodeDocument(a: std.mem.Allocator, target: t.Target, bytes: []const u8)
 }
 
 fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
-    const status = try field(a, item, "status", 32, false);
-    if (!std.mem.eql(u8, status, "confirmed") and !std.mem.eql(u8, status, "tentative") and !std.mem.eql(u8, status, "cancelled")) return error.InvalidCalendarResponse;
+    return decodeEventMode(a, target, item, false);
+}
+/// Read-only detail view of one event. Presentation defects are repaired and
+/// lock the result; identity fields stay strict. Writes use decodeDocument.
+pub fn decodeDocumentForRead(a: std.mem.Allocator, target: t.Target, bytes: []const u8) !EventDocument {
+    try target.validate();
+    const value = try parseJson(a, bytes);
+    const owned_target: t.Target = .{ .account = try a.dupe(u8, target.account), .calendar_id = try a.dupe(u8, target.calendar_id) };
+    return .{ .event = try decodeEventMode(a, owned_target, value, true), .value = value };
+}
+/// `tolerant` repairs one presentation property at a time for read-only
+/// views. Whatever it repairs is no longer the provider's exact data, so the
+/// event is returned locked: it cannot be edited, patched or answered, and a
+/// repaired description can never be copied back into a write. Identity
+/// (id, UID, etag, organizer, sequence, operation markers) is never repaired.
+fn decodeEventMode(a: std.mem.Allocator, target: t.Target, item: j.Value, tolerant: bool) !t.Event {
+    var lossy = false;
+    const status = field(a, item, "status", 32, false) catch |err| if (tolerant) "" else return err;
+    if (!std.mem.eql(u8, status, "confirmed") and !std.mem.eql(u8, status, "tentative") and !std.mem.eql(u8, status, "cancelled")) {
+        if (!tolerant) return error.InvalidCalendarResponse;
+        // Shown as an ordinary event; an unknown state is not a cancellation.
+        lossy = true;
+    }
     var event: t.Event = .{
         .target = target,
         .id = try field(a, item, "id", 1024, false),
         .uid = try field(a, item, "iCalUID", 1024, true),
         .etag = try field(a, item, "etag", 1024, true),
-        .summary = try field(a, item, "summary", 4096, true),
+        .summary = try displayField(a, item, "summary", 4096, if (tolerant) &lossy else null),
         .event_type = try field(a, item, "eventType", 64, true),
-        .location = try field(a, item, "location", 4096, true),
+        .location = try displayField(a, item, "location", 4096, if (tolerant) &lossy else null),
         .recurring_event_id = try field(a, item, "recurringEventId", 1024, true),
         .cancelled = std.mem.eql(u8, status, "cancelled"),
         .locked = try j.boolean(item, "locked", false),
@@ -381,33 +532,47 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
     if (sequence < 0 or sequence > std.math.maxInt(i32)) return error.InvalidCalendarResponse;
     event.sequence = @intCast(sequence);
     if (j.get(item, "description")) |description| {
-        const value = try j.string(description);
-        if (value.len > 64 * 1024 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidCalendarResponse;
-        for (value) |byte| if ((byte < 32 and byte != '\n' and byte != '\r' and byte != '\t') or byte == 127) return error.InvalidCalendarResponse;
-        event.description = try a.dupe(u8, value);
+        if (tolerant) {
+            var changed = description != .string;
+            event.description = try displayText(a, if (description == .string) description.string else "", 64 * 1024, .notes, &changed);
+            lossy = lossy or changed;
+        } else {
+            const value = try j.string(description);
+            if (value.len > 64 * 1024 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidCalendarResponse;
+            for (value) |byte| if ((byte < 32 and byte != '\n' and byte != '\r' and byte != '\t') or byte == 127) return error.InvalidCalendarResponse;
+            event.description = try a.dupe(u8, value);
+        }
     }
     if (j.get(item, "organizer")) |organizer| event.organizer = try field(a, organizer, "email", 512, true);
-    if (j.get(item, "start")) |start| event.start = try point(a, start);
-    if (j.get(item, "end")) |end| event.end = try point(a, end);
-    if (j.get(item, "originalStartTime")) |original| event.original_start = try point(a, original);
+    if (j.get(item, "start")) |start| event.start = try pointMode(a, start, tolerant, &lossy);
+    if (j.get(item, "end")) |end| event.end = try pointMode(a, end, tolerant, &lossy);
+    if (j.get(item, "originalStartTime")) |original| event.original_start = try pointMode(a, original, tolerant, &lossy);
     if (!event.cancelled and (event.start == null or event.end == null)) return error.InvalidCalendarResponse;
-    if (event.start != null and event.end != null and (event.start.?.kind != event.end.?.kind or event.end.?.value < event.start.?.value)) return error.InvalidCalendarResponse;
-    const hangout = try field(a, item, "hangoutLink", 4096, true);
+    if (event.start != null and event.end != null and (event.start.?.kind != event.end.?.kind or event.end.?.value < event.start.?.value)) {
+        if (!tolerant) return error.InvalidCalendarResponse;
+        // Shown at its start; the stated end cannot be trusted or rewritten.
+        event.end = event.start;
+        lossy = true;
+    }
+    const hangout = field(a, item, "hangoutLink", 4096, true) catch |err| if (tolerant) "" else return err;
     if (tools.safeUrl(hangout)) event.join_url = hangout;
-    const html = try field(a, item, "htmlLink", 4096, true);
+    const html = field(a, item, "htmlLink", 4096, true) catch |err| if (tolerant) "" else return err;
     if (tools.safeUrl(html)) event.html_url = html;
     if (j.get(item, "conferenceData")) |conference| {
         event.conference_present = true;
         if (j.get(conference, "createRequest")) |create| if (j.get(create, "status")) |status_value| {
-            event.conference_status = try field(a, status_value, "statusCode", 32, true);
+            event.conference_status = field(a, status_value, "statusCode", 32, true) catch |err| if (tolerant) "" else return err;
         };
     }
     if (j.get(item, "conferenceData")) |conference| if (j.get(conference, "entryPoints")) |points| {
-        if (points != .array or points.array.items.len > 32) return error.InvalidCalendarResponse;
-        for (points.array.items) |entry| {
+        if (points != .array or points.array.items.len > 32) {
+            if (!tolerant) return error.InvalidCalendarResponse;
+        }
+        // Tolerant reads inspect the first 32 entry points for a video link.
+        if (points == .array) for (points.array.items[0..@min(points.array.items.len, 32)]) |entry| {
             const uri = j.text(entry, "uri");
             if (event.join_url.len == 0 and std.mem.eql(u8, j.text(entry, "entryPointType"), "video") and tools.safeUrl(uri)) event.join_url = try a.dupe(u8, uri);
-        }
+        };
     };
     // Imported invitations retain their original meeting URL in LOCATION or
     // DESCRIPTION without manufacturing Google conference data. Keep the same
@@ -425,21 +590,43 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
     }
     event.attendees_omitted = try j.boolean(item, "attendeesOmitted", false);
     if (j.get(item, "attendees")) |attendees| {
-        if (attendees != .array) return error.InvalidCalendarResponse;
-        event.attendee_count = attendees.array.items.len;
-        const retained = @min(attendees.array.items.len, 200);
-        const emails = try a.alloc([]const u8, retained);
-        for (attendees.array.items[0..retained], emails) |attendee, *email| email.* = try field(a, attendee, "email", 512, false);
-        event.attendees = emails;
-        event.attendees_omitted = event.attendees_omitted or attendees.array.items.len > retained;
-        var self_seen = false;
-        for (attendees.array.items) |attendee| if (try j.boolean(attendee, "self", false)) {
-            if (self_seen) return error.InvalidCalendarResponse;
-            self_seen = true;
-            const response = j.text(attendee, "responseStatus");
-            event.response = if (std.mem.eql(u8, response, "accepted")) .accepted else if (std.mem.eql(u8, response, "tentative")) .tentative else if (std.mem.eql(u8, response, "declined")) .declined else if (std.mem.eql(u8, response, "needsAction")) .needs_action else .unknown;
-        };
+        if (attendees != .array) {
+            if (!tolerant) return error.InvalidCalendarResponse;
+            lossy = true;
+            event.attendees_omitted = true;
+        } else {
+            event.attendee_count = attendees.array.items.len;
+            const retained = @min(attendees.array.items.len, 200);
+            const emails = try a.alloc([]const u8, retained);
+            var kept: usize = 0;
+            for (attendees.array.items[0..retained]) |attendee| {
+                // A guest without a usable address is not listed; the list is
+                // then incomplete and the editor will not replace it.
+                emails[kept] = field(a, attendee, "email", 512, false) catch |err| {
+                    if (!tolerant or err == error.OutOfMemory) return err;
+                    event.attendees_omitted = true;
+                    continue;
+                };
+                kept += 1;
+            }
+            event.attendees = emails[0..kept];
+            event.attendees_omitted = event.attendees_omitted or attendees.array.items.len > retained;
+            var self_seen = false;
+            for (attendees.array.items) |attendee| if (j.boolean(attendee, "self", false) catch |err| if (tolerant) false else return err) {
+                if (self_seen) {
+                    if (!tolerant) return error.InvalidCalendarResponse;
+                    // Two self markers: which response is ours is unknown.
+                    event.response = .unknown;
+                    lossy = true;
+                    break;
+                }
+                self_seen = true;
+                const response = j.text(attendee, "responseStatus");
+                event.response = if (std.mem.eql(u8, response, "accepted")) .accepted else if (std.mem.eql(u8, response, "tentative")) .tentative else if (std.mem.eql(u8, response, "declined")) .declined else if (std.mem.eql(u8, response, "needsAction")) .needs_action else .unknown;
+            };
+        }
     }
+    if (lossy) event.locked = true;
     return event;
 }
 
@@ -476,13 +663,29 @@ fn spansJoin(spans: []const @import("html_document.zig").Span, known_only: bool)
     return "";
 }
 
-fn point(a: std.mem.Allocator, value: j.Value) !time.Point {
+fn point(a: std.mem.Allocator, value: j.Value, tolerant: bool) !time.Point {
+    var unused = false;
+    return pointMode(a, value, tolerant, &unused);
+}
+/// The instant comes from the RFC 3339 offset. A timeZone label outside the
+/// zoneinfo character set is only dropped by tolerant reads, and reported.
+fn pointMode(a: std.mem.Allocator, value: j.Value, tolerant: bool, lossy: *bool) !time.Point {
     const date = j.get(value, "date");
     const instant = j.get(value, "dateTime");
     if ((date == null) == (instant == null)) return error.InvalidCalendarResponse;
     if (date) |raw| return .{ .kind = .date, .value = @import("timezone.zig").dateDay(try j.string(raw)) catch return error.InvalidCalendarResponse };
-    const zone = try field(a, value, "timeZone", 512, true);
-    if (zone.len > 0) try time.validateZoneName(zone);
+    var zone: []const u8 = "";
+    if (field(a, value, "timeZone", 512, true)) |label| {
+        zone = label;
+    } else |err| {
+        if (!tolerant or err == error.OutOfMemory) return err;
+        lossy.* = true;
+    }
+    if (zone.len > 0) time.validateZoneName(zone) catch |err| {
+        if (!tolerant) return err;
+        zone = "";
+        lossy.* = true;
+    };
     return .{ .kind = .instant, .value = time.rfc3339(try j.string(instant.?)) catch return error.InvalidCalendarResponse, .zone = zone };
 }
 const GoogleTime = struct { date: ?[]const u8 = null, dateTime: ?[]const u8 = null, timeZone: ?[]const u8 = null };
@@ -497,6 +700,28 @@ fn parseJson(a: std.mem.Allocator, bytes: []const u8) !j.Value {
     const result = try std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = t.Limits.response_bytes });
     if (result != .object) return error.InvalidCalendarResponse;
     return result;
+}
+// Calendar names are single-line UI labels. Normalize legal presentation
+// whitespace before caching; account/calendar IDs retain strict field checks.
+fn calendarSummary(a: std.mem.Allocator, value: j.Value) ![]const u8 {
+    const raw = j.get(value, "summary") orelse return "";
+    const string = try j.string(raw);
+    if (string.len > 1024 or !std.unicode.utf8ValidateSlice(string)) return error.InvalidCalendarResponse;
+    for (string) |byte| if ((byte < 32 and byte != '\n' and byte != '\r' and byte != '\t') or byte == 127) return error.InvalidCalendarResponse;
+    return @import("mime.zig").sanitizeHeaderText(string, a);
+}
+// Calendar presentation fields may contain escaped newlines (RFC 5545 TEXT).
+// Keep identity fields strict and reject terminal controls in display text.
+fn displayField(a: std.mem.Allocator, value: j.Value, key: []const u8, maximum: usize, lossy: ?*bool) ![]const u8 {
+    const raw = j.get(value, key) orelse return "";
+    if (lossy) |changed| {
+        if (raw != .string) changed.* = true;
+        return displayText(a, if (raw == .string) raw.string else "", maximum, .line, changed);
+    }
+    const string = try j.string(raw);
+    if (string.len > maximum or !std.unicode.utf8ValidateSlice(string)) return error.InvalidCalendarResponse;
+    for (string) |byte| if ((byte < 32 and byte != '\n' and byte != '\t') or byte == 127) return error.InvalidCalendarResponse;
+    return a.dupe(u8, string);
 }
 fn field(a: std.mem.Allocator, value: j.Value, key: []const u8, maximum: usize, optional: bool) ![]const u8 {
     const raw = j.get(value, key) orelse return if (optional) "" else error.InvalidCalendarResponse;

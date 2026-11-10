@@ -45,7 +45,9 @@ fn projection(value: j.Value, a: std.mem.Allocator, metadata: bool, remove_envel
     var payload = j.object(a);
     if (!metadata) for ([_][]const u8{ "partId", "mimeType", "filename", "body", "parts" }) |key| if (j.get(source, key)) |field| try payload.object.put(a, key, field);
     if (j.get(source, "headers")) |headers| {
-        if (headers != .array or headers.array.items.len > limits.header_count) return error.TooManyHeaders;
+        // The MIME decoder consults only its own named headers, so a long
+        // Received/ARC chain is not a reason to refuse this message.
+        if (headers != .array) return error.InvalidJson;
         if (remove_envelope) {
             var retained: std.ArrayList(j.Value) = .empty;
             for (headers.array.items) |header| {

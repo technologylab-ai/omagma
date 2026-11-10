@@ -43,19 +43,32 @@ const Transitions = struct {
 /// plus three days either side, so different nearby gap/fold behavior cannot be
 /// hidden by an endpoint-only offset match. Larger intervals stay review-only.
 pub fn matches(source: []const u8, id: []const u8, zone: *const timezone.Zone, start_ms: i64, end_ms: i64) bool {
-    return prove(source, id, zone, start_ms, end_ms) catch false;
+    return verdict(source, id, zone, start_ms, end_ms) == .match;
+}
+/// `unsupported` means the source states no rules this proof can interpret
+/// (absent block, no observances, unknown rule parts, too many dates). Only
+/// `match` is evidence for a write. A read-only display may fall back to a
+/// loadable IANA TZID after `unsupported`, never after `mismatch`.
+pub const Verdict = enum { match, mismatch, unsupported };
+pub fn verdict(source: []const u8, id: []const u8, zone: *const timezone.Zone, start_ms: i64, end_ms: i64) Verdict {
+    const proved = prove(source, id, zone, start_ms, end_ms) catch |err| return switch (err) {
+        error.UnsupportedEmbeddedTimezone, error.EmbeddedTimezoneTooLarge, error.EmbeddedTimezoneMissing => .unsupported,
+        else => .mismatch,
+    };
+    return if (proved) .match else .mismatch;
 }
 fn prove(source: []const u8, id: []const u8, zone: *const timezone.Zone, start_ms: i64, end_ms: i64) !bool {
     if (start_ms < -62072524800000 or end_ms > 253339228799000) return false;
-    if (source.len > t.Limits.source_bytes or end_ms <= start_ms or end_ms - start_ms > 366 * 86400000) return false;
+    // A zero-length event (DTEND equal to DTSTART) is still a provable instant.
+    if (source.len > t.Limits.source_bytes or end_ms < start_ms or end_ms - start_ms > 366 * 86400000) return false;
     const first = @divFloor(start_ms, 1000) - 3 * 86400;
     const last = @divFloor(end_ms, 1000) + 3 * 86400;
     // Keep all arithmetic and candidate-year generation inside CivilTime.
     if (first < -62072524800 or last > 253339228799) return false;
-    const block = try findBlock(source, id) orelse return false;
+    const block = try findBlock(source, id) orelse return error.EmbeddedTimezoneMissing;
     var observances: [max_observances]Observance = undefined;
     const count = try parseBlock(block, &observances);
-    if (count == 0) return false;
+    if (count == 0) return error.EmbeddedTimezoneMissing;
     const first_year = yearOf(first);
     const last_year = yearOf(last);
     var transitions: Transitions = .{};
@@ -220,7 +233,8 @@ fn parseBlock(block: []const u8, output: *[max_observances]Observance) !usize {
             seen = 0;
         } else if (same(p.name, "END")) {
             if (same(p.value, "VTIMEZONE")) continue;
-            if (current == null or !same(p.value, component) or seen & 7 != 7 or count == output.len) return error.InvalidEmbeddedTimezone;
+            if (count == output.len) return error.EmbeddedTimezoneTooLarge;
+            if (current == null or !same(p.value, component) or seen & 7 != 7) return error.InvalidEmbeddedTimezone;
             output[count] = current.?;
             count += 1;
             current = null;

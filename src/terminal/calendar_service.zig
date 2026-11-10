@@ -91,6 +91,10 @@ pub const InvitationPlan = struct {
     state: State,
     decision: planner.Decision,
     writable: bool,
+    /// A zoneinfo name derived from an unloadable source TZID (a Windows
+    /// zone name or vendor path) which nothing in the source proves. It is
+    /// offered for an explicit reinterpretation and never applied silently.
+    zone_suggestion: []const u8 = "",
 };
 pub const Review = struct {
     calendar: t.Calendar,
@@ -145,11 +149,13 @@ pub const Service = struct {
         var calendars: std.ArrayList(t.Calendar) = .empty;
         var pages: Pages = .{};
         var bytes: usize = 0;
+        var skipped: usize = 0;
         while (try pages.next()) |token| {
             const response = try self.read(try p.listCalendars(self.a, self.grants.account, token));
             bytes += response.body.len;
             if (bytes > t.Limits.snapshot_bytes) return .{ .calendars = calendars.items, .complete = false };
             const page = try p.decodeCalendars(self.a, self.grants.account, response.body);
+            skipped += page.skipped;
             for (page.calendars) |calendar| {
                 for (calendars.items) |previous| if (calendar.target.eql(previous.target)) return error.CalendarPageOverlap;
                 if (calendars.items.len == t.Limits.calendars) return .{ .calendars = calendars.items, .complete = false };
@@ -157,7 +163,9 @@ pub const Service = struct {
             }
             try pages.advance(page.next_page_token);
         }
-        var result: CalendarList = .{ .calendars = calendars.items, .complete = pages.complete };
+        // An entry without a usable id cannot be listed; say so rather than
+        // present, or cache, the remainder as the account's whole catalogue.
+        var result: CalendarList = .{ .calendars = calendars.items, .complete = pages.complete and skipped == 0 };
         if (result.complete and self.persist_cache) if (self.cache) |cache| if (cache.saveCalendarsFn) |save| {
             save(cache.context, result) catch |err| {
                 result.cache_error = @errorName(err);
@@ -170,7 +178,9 @@ pub const Service = struct {
         if (!self.grants.calendar_list) return error.CalendarPermissionRequired;
         try self.requireAccount(target);
         const response = try self.read(try p.getCalendar(self.a, target));
-        const value = try p.decodeCalendar(self.a, target, response.body);
+        // Reads and writes share this value. A tolerated defect leaves the
+        // calendar at most readable, so requireWrite still refuses it.
+        const value = try p.decodeCalendarForRead(self.a, target, response.body);
         if (self.persist_cache) if (self.cache) |cache| if (cache.saveCalendarFn) |save| {
             // Metadata caching must not turn a usable provider read into a
             // failure. The agenda's snapshot save reports its own cache error.
@@ -215,7 +225,8 @@ pub const Service = struct {
             return err;
         };
         var cache_error: []const u8 = "";
-        if (self.persist_cache) if (self.cache) |cache| cache.saveFn(cache.context, snapshot) catch |err| {
+        // Only a fully fetched window may replace the last complete cache.
+        if (snapshot.complete and self.persist_cache) if (self.cache) |cache| cache.saveFn(cache.context, snapshot) catch |err| {
             cache_error = @errorName(err);
         };
         return .{ .snapshot = snapshot, .cache_error = cache_error };
@@ -225,15 +236,36 @@ pub const Service = struct {
         var builder = try agenda_builder.Builder.init(calendar.target, window);
         var pages: Pages = .{};
         var bytes: usize = 0;
+        var page_events: usize = t.Limits.page_events;
         while (try pages.next()) |token| {
-            const response = try self.read(try p.agenda(self.a, calendar.target, window, token));
+            // A few very large events can exceed the response budget at the
+            // default page size. Ask for fewer per page before giving up.
+            const response = while (true) {
+                break self.read(try p.agendaSized(self.a, calendar.target, window, token, page_events)) catch |err| {
+                    if (err != error.CalendarResponseTooLarge or page_events <= 6) return err;
+                    page_events /= 4;
+                    continue;
+                };
+            };
             bytes += response.body.len;
-            if (bytes > t.Limits.snapshot_bytes) return error.CalendarSnapshotTooLarge;
-            const page = try p.decodePage(self.a, calendar.target, response.body, self.now_ms);
+            // Bounds end the read, not the view: what was collected is shown
+            // as an incomplete window instead of failing every event in it.
+            if (bytes > t.Limits.snapshot_bytes) break;
+            const page = try p.decodeAgendaPage(self.a, calendar.target, response.body, self.now_ms);
             try builder.append(self.a, page, token);
+            if (builder.truncated) break;
             try pages.advance(page.next_page_token);
         }
-        return builder.snapshot();
+        return builder.partial();
+    }
+    /// Read-only detail view: presentation defects are repaired and lock the
+    /// event. Every write path keeps the strict `document`.
+    pub fn documentForRead(self: Service, calendar: t.Calendar, event_id: []const u8) !p.EventDocument {
+        try self.requireRead(calendar);
+        const response = try self.read(try p.get(self.a, calendar.target, event_id));
+        const result = try p.decodeDocumentForRead(self.a, calendar.target, response.body);
+        if (!std.mem.eql(u8, result.event.id, event_id)) return error.CalendarIdentityMismatch;
+        return result;
     }
 
     pub fn event(self: Service, calendar: t.Calendar, event_id: []const u8) !t.Event {
@@ -305,7 +337,7 @@ pub const Service = struct {
             break :blk null;
         };
         const found = try self.lookup(calendar, source.uid);
-        return .{ .calendar = calendar, .source = source, .span = span, .time_error = time_error, .lookup = found, .state = state, .decision = try planner.plan(.{ .invitation = source, .target = calendar.target, .lookup = found, .tracked = state.tracked, .operation = state.operation, .times_resolved = span != null, .personal_copy_owner = if (calendar.primary and source.method == .request and source.attendee.len == 0) self.grants.account else null }), .writable = self.grants.canWrite(calendar) and (source.method == .cancel or source.attendee.len != 0 or calendar.primary) };
+        return .{ .calendar = calendar, .source = source, .span = span, .time_error = time_error, .lookup = found, .state = state, .decision = try planner.plan(.{ .invitation = source, .target = calendar.target, .lookup = found, .tracked = state.tracked, .operation = state.operation, .times_resolved = span != null, .personal_copy_owner = if (calendar.primary and source.method != .cancel and source.attendee.len == 0) self.grants.account else null }), .writable = self.grants.canWrite(calendar) and (source.method == .cancel or source.attendee.len != 0 or calendar.primary) };
     }
 
     /// Prepare exact bytes for review; no Calendar mutation or journal claim.
@@ -385,7 +417,7 @@ pub const Service = struct {
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
-        if (review.ordinary_event == null and review.source.method == .request and review.source.attendee.len == 0) {
+        if (review.ordinary_event == null and review.source.method != .cancel and review.source.attendee.len == 0) {
             if (!review.calendar.primary or review.intent.kind != .import_event or !std.ascii.eqlIgnoreCase(try p.importedOrganizer(self.a, review.request), self.grants.account)) return error.CalendarReviewStale;
         }
         if (review.ordinary_event == null) {

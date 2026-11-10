@@ -1066,7 +1066,7 @@ pub const Session = struct {
             const previous_rsvp_only = if (operation.calendarSync) |result| std.mem.eql(u8, result.errorCode, "RsvpOnlyRequested") else false;
             if (status != .declined and previous_rsvp_only != try j.boolean(req, "rsvpOnly", false)) return error.OperationConflict;
             var previous: invitation.Invitation = .{};
-            invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return error.OperationConflict;
+            invitation.parseProof(operation.icalendar, store.state.account, &.{}, &previous) catch return error.OperationConflict;
             if (previous.method != .reply or !std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), @tagName(status))) return error.OperationConflict;
             const expected_attendee = j.text(req, "attendee");
             if (expected_attendee.len > 0 and !std.ascii.eqlIgnoreCase(expected_attendee, previous.attendee.slice())) return error.OperationConflict;
@@ -1082,9 +1082,9 @@ pub const Session = struct {
         const operation = (try @import("operation_history.zig").latestInvitation(store, a, &source_hash)) orelse return .{};
         if (!std.mem.eql(u8, operation.outcome, "applied")) return .{ .outcome = "unknown" };
         var sent: invitation.Invitation = .{};
-        invitation.parseDisplay(operation.icalendar, account, &.{}, &sent) catch return .{};
+        invitation.parseProof(operation.icalendar, account, &.{}, &sent) catch return .{};
         var original: invitation.Invitation = .{};
-        invitation.parseDisplay(ics, account, aliases, &original) catch return .{};
+        invitation.parseProof(ics, account, aliases, &original) catch return .{};
         if (sent.method != .reply or !std.mem.eql(u8, sent.uid.slice(), original.uid.slice()) or !std.mem.eql(u8, sent.recurrence_id.slice(), original.recurrence_id.slice()) or !std.mem.eql(u8, sent.recurrence_parameters.slice(), original.recurrence_parameters.slice())) return .{};
         var calendar_sync = operation.calendarSync;
         if (calendar_sync) |*result| if (result.state == .skipped and std.mem.eql(u8, result.errorCode, "CalendarLineTooLarge")) {
@@ -1189,7 +1189,7 @@ pub const Session = struct {
         const operation = (try @import("operation_history.zig").latestInvitation(store, a, &hash)) orelse return;
         if (!std.mem.eql(u8, operation.outcome, "applied")) return;
         var previous: invitation.Invitation = .{};
-        invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return;
+        invitation.parseProof(operation.icalendar, store.state.account, &.{}, &previous) catch return;
         var request = try j.copyObject(a, req);
         try request.object.put(a, "operationId", .{ .string = operation.id });
         try request.object.put(a, "status", .{ .string = if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "ACCEPTED")) "accepted" else if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "TENTATIVE")) "tentative" else "declined" });
@@ -2228,6 +2228,18 @@ pub const Session = struct {
                     try ids.append(a, try a.dupe(u8, id));
                 };
             }
+            // Rows refused by an earlier decoder are re-read once, a bounded
+            // few per refresh, wherever they sit in the retained window.
+            var retries: usize = 0;
+            for (snapshot.state.entries) |entry| {
+                if (retries == 16) break;
+                if (!std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending)) continue;
+                const queued = for (ids.items) |id| {
+                    if (std.mem.eql(u8, id, entry.message.id)) break true;
+                } else false;
+                if (!queued) try ids.append(a, try a.dupe(u8, entry.message.id));
+                retries += 1;
+            }
         }
         var body_total = ids.items.len;
         var body_completed: usize = 0;
@@ -2250,7 +2262,8 @@ pub const Session = struct {
                 };
                 // Byte pressure may have removed queued old-tail IDs; another
                 // reader may already have cached a body. Never refetch either.
-                if (entry.bodyError.len != 0 or (try snapshot.read(id)) != null) {
+                const retry_pending = std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending);
+                if (!retry_pending and (entry.bodyError.len != 0 or (try snapshot.read(id)) != null)) {
                     body_total -= 1;
                     s.reportProgress(.bodies, body_completed, body_total);
                     continue;
@@ -2283,7 +2296,16 @@ pub const Session = struct {
             } else if (std.mem.eql(u8, body_error, "MessageNotFound")) {
                 try commit.invalidate(id);
                 commit.state.generation += 1;
-            } else if (commit.find(id)) |entry| entry.bodyError = body_error;
+            } else if (commit.find(id)) |entry| {
+                // Keep a still-readable retained body; record the refusal
+                // only where there is none.
+                if (entry.bytes == 0) entry.bodyError = body_error;
+                if (std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending)) entry.message.decodeWarning = body_error;
+            }
+            // The marker never survives its one attempt.
+            if (commit.find(id)) |entry| if (std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending)) {
+                entry.message.decodeWarning = if (body_result) |message| message.decodeWarning else body_error;
+            };
             commit.state.syncBodyGets += 1;
             try commit.save();
             expected = commit.state.generation;
@@ -3030,6 +3052,7 @@ pub const Session = struct {
     fn readMessage(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value, allow_cached: bool) !t.Message {
         try s.capability(a, store.state.account, req, "mail-read");
         var fixture_source: ?Value = null;
+        var retry_fallback: ?t.Message = null;
         if (s.options.fixtures) {
             if (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readOutboxExpandedWithAllocator(a, id) else try store.readOutbox(id)) |sent| return sent;
             if (store.state.fixtureProvider.len != 0) fixture_source = try s.fixtureProviderSource(a, store);
@@ -3042,6 +3065,12 @@ pub const Session = struct {
             var m = cached;
             if (store.find(id)) |entry| {
                 copyMembership(&m, entry.message);
+                // A row waiting for the improved decoder is re-read once on
+                // open; the retained copy remains the offline answer.
+                if (!s.options.fixtures and std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending)) {
+                    retry_fallback = m;
+                    break :retained;
+                }
             }
             if (s.options.fixtures) try store.applyFixtureRecord(&m);
             return m;
@@ -3050,7 +3079,13 @@ pub const Session = struct {
             const expected = store.state.generation;
             const account = store.state.account;
             store.release();
-            var m = try j.decode(t.Message, a, try s.remote(a, account, "mail.read", req));
+            const fresh = s.remote(a, account, "mail.read", req) catch |err| {
+                const fallback = retry_fallback orelse return err;
+                if (err == error.OutOfMemory or err == error.Canceled) return err;
+                try s.reopenBody(a, store);
+                return fallback;
+            };
+            var m = try j.decode(t.Message, a, fresh);
             try s.reopenBody(a, store);
             try store.rememberAttachments(m);
             if (!allow_cached) _ = try store.upgradeInvitation(m);

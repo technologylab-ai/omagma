@@ -558,6 +558,14 @@ pub const Store = struct {
                 dest.bodyCacheError = "";
                 dest.bodyCached = false;
             }
+            // A warning recorded with a readable row is as stale as a body
+            // refusal. Dropping the cached flag lets the next view take the
+            // fresh projection and the next open re-read the message.
+            if (doc.decoderRevision < decoder_policy.decoder_revision and decoder_policy.knownDecoderRefusal(dest.decodeWarning) and decoder_policy.retriedByNewerDecoder(dest.decodeWarning, doc.decoderRevision)) {
+                dest.bodyCacheError = "";
+                dest.bodyCached = false;
+                dest.decodeWarning = "";
+            }
         }
         if (can_contacts and doc.contactsLoaded) {
             next.contacts = try a.alloc(types.Contact, doc.contacts.len);

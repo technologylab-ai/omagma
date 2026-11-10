@@ -47,6 +47,10 @@ pub const MigrationCapacity = struct {
 /// Revision 1 retains named zero-byte files in successful decoded bodies.
 /// This is separate from retrying historical decoder refusals.
 pub const body_decoder_revision: u32 = 1;
+/// Stored in place of a retained row's decode warning when a newer decoder
+/// may read that message cleanly. The next refresh or open re-reads it once
+/// and replaces the row's envelope; the marker never survives that attempt.
+pub const decoder_retry_pending = "DecoderRetryPending";
 pub const Entry = struct {
     message: t.Message,
     bytes: usize = 0,
@@ -736,9 +740,15 @@ pub const Store = struct {
             changed = true;
         }
         if (s.state.decoderRevision < decoder_revision) {
-            for (s.state.entries) |*entry| if (retriedByNewerDecoder(entry.bodyError, s.state.decoderRevision)) {
-                entry.bodyError = "";
-            };
+            for (s.state.entries) |*entry| {
+                if (retriedByNewerDecoder(entry.bodyError, s.state.decoderRevision)) entry.bodyError = "";
+                // A warning recorded with the row's envelope is as stale as a
+                // recorded body refusal: schedule one fresh read of it too.
+                if (retriedByNewerDecoder(entry.message.decodeWarning, s.state.decoderRevision) and !std.mem.eql(u8, entry.message.decodeWarning, "MetadataBudgetExceeded")) {
+                    entry.message.decodeWarning = decoder_retry_pending;
+                    entry.message.metadataPartial = true;
+                }
+            }
             s.state.decoderRevision = decoder_revision;
             changed = true;
         }
@@ -1383,6 +1393,9 @@ pub const Store = struct {
     pub fn putBody(s: *Store, message: t.Message) !bool {
         if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         var e = s.find(message.id) orelse return false;
+        const retry_pending = std.mem.eql(u8, e.message.decodeWarning, decoder_retry_pending);
+        // One attempt per marker, whatever its outcome below.
+        if (retry_pending) e.message.decodeWarning = message.decodeWarning;
         if (message.bodyText.len > t.Limits.compose_body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.compose_body_bytes)) return error.BodyTooLarge;
         // Conversation aggregate quotas never make an individual body a final
         // refusal. An ordinary read/prefetch may still fetch it independently.
@@ -1392,7 +1405,7 @@ pub const Store = struct {
             // source. A complete thread read or refresh must persist the newly
             // decoded source too, not only an explicit invitation inspection.
             const adds_invitation = previous.invitation == null and message.invitation != null and hasCalendarAttachment(previous);
-            if (e.bodyDecoderRevision >= body_decoder_revision and !adds_invitation) return false;
+            if (e.bodyDecoderRevision >= body_decoder_revision and !adds_invitation and !retry_pending) return false;
             if (!std.mem.eql(u8, previous.threadId, message.threadId)) return error.MessageIdentityMismatch;
             if (message.metadataPartial or message.bodyCacheError.len != 0) return false;
         };
@@ -1426,6 +1439,29 @@ pub const Store = struct {
         e.bodyHash = owned_hash;
         e.bodyBlobIds = blobs;
         e.bodyDecoderRevision = if (message.metadataPartial) 0 else body_decoder_revision;
+        // A complete read supersedes a degraded row: its placeholder subject,
+        // display-only sender and warning must not outlive the defect.
+        // Membership and ordering stay owned by metadata refreshes.
+        if ((retry_pending or e.message.metadataPartial) and !message.metadataPartial and message.labelsVerified) {
+            var participant_budget: usize = participant_bytes;
+            e.message.subject = message.subject;
+            e.message.from = message.from;
+            e.message.to = participantPrefix(message.to, &participant_budget);
+            e.message.cc = participantPrefix(message.cc, &participant_budget);
+            e.message.snippet = message.snippet;
+            e.message.messageId = message.messageId;
+            e.message.references = message.references;
+            e.message.inReplyTo = message.inReplyTo;
+            e.message.sentDate = message.sentDate;
+            if (e.message.receivedAt == 0) e.message.receivedAt = message.receivedAt;
+            if (!e.message.labelsVerified) {
+                e.message.labels = message.labels;
+                e.message.unread = message.unread;
+                e.message.labelsVerified = true;
+            }
+            e.message.decodeWarning = message.decodeWarning;
+            e.message.metadataPartial = false;
+        }
         return true;
     }
     /// Final per-message refusals remain readable as explicit placeholders;
@@ -2117,6 +2153,11 @@ pub const Store = struct {
         const entry = s.find(id) orelse return;
         entry.message.labels = labels;
         entry.message.labelsVerified = true;
+        // The warning recorded for a failed label probe ends with a verified one.
+        if (std.mem.eql(u8, entry.message.decodeWarning, "InvalidLabels")) {
+            entry.message.decodeWarning = "";
+            entry.message.metadataPartial = false;
+        }
         entry.message.unread = false;
         for (labels) |label| if (std.mem.eql(u8, label, "UNREAD")) {
             entry.message.unread = true;
@@ -3181,7 +3222,7 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", decoder_revision));
     // A cache migrated by an earlier revision retries only refusals that a
     // later revision accepts, once.
-    try std.testing.expectEqual(@as(u32, 5), decoder_revision);
+    try std.testing.expectEqual(@as(u32, 7), decoder_revision);
     for ([_][]const u8{ "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable" }) |code| {
         try std.testing.expect(retriedByNewerDecoder(code, 1));
         try std.testing.expect(!retriedByNewerDecoder(code, 2));
@@ -3194,11 +3235,13 @@ test "older decoder refusals are retried once on writable opens and current refu
     }
     try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 1));
     try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 2));
-    try std.testing.expect(!retriedByNewerDecoder("BodyTooLarge", 3));
-    try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", 1));
-    try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", 2));
-    try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", 1));
-    try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", 2));
+    // Revision seven degrades received parts instead of refusing messages,
+    // so each of these earlier refusals gets exactly one more attempt.
+    for ([_][]const u8{ "BodyTooLarge", "BodySizeMismatch", "MimeTooDeep" }) |code| {
+        try std.testing.expect(retriedByNewerDecoder(code, 6));
+        try std.testing.expect(!retriedByNewerDecoder(code, 7));
+    }
+    try std.testing.expect(!retriedByNewerDecoder("ReferencesTooLarge", 4));
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/decoder", .{tmp.sub_path});
     const options: t.Options = .{ .fixtures = true };
     var generation: u64 = 0;
@@ -3245,6 +3288,66 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expectEqualStrings("BodySizeMismatch", store.find("mismatch").?.bodyError);
     try std.testing.expectEqualStrings("InvalidQuotedPrintable", store.find("older").?.bodyError);
     try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
+}
+
+test "mail metadata: Subject decoder upgrade retries only old header refusals once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/subject-upgrade", .{tmp.sub_path});
+    const options: t.Options = .{ .fixtures = true };
+    var generation: u64 = 0;
+    {
+        var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+        defer store.close();
+        try store.put(.{ .id = "cached", .threadId = "cached-thread", .bodyText = "Retained body" }, true);
+        try store.put(.{ .id = "header", .threadId = "header-thread" }, false);
+        try store.put(.{ .id = "charset", .threadId = "charset-thread" }, false);
+        try store.put(.{ .id = "row", .threadId = "row-thread", .subject = "Message unavailable", .from = .{ .address = "", .name = "Display only" }, .decodeWarning = "InvalidHeaders", .metadataPartial = true }, false);
+        try store.put(.{ .id = "final", .threadId = "final-thread", .decodeWarning = "ReferencesTooLarge", .metadataPartial = true }, false);
+        store.find("header").?.bodyError = "InvalidHeaders";
+        store.find("charset").?.bodyError = "ReferencesTooLarge";
+        store.state.decoderRevision = 5;
+        store.state.historyId = "retained-checkpoint";
+        generation = store.state.generation;
+        try store.save();
+    }
+    {
+        var cached = try Store.openCached(std.testing.io, a, root, "self@example.test", options);
+        defer cached.close();
+        try std.testing.expectEqual(@as(u32, 5), cached.state.decoderRevision);
+        try std.testing.expectEqualStrings("InvalidHeaders", cached.refusedMessage("header").?.bodyCacheError);
+    }
+    {
+        var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+        defer store.close();
+        try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
+        try std.testing.expect(store.refusedMessage("header") == null);
+        try std.testing.expectEqualStrings("ReferencesTooLarge", store.refusedMessage("charset").?.bodyCacheError);
+        // A warning stored with the row's envelope is scheduled for exactly
+        // one re-read; a refusal no newer decoder accepts stays as recorded.
+        try std.testing.expectEqualStrings(decoder_retry_pending, store.find("row").?.message.decodeWarning);
+        try std.testing.expectEqualStrings("ReferencesTooLarge", store.find("final").?.message.decodeWarning);
+        // The complete read replaces the placeholder envelope and warning.
+        try std.testing.expect(try store.putBody(.{ .id = "row", .threadId = "row-thread", .subject = "Readable subject", .from = .{ .address = "sender@example.test", .name = "Sender" }, .bodyText = "Readable body" }));
+        const row = store.find("row").?.message;
+        try std.testing.expectEqualStrings("", row.decodeWarning);
+        try std.testing.expect(!row.metadataPartial);
+        try std.testing.expectEqualStrings("Readable subject", row.subject);
+        try std.testing.expectEqualStrings("sender@example.test", row.from.address);
+        try std.testing.expectEqualStrings("Retained body", (try store.read("cached")).?.bodyText);
+        try std.testing.expectEqualStrings("retained-checkpoint", store.state.historyId);
+        try std.testing.expect(store.state.generation > generation);
+        store.find("header").?.bodyError = "InvalidHeaders";
+        try store.save();
+    }
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+    defer store.close();
+    try std.testing.expectEqualStrings("InvalidHeaders", store.refusedMessage("header").?.bodyCacheError);
+    try std.testing.expectEqualStrings("", store.find("row").?.message.decodeWarning);
+    try std.testing.expectEqualStrings("Readable body", (try store.read("row")).?.bodyText);
 }
 
 test "native compose cache: enlarged original keeps ordinary reads bounded and expanded reads exact" {

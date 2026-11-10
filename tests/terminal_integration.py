@@ -549,7 +549,8 @@ def incoming_header_count_and_budget(client):
             source["messages"].append(bad)
             (root / "accounts" / f"{account.split('@')[0]}.json").write_text(json.dumps(source, ensure_ascii=False))
             refusal = client.request("mail.read", account, messageId=vector["id"])
-            require(refusal["id"] == vector["id"] and refusal["bodyCacheError"] == vector["expectedError"], "incoming header bound lost the identifiable refusal")
+            require(refusal["id"] == vector["id"] and degraded_or_refused(refusal, vector["expectedError"]) and account in refusal["bodyText"],
+                    "routing headers the reader never consults hid a readable message")
             good = client.request("mail.read", account, messageId=spec["validMessageId"], cacheOnly=True)
             require(account in good["bodyText"], "header refusal damaged valid cached account mail")
             path, before = cached_digests[account]
@@ -558,6 +559,22 @@ def incoming_header_count_and_budget(client):
     client.evidence = {"incomingHeadersReadAndSearched": 96, "incomingHeaderCountLimit": 256,
                        "rejectedHeaderCount": 257, "aggregateByteLimit": spec["aggregateHeaderByteLimit"],
                        "independentCountAndByteRejections": True, "validBodyDigestsPreserved": True, "accountsChecked": 3}
+
+
+# Received-mail defects that are not hard memory bounds no longer refuse the
+# message: the readable content is kept and a named warning says what was
+# degraded. Ignored routing headers need no warning at all.
+DEGRADED_WARNING = {"BodySizeMismatch": {"BodySizeMismatch"}, "UnsupportedCharset": {"UnsupportedCharset", ""},
+                    "MimeTooDeep": {"ContentTruncated"}, "TooManyMimeParts": {"ContentTruncated"},
+                    "BodyTooLarge": {"ContentTruncated"}, "HeadersTooLarge": {""}, "TooManyHeaders": {""}}
+
+
+def degraded_or_refused(message, former_error):
+    """True when a former whole-message refusal is now readable with its warning,
+    or (for a genuine hard bound) is still the same identifiable refusal."""
+    if message["bodyCacheError"]:
+        return former_error == "BodyTooLarge" and message["bodyCacheError"] == former_error and message["metadataPartial"]
+    return message["decodeWarning"] in DEGRADED_WARNING.get(former_error, set())
 
 
 def gmail_inline_underdeclared_text(client):
@@ -673,9 +690,8 @@ def gmail_inline_underdeclared_text(client):
         source["messages"].append(bad)
         (root / "accounts/personal.json").write_text(json.dumps(source, ensure_ascii=False))
         refused = client.request("mail.read", account, messageId=bad["id"])
-        require(refused["id"] == bad["id"] and refused["bodyCacheError"] == vector["expectedError"]
-                and refused["metadataPartial"] and not refused["bodyText"],
-                "inline compatibility omitted its identifiable MIME size/cap refusal")
+        require(refused["id"] == bad["id"] and degraded_or_refused(refused, vector["expectedError"]),
+                "inline size disagreement lost its named warning or bounded refusal")
         source["messages"].pop()
     client.restart()
     for account in ACCOUNTS:
@@ -789,9 +805,8 @@ def mime_refusal_preserves_valid_cache(client):
             require(refused["code"] == "JsonTooDeep", "overdeep fixture JSON lost its structural refusal")
         else:
             rejected = read_payload(name, payload)
-            require(rejected["bodyCacheError"] == errors[name] and rejected["metadataPartial"],
-                    f"malformed MIME {name} omitted its bounded refusal")
-            require(not rejected["bodyText"], "refused MIME invented body content")
+            require(degraded_or_refused(rejected, errors[name]),
+                    f"malformed MIME {name} omitted its named warning or bounded refusal")
         require(client.request("mail.read", messageId=cached["id"]) == cached,
                 "malformed MIME corrupted another cached message")
     client.evidence = {"acceptedMimeDepth": 16, "refusedMimeDepth": 17,

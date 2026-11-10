@@ -470,10 +470,10 @@ def refusals(binary, directory):
         # requiring reply/forward to refuse that unavailable source uniformly.
         for cache_only in (False, True):
             refused = client.request("mail.read", messageId="wrong-size", cacheOnly=cache_only)
-            require(refused["bodyCacheError"] == "BodySizeMismatch" and refused["metadataPartial"]
-                    and not refused["bodyCached"] and not refused["bodyText"]
-                    and not refused.get("bodyHtml") and not refused["attachments"],
-                    "wrong-size source lost its exact refusal or exposed rejected body bytes")
+            # Readable with an explicit warning; reply/forward below still
+            # refuse this incomplete source uniformly.
+            require(not refused["bodyCacheError"] and refused["decodeWarning"] == "BodySizeMismatch",
+                    "wrong-size source lost its explicit incomplete-content warning")
         for command in ("mail.reply", "mail.forward"):
             for message_id, expected in (("plain-only", "OriginalHtmlUnavailable"), ("duplicate-cid", "AmbiguousContentId"),
                                          ("multiple-html", "AmbiguousOriginalHtml"), ("missing-image", "MessageNotFound"),

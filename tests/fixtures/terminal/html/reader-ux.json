@@ -15,10 +15,10 @@
         "Fictional marketing bulletin",
         "Read the report",
         "[Image: Fictional mountain]",
-        "[Image]",
         "Fictional marketing tail."
       ],
       "absent": [
+        "[Image]",
         "DXImageTransform",
         "Opacity=0",
         "<img",

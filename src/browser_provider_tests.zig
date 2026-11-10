@@ -1686,7 +1686,11 @@ test "browser provider: decoder migration stays offline and a newly refused char
     try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, true), "CacheMiss");
     try equal(@as(usize, 0), host.requests);
     const first = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, false));
-    try strings("UnsupportedCharset", j.text(first, "bodyCacheError"));
+    // An unmapped charset is now shown with replacement characters and a
+    // warning instead of refusing the body.
+    try strings("", j.text(first, "bodyCacheError"));
+    try strings("UnsupportedCharset", j.text(first, "decodeWarning"));
+    try std.testing.expect(j.text(first, "bodyText").len != 0);
     try equal(@as(usize, 1), host.requests);
     const snapshot_buffer = try a.alloc(u8, cache.snapshot_limit);
     const persisted = try a.dupe(u8, try provider.cache.snapshot(0, snapshot_buffer));
@@ -1695,7 +1699,8 @@ test "browser provider: decoder migration stays offline and a newly refused char
     try equal(@as(i64, decoder_policy.decoder_revision), try j.integer(try parse(a, persisted), "decoderRevision", 0));
     try provider.cache.restore(0, persisted, false);
     const second = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, false));
-    try strings("UnsupportedCharset", j.text(second, "bodyCacheError"));
+    try strings("", j.text(second, "bodyCacheError"));
+    try strings("UnsupportedCharset", j.text(second, "decodeWarning"));
     try equal(@as(usize, 1), host.requests);
     try verifyHost();
 }

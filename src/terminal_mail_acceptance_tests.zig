@@ -83,6 +83,33 @@ fn refusedWithHealthyNeighbor(a: std.mem.Allocator, wire: j.Value, code: []const
     try peer.complete(0);
     return refused;
 }
+/// A hostile or broken received header degrades only its own field: the
+/// message stays readable, the next message is unaffected, and text after a
+/// decoded line break never becomes a recipient or another header.
+fn readableWithHealthyNeighbor(a: std.mem.Allocator, wire: j.Value) !t.Message {
+    var healthy = try std.json.parseFromSliceLeaky(j.Value, a, other_delivered, .{});
+    try healthy.object.put(a, "id", .{ .string = "healthy-message" });
+    try healthy.object.put(a, "threadId", .{ .string = "healthy-thread" });
+    var peer: Peer = .{ .steps = &.{
+        .{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/healthy-message?format=full", .response = try std.json.Stringify.valueAlloc(a, healthy, .{}) },
+    } };
+    const message = try readProvider(a, "personal@example.com", &peer);
+    try std.testing.expectEqualStrings("same-message", message.id);
+    try std.testing.expectEqualStrings("", message.bodyCacheError);
+    try std.testing.expect(!message.metadataPartial);
+    try std.testing.expectEqualStrings("Plain café.\n", message.bodyText);
+    for ([_][]const t.Address{ &.{message.from}, message.to, message.cc, message.replyTo }) |list| for (list) |address| {
+        try std.testing.expect(std.mem.indexOf(u8, address.address, "injected") == null);
+        try std.testing.expect(std.mem.indexOfAny(u8, address.address, "\r\n ") == null);
+        try std.testing.expect(std.mem.indexOfAny(u8, address.name, "\r\n\x01\x7f") == null);
+    };
+    for ([_][]const u8{ message.subject, message.messageId, message.references, message.inReplyTo }) |field| try std.testing.expect(std.mem.indexOfAny(u8, field, "\r\n\x01\x7f") == null);
+    const next = try gmail.readAuthorizedMessage(a, "personal@example.com", &.{"mail-read"}, peer.transport(), "healthy-message");
+    try std.testing.expectEqualStrings("Other account only.\n", next.bodyText);
+    try peer.complete(0);
+    return message;
+}
 fn expectDelivered(message: t.Message) !void {
     try std.testing.expectEqualStrings("same-message", message.id);
     try std.testing.expectEqualStrings("same-thread", message.threadId);
@@ -346,6 +373,72 @@ test "mail acceptance: binary attachment corruption remains explicit and never r
     }
 }
 
+test "mail acceptance: Gmail decoded Subject newlines retain body envelope and attachment" {
+    const metadata_suffix = "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)";
+    const Case = struct { input: []const u8, expected: []const u8 };
+    // Literal provider scalars, independent of the outgoing MIME encoder.
+    for ([_]Case{
+        .{ .input = "A colleague shared a story.\nMore café…", .expected = "A colleague shared a story. More café…" },
+        .{ .input = "A colleague shared a story.\r\nMore café…", .expected = "A colleague shared a story. More café…" },
+        .{ .input = "A colleague shared a story.\rMore café…", .expected = "A colleague shared a story. More café…" },
+        .{ .input = "A colleague shared a story.\r\n\t More café…", .expected = "A colleague shared a story. More café…" },
+        .{ .input = "Subject\nBcc: injected@example.test", .expected = "Subject Bcc: injected@example.test" },
+        .{ .input = "=?UTF-8?Q?Caf=C3=A9?=\nMore", .expected = "Café More" },
+        .{ .input = "\nSubject\n", .expected = "Subject" },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var wire = try std.json.parseFromSliceLeaky(j.Value, a, delivered, .{});
+        const payload = wire.object.getPtr("payload").?;
+        const subject = &payload.object.getPtr("headers").?.array.items[2];
+        try subject.object.put(a, "name", .{ .string = "sUbJeCt" });
+        try subject.object.put(a, "value", .{ .string = case.input });
+        var metadata = try j.copyObject(a, wire);
+        var metadata_payload = try j.copyObject(a, payload.*);
+        _ = metadata_payload.object.orderedRemove("body");
+        _ = metadata_payload.object.orderedRemove("parts");
+        try metadata.object.put(a, "payload", metadata_payload);
+        var peer: Peer = .{ .steps = &.{
+            .{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) },
+            .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/same-message" ++ metadata_suffix, .response = try std.json.Stringify.valueAlloc(a, metadata, .{}) },
+        } };
+        const full = try readProvider(a, "personal@example.com", &peer);
+        try expectDelivered(full);
+        const row = try gmail.readAuthorizedMetadata(a, "personal@example.com", &.{"mail-read"}, peer.transport(), "same-message");
+        for ([_]t.Message{ full, row }) |message| {
+            try std.testing.expectEqualStrings(case.expected, message.subject);
+            try std.testing.expectEqualStrings("Sender", message.from.name);
+            try std.testing.expectEqualStrings("sender@example.test", message.from.address);
+            try std.testing.expectEqual(@as(usize, 1), message.to.len);
+            try std.testing.expectEqualStrings("personal@example.com", message.to[0].address);
+            try std.testing.expectEqual(@as(usize, 0), message.cc.len + message.replyTo.len);
+            try std.testing.expectEqualStrings("", message.decodeWarning);
+            try std.testing.expectEqualStrings("", message.bodyCacheError);
+            try std.testing.expect(!message.metadataPartial);
+            try @import("terminal/recipients.zig").validateHeader(message.subject);
+        }
+        try peer.complete(0);
+    }
+    // Gmail's JSON scalar is the field boundary for every header. Control
+    // bytes and decoded line breaks are display whitespace; they never refuse
+    // the message and never create another header or recipient.
+    for ([_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "Subject", .value = "Control\x01byte" },
+        .{ .name = "Subject", .value = "Control\x7fbyte" },
+        .{ .name = "From", .value = "sender@example.test\nBcc: injected@example.test" },
+        .{ .name = "To", .value = "personal@example.com\r\nBcc: injected@example.test" },
+        .{ .name = "Message-ID", .value = "<id@example.test>\nother" },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var wire = try std.json.parseFromSliceLeaky(j.Value, a, delivered, .{});
+        try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.append(try j.value(a, case));
+        _ = try readableWithHealthyNeighbor(a, wire);
+    }
+}
+
 test "mail acceptance: broken display encodings retain readable mail and a healthy second metadata row" {
     const Case = struct { word: []const u8, display: []const u8 };
     const metadata_suffix = "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)";
@@ -411,16 +504,16 @@ test "mail acceptance: broken display encodings retain readable mail and a healt
         try std.testing.expectEqualStrings(case.display, original.subject);
         try std.testing.expectEqualStrings(raw, try @import("terminal/mime.zig").decodeBase64Url(original.attachment.data, a));
     }
-    // Fallback for display encoding does not accept injected physical headers.
+    // A decoded line break inside a structured field cannot inject a header:
+    // the sender stays the one readable mailbox and nothing else is added.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var wire = try std.json.parseFromSliceLeaky(j.Value, a, delivered, .{});
-    try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.items[2].object.put(a, "value", .{ .string = "Subject\r\nBcc: injected@example.test" });
-    const refused = try refusedWithHealthyNeighbor(a, wire, "InvalidHeaders");
-    try std.testing.expectEqualStrings("", refused.from.address);
-    try std.testing.expectEqual(@as(usize, 0), refused.to.len + refused.cc.len + refused.replyTo.len);
-    try std.testing.expect(std.mem.indexOfAny(u8, refused.subject, "\r\n") == null);
+    try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.items[0].object.put(a, "value", .{ .string = "Sender <sender@example.test>\r\nBcc: injected@example.test" });
+    const readable = try readableWithHealthyNeighbor(a, wire);
+    try std.testing.expectEqual(@as(usize, 0), readable.cc.len + readable.replyTo.len);
+    try std.testing.expect(std.mem.indexOfAny(u8, readable.subject, "\r\n") == null);
 }
 
 fn sessionCommand(a: std.mem.Allocator, session: *core.Session, request: anytype) !j.Value {

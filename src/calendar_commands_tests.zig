@@ -391,3 +391,58 @@ test "calendar commands: named embedded rules prove a nominal duration before an
     try std.testing.expect(j.get(unresolved, "resolved") == null);
     try std.testing.expectEqual(@as(usize, 0), host.writes + host.claims);
 }
+
+test "calendar commands: a mapped Windows zone is proved by embedded rules or offered, never applied silently" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var header: [44]u8 = @splat(0);
+    @memcpy(header[0..5], "TZif2");
+    std.mem.writeInt(u32, header[36..40], 1, .big);
+    std.mem.writeInt(u32, header[40..44], 4, .big);
+    const record = "\x00\x00\x0e\x10\x00\x00CET\x00";
+    const tzif = try std.mem.concat(a, u8, &.{ &header, record, &header, record, "\nCET-1CEST,M3.5.0/2,M10.5.0/3\n" });
+    try tmp.dir.createDir(std.testing.io, "Europe", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Europe/Berlin", .data = tzif });
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    try env.put("TZDIR", try tmp.dir.realPathFileAlloc(std.testing.io, ".", a));
+    const raw = try fixture(a, "embedded-europe.ics");
+    const renamed = try std.mem.replaceOwned(u8, a, raw, "Europe/Vienna", "W. Europe Standard Time");
+    const request = try j.value(a, .{ .cmd = "calendar.invitation-plan", .account = target.account, .calendarId = target.calendar_id, .messageId = "fixture-message" });
+    const steps = [_]Step{ .{ .kind = .calendar_list, .body = list }, .{ .kind = .event_lookup } };
+    // The source's own VTIMEZONE proves the mapped zone over the event.
+    var proved: Host = .{ .source = renamed, .steps = &steps };
+    const resolved = try commands.dispatch(proved.instance(a), request, proved.inputs(&env));
+    try std.testing.expectEqualStrings("", j.text(resolved, "timeError"));
+    try std.testing.expectEqualStrings("", j.text(resolved, "timeZoneSuggestion"));
+    const span = j.get(resolved, "resolved").?;
+    try std.testing.expectEqualStrings("Europe/Berlin", j.text(j.get(span, "start").?, "zone"));
+    try std.testing.expectEqual(try t.time.rfc3339("2026-10-13T08:00:00Z"), try j.integer(j.get(span, "start").?, "value", 0));
+    // Contradicting rules: neither the mapping nor the calendar zone is used.
+    var contradicted: Host = .{ .source = try std.mem.replaceOwned(u8, a, renamed, "TZOFFSETTO:+0200", "TZOFFSETTO:+0300"), .steps = &steps };
+    const refused = try commands.dispatch(contradicted.instance(a), request, contradicted.inputs(&env));
+    try std.testing.expect(j.get(refused, "resolved") == null and j.text(refused, "timeError").len != 0);
+    try std.testing.expectEqualStrings("", j.text(refused, "timeZoneSuggestion"));
+    // No embedded rules: the mapping is an assumption the user must accept.
+    const zone_start = std.mem.indexOf(u8, renamed, "BEGIN:VTIMEZONE").?;
+    const zone_end = std.mem.indexOf(u8, renamed, "BEGIN:VEVENT").?;
+    const bare = try std.mem.concat(a, u8, &.{ renamed[0..zone_start], renamed[zone_end..] });
+    var assumed: Host = .{ .source = bare, .steps = &(steps ++ steps) };
+    const offered = try commands.dispatch(assumed.instance(a), request, assumed.inputs(&env));
+    try std.testing.expect(j.get(offered, "resolved") == null);
+    try std.testing.expectEqualStrings("InvalidTimezoneName", j.text(offered, "timeError"));
+    try std.testing.expectEqualStrings("Europe/Berlin", j.text(offered, "timeZoneSuggestion"));
+    // The existing explicit reinterpretation is the acceptance.
+    var explicit = try j.copyObject(a, request);
+    try explicit.object.put(a, "startTimeZone", .{ .string = "Europe/Berlin" });
+    try explicit.object.put(a, "endTimeZone", .{ .string = "Europe/Berlin" });
+    try explicit.object.put(a, "reinterpretEmbeddedTimezones", .{ .bool = true });
+    const accepted = try commands.dispatch(assumed.instance(a), explicit, assumed.inputs(&env));
+    try std.testing.expectEqualStrings("", j.text(accepted, "timeError"));
+    try std.testing.expectEqualStrings("", j.text(accepted, "timeZoneSuggestion"));
+    try std.testing.expectEqual(try t.time.rfc3339("2026-10-13T08:00:00Z"), try j.integer(j.get(j.get(accepted, "resolved").?, "start").?, "value", 0));
+    try std.testing.expectEqual(@as(usize, 0), proved.writes + contradicted.writes + assumed.writes + assumed.claims);
+}

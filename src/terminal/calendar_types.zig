@@ -48,6 +48,8 @@ pub const Version = struct {
     }
 };
 
+pub const Reminder = struct { method: []const u8 = "popup", minutes: u32 };
+
 pub const Invitation = struct {
     account: []const u8,
     /// Exact received bytes, retained independently of presentation fields.
@@ -55,7 +57,7 @@ pub const Invitation = struct {
     /// Complete unfolded source, including unknown properties and VTIMEZONE.
     unfolded: []const u8,
     source_hash: [32]u8,
-    method: enum { request, cancel },
+    method: enum { request, cancel, publish },
     uid: []const u8,
     organizer: []const u8,
     attendee: []const u8,
@@ -71,6 +73,9 @@ pub const Invitation = struct {
     recurrence_id: ?time.Stamp = null,
     recurrence_range: []const u8 = "",
     recurrence: []const []const u8 = &.{},
+    /// Only passive DISPLAY alarms can become Google popup reminders.
+    reminders: []const Reminder = &.{},
+    unsupported_reminders: usize = 0,
     has_timezones: bool = false,
     cancelled: bool = false,
     transparent: bool = false,
@@ -149,6 +154,9 @@ pub const Page = struct {
     events: []const Event,
     next_page_token: []const u8 = "",
     fetched_at_ms: i64,
+    /// Events a tolerant agenda read could neither decode nor show as a
+    /// placeholder. A window with dropped events is never complete.
+    dropped: usize = 0,
     pub fn complete(self: Page) bool {
         return self.next_page_token.len == 0;
     }

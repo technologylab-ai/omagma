@@ -473,10 +473,10 @@ const Context = struct {
             else => "17",
         });
         try self.html.append("px\">");
-        var heading_body = std.mem.trimEnd(u8, body, " ");
+        var heading_body = std.mem.trimEnd(u8, body, " \t");
         var hashes = heading_body.len;
         while (hashes > 0 and heading_body[hashes - 1] == '#') hashes -= 1;
-        if (hashes > 0 and hashes < heading_body.len and heading_body[hashes - 1] == ' ') heading_body = std.mem.trimEnd(u8, heading_body[0..hashes], " ");
+        if (hashes > 0 and hashes < heading_body.len and spaceOrTab(heading_body[hashes - 1])) heading_body = std.mem.trimEnd(u8, heading_body[0..hashes], " \t");
         try self.inlineText(heading_body, 0, true);
         try self.html.append("</h");
         try self.html.append(&tag);
@@ -485,6 +485,15 @@ const Context = struct {
     }
     fn list(self: *Context, lines: []const Line, start: usize, depth: usize, nested: bool) anyerror!usize {
         const first = marker(lines[start].text).?;
+        var indentation_scratch = std.heap.ArenaAllocator.init(self.a);
+        defer indentation_scratch.deinit();
+        const saved_capture = if (self.images) |images| images.capture else null;
+        // Restore parent mappings before freeing this scope's text/aliases.
+        defer if (self.images) |images| {
+            images.capture = saved_capture;
+        };
+        var aliases: std.ArrayList(inline_images.SourceAlias) = .empty;
+        var source_scope: inline_images.SourceScope = .{ .aliases = &.{}, .parent = if (saved_capture) |capture| capture.scope else null };
         var items: std.ArrayList(Item) = .empty;
         defer {
             for (items.items) |*item| item.lines.deinit(self.a);
@@ -519,7 +528,17 @@ const Context = struct {
                     loose = true;
                 }
                 saw_blank = false;
-                try item.lines.append(self.a, .{ .text = raw[cutIndent(raw, item.content_indent)..] });
+                const normalized = try deindent(indentation_scratch.allocator(), raw, item.content_indent);
+                if (saved_capture) |capture| {
+                    const indent_end = cutIndent(raw, indentation);
+                    if (std.mem.indexOfScalar(u8, raw[0..indent_end], '\t') != null and raw.len > indent_end) {
+                        const original = raw[indent_end..];
+                        // Only copied content maps to source bytes. Generated
+                        // leading spaces never become an image marker origin.
+                        try aliases.append(indentation_scratch.allocator(), .{ .view = normalized[normalized.len - original.len ..], .start = try capture.offset(original) });
+                    }
+                }
+                try item.lines.append(self.a, .{ .text = normalized });
                 i += 1;
                 continue;
             }
@@ -531,6 +550,17 @@ const Context = struct {
             break;
         }
         while (i > start and trim(lines[i - 1].text).len == 0) i -= 1;
+        if (aliases.items.len > 0) {
+            std.mem.sort(inline_images.SourceAlias, aliases.items, {}, struct {
+                fn less(_: void, left: inline_images.SourceAlias, right: inline_images.SourceAlias) bool {
+                    return @intFromPtr(left.view.ptr) < @intFromPtr(right.view.ptr);
+                }
+            }.less);
+            source_scope.aliases = aliases.items;
+            if (self.images) |images| if (images.capture) |*capture| {
+                capture.scope = &source_scope;
+            };
+        }
         const tag: []const u8 = if (first.ordered) "ol" else "ul";
         try self.html.append("<");
         try self.html.append(tag);
@@ -810,17 +840,35 @@ pub fn escapeSource(a: std.mem.Allocator, source: []const u8) ![]const u8 {
 fn trim(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\r");
 }
+fn spaceOrTab(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
 fn indent(text: []const u8) usize {
     var n: usize = 0;
     var width: usize = 0;
-    while (n < text.len and (text[n] == ' ' or text[n] == '\t')) : (n += 1) width += if (text[n] == '\t') @as(usize, 4) else 1;
+    while (n < text.len and (text[n] == ' ' or text[n] == '\t')) : (n += 1) width += if (text[n] == '\t') 4 - @mod(width, 4) else 1;
     return width;
 }
 fn cutIndent(text: []const u8, desired_width: usize) usize {
     var n: usize = 0;
     var width: usize = 0;
-    while (n < text.len and width < desired_width and (text[n] == ' ' or text[n] == '\t')) : (n += 1) width += if (text[n] == '\t') @as(usize, 4) else 1;
+    while (n < text.len and width < desired_width and (text[n] == ' ' or text[n] == '\t')) : (n += 1) width += if (text[n] == '\t') 4 - @mod(width, 4) else 1;
     return n;
+}
+// A list prefix may consume part of a tab, or leave a tab at a new column.
+// Expand only the leading indentation being rebased; preserve interior tabs.
+fn deindent(a: std.mem.Allocator, text: []const u8, desired_width: usize) ![]const u8 {
+    if (desired_width == 0) return text;
+    const width = indent(text);
+    const end = cutIndent(text, width);
+    if (std.mem.indexOfScalar(u8, text[0..end], '\t') == null) return text[cutIndent(text, desired_width)..];
+    const residual = width - @min(width, desired_width);
+    const content = text[end..];
+    if (residual > t.Limits.compose_body_bytes -| content.len) return error.RenderedBodyTooLarge;
+    const output = try a.alloc(u8, residual + content.len);
+    @memset(output[0..residual], ' ');
+    @memcpy(output[residual..], content);
+    return output;
 }
 fn wordByte(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c >= 0x80;
@@ -828,7 +876,7 @@ fn wordByte(c: u8) bool {
 fn heading(text: []const u8) ?usize {
     var n: usize = 0;
     while (n < text.len and text[n] == '#') n += 1;
-    return if (n >= 1 and n <= 6 and n < text.len and text[n] == ' ') n else null;
+    return if (n >= 1 and n <= 6 and n < text.len and spaceOrTab(text[n])) n else null;
 }
 fn rule(text: []const u8) bool {
     if (text.len == 0 or std.mem.indexOfScalar(u8, "-*_", text[0]) == null) return false;
@@ -858,11 +906,11 @@ fn marker(raw: []const u8) ?Marker {
     const n = cutIndent(raw, width);
     const text = raw[n..];
     if (text.len < 2) return null;
-    if (std.mem.indexOfScalar(u8, "-*+", text[0]) != null and text[1] == ' ') return .{ .indent = width, .content = n + 2, .content_width = width + 2, .ordered = false };
+    if (std.mem.indexOfScalar(u8, "-*+", text[0]) != null and spaceOrTab(text[1])) return .{ .indent = width, .content = n + 2, .content_width = if (text[1] == '\t') width + 1 + (4 - @mod(width + 1, 4)) else width + 2, .ordered = false };
     var digits: usize = 0;
     while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
-    if (digits == 0 or digits > 9 or digits + 1 >= text.len or (text[digits] != '.' and text[digits] != ')') or text[digits + 1] != ' ') return null;
-    return .{ .indent = width, .content = n + digits + 2, .content_width = width + digits + 2, .ordered = true, .number = std.fmt.parseInt(usize, text[0..digits], 10) catch 1 };
+    if (digits == 0 or digits > 9 or digits + 1 >= text.len or (text[digits] != '.' and text[digits] != ')') or !spaceOrTab(text[digits + 1])) return null;
+    return .{ .indent = width, .content = n + digits + 2, .content_width = if (text[digits + 1] == '\t') width + digits + 1 + (4 - @mod(width + digits + 1, 4)) else width + digits + 2, .ordered = true, .number = std.fmt.parseInt(usize, text[0..digits], 10) catch 1 };
 }
 fn startsBlock(lines: []const Line, i: usize) bool {
     const text = trim(lines[i].text);
@@ -1310,5 +1358,65 @@ test "inline image markers: Detach maps carets through real removals blank-line 
         try std.testing.expectEqualStrings(multi_expected, removed.source);
         try std.testing.expectEqual(case.after, removed.cursor);
         try std.testing.expect(std.unicode.utf8ValidateSlice(removed.source[0..removed.cursor]));
+    }
+}
+
+test "parser tabs: Markdown heading and list separators use four-column tab stops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const headings = try render(a, "#\tHeading\t###\t\n\n##\tSecond");
+    try std.testing.expect(std.mem.indexOf(u8, headings.html, "<h1 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, headings.html, ">Heading</h1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, headings.html, ">Second</h2>") != null);
+    const list = try render(a, "-\tOne\n-\tTwo\n\n1.\tFirst\n2.\tSecond");
+    try std.testing.expect(std.mem.indexOf(u8, list.html, "<ul ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.html, "<ol ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.html, ">One</li>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.html, ">First</li>") != null);
+    try std.testing.expectEqual(@as(usize, 4), marker("-\tItem").?.content_width);
+    try std.testing.expectEqual(@as(usize, 4), marker("1.\tItem").?.content_width);
+    try std.testing.expectEqual(@as(usize, 8), marker("123.\tItem").?.content_width);
+    try std.testing.expectEqual(@as(usize, 4), indent(" \tIndented"));
+    const nested = try render(a, "-\tOuter\n\t-\tInner\n-\tNext");
+    try std.testing.expect(std.mem.indexOf(u8, nested.html, ">Outer<ul") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nested.html, ">Inner</li>") != null);
+    const spaces = try render(a, "- ```text\n    code\n  ```");
+    for ([_][]const u8{ "- ```text\n\tcode\n  ```", "- ```text\n  \tcode\n  ```" }) |source| {
+        const tabs = try render(a, source);
+        try std.testing.expectEqualStrings(spaces.html, tabs.html);
+        try std.testing.expectEqualStrings(spaces.plain, tabs.plain);
+    }
+    const owned = try render(std.testing.allocator, "- ```text\n\tcode\n  ```");
+    defer std.testing.allocator.free(owned.html);
+    defer std.testing.allocator.free(owned.plain);
+    try std.testing.expectEqualStrings(spaces.html, owned.html);
+}
+
+test "parser tabs: image marker positions survive rebased list indentation" {
+    const cid = "clipboard-00000000000000000000000000000000@omagma.invalid";
+    const image = "![Screenshot](cid:" ++ cid ++ ")";
+    const cases = [_]struct { source: []const u8, count: usize }{
+        .{ .source = "- intro\n\t" ++ image ++ "\n", .count = 1 },
+        .{ .source = "- outer\n\t- inner\n\t\t" ++ image ++ "\n", .count = 1 },
+        .{ .source = "- one\n\t" ++ image ++ "\n\n## Between\n\n- two\n\t" ++ image ++ "\n", .count = 2 },
+        .{ .source = "- ```text\n\t" ++ image ++ "\n  ```\n\n" ++ image, .count = 1 },
+        .{ .source = "`" ++ image ++ "`\n\n- intro\n\t" ++ image, .count = 1 },
+    };
+    for (cases, 0..) |case, number| {
+        const spans = try imageMarkerSpans(std.testing.allocator, case.source, cid);
+        defer std.testing.allocator.free(spans);
+        try std.testing.expectEqual(case.count, spans.len);
+        for (spans, 0..) |span, index| {
+            try std.testing.expectEqualStrings(image, case.source[span.start..span.end]);
+            if (index > 0) try std.testing.expect(spans[index - 1].end <= span.start);
+        }
+        if (number >= 3) try std.testing.expectEqual(std.mem.lastIndexOf(u8, case.source, image).?, spans[0].start);
+        const removed = try removeImageMarkers(std.testing.allocator, case.source, cid, case.source.len);
+        defer std.testing.allocator.free(removed.source);
+        try std.testing.expectEqual(case.count, removed.count);
+        try std.testing.expectEqual(removed.source.len, removed.cursor);
+        // Literal code examples survive detaching an active identical marker.
+        if (number >= 3) try std.testing.expect(std.mem.indexOf(u8, removed.source, image) != null);
     }
 }

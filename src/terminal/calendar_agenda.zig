@@ -12,6 +12,11 @@ pub const Builder = struct {
     bytes: usize = 0,
     fetched_at_ms: i64 = 0,
     complete: bool = false,
+    /// A page, event or byte bound was reached and reading stopped. The
+    /// staged events remain usable as an explicitly incomplete snapshot.
+    truncated: bool = false,
+    /// Events no page could show. Reading continues; the result is incomplete.
+    dropped: usize = 0,
 
     pub fn init(target: t.Target, window: t.Window) !Builder {
         try target.validate();
@@ -24,25 +29,42 @@ pub const Builder = struct {
     pub fn append(self: *Builder, a: std.mem.Allocator, page: t.Page, requested_page_token: []const u8) !void {
         if (self.complete or !std.mem.eql(u8, self.next_page_token, requested_page_token)) return error.CalendarPageMismatch;
         if (!page.target.eql(self.target)) return error.CalendarAccountMismatch;
-        if (self.pages == t.Limits.pages or page.events.len > t.Limits.page_events or self.events.items.len + page.events.len > t.Limits.snapshot_events) return error.TooManyCalendarEvents;
+        if (self.truncated or page.events.len > t.Limits.page_events) return error.TooManyCalendarEvents;
         if (page.next_page_token.len != 0 and std.mem.eql(u8, page.next_page_token, requested_page_token)) return error.CalendarPageMismatch;
         var added_bytes: usize = 0;
+        // Retain the leading events which fit every bound. Reaching one is
+        // not a failure of the events already read: the snapshot is returned
+        // incomplete, which can neither replace a cache nor assert free time.
+        var fit: usize = 0;
         for (page.events, 0..) |event, index| {
             if (!event.target.eql(self.target)) return error.CalendarAccountMismatch;
             for (self.events.items) |previous| if (std.mem.eql(u8, event.id, previous.id)) return error.CalendarPageOverlap;
             for (page.events[0..index]) |previous| if (std.mem.eql(u8, event.id, previous.id)) return error.CalendarPageOverlap;
-            added_bytes += retainedBytes(event);
+            if (fit != index) continue;
+            const bytes = retainedBytes(event);
+            if (self.pages == t.Limits.pages or self.events.items.len + index == t.Limits.snapshot_events or self.bytes + added_bytes + bytes > t.Limits.snapshot_bytes) continue;
+            added_bytes += bytes;
+            fit += 1;
         }
-        if (self.bytes + added_bytes > t.Limits.snapshot_bytes) return error.CalendarSnapshotTooLarge;
-        try self.events.appendSlice(a, page.events);
+        try self.events.appendSlice(a, page.events[0..fit]);
         self.bytes += added_bytes;
+        self.fetched_at_ms = @max(self.fetched_at_ms, page.fetched_at_ms);
+        if (fit != page.events.len or self.pages == t.Limits.pages) {
+            self.truncated = true;
+            return;
+        }
         self.pages += 1;
         self.next_page_token = page.next_page_token;
-        self.fetched_at_ms = @max(self.fetched_at_ms, page.fetched_at_ms);
+        self.dropped += page.dropped;
         self.complete = page.complete();
     }
+    /// Whatever was staged, marked complete only when every page was read and
+    /// nothing was dropped or cut. Callers must not cache an incomplete one.
+    pub fn partial(self: *const Builder) t.Snapshot {
+        return .{ .target = self.target, .window = self.window, .events = self.events.items, .fetched_at_ms = self.fetched_at_ms, .complete = self.complete and !self.truncated and self.dropped == 0 };
+    }
     pub fn snapshot(self: *const Builder) !t.Snapshot {
-        if (!self.complete) return error.CalendarSnapshotIncomplete;
+        if (!self.complete or self.truncated or self.dropped != 0) return error.CalendarSnapshotIncomplete;
         return .{ .target = self.target, .window = self.window, .events = self.events.items, .fetched_at_ms = self.fetched_at_ms, .complete = true };
     }
 };

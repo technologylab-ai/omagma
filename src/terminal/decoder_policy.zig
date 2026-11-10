@@ -40,6 +40,40 @@ const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
     // descriptor/part refusals once with the corresponding wider MIME budget.
     .{ .revision = 5, .code = "TooManyAttachments" },
     .{ .revision = 5, .code = "TooManyMimeParts" },
+    // Gmail may return decoded newlines in an unstructured Subject scalar.
+    // Retry previous whole-message refusals once with field-aware unfolding.
+    .{ .revision = 6, .code = "InvalidHeaders" },
+    // Received mail degrades per field and per part instead of refusing the
+    // message: any header content or count, repeated headers, unreadable
+    // addresses, unknown or mislabelled charsets, odd media types, long
+    // filenames, oversized calendars and text parts, part/depth/attachment
+    // counts and Gmail's advisory size field. Retry every such refusal once.
+    .{ .revision = 7, .code = "InvalidHeaders" },
+    .{ .revision = 7, .code = "TooManyHeaders" },
+    .{ .revision = 7, .code = "HeadersTooLarge" },
+    .{ .revision = 7, .code = "HeaderTooLarge" },
+    .{ .revision = 7, .code = "AmbiguousHeader" },
+    .{ .revision = 7, .code = "AmbiguousSender" },
+    .{ .revision = 7, .code = "InvalidAddress" },
+    .{ .revision = 7, .code = "InvalidRecipients" },
+    .{ .revision = 7, .code = "RecipientHeaderTooLarge" },
+    .{ .revision = 7, .code = "RecipientTooLarge" },
+    .{ .revision = 7, .code = "TooManyIncomingRecipients" },
+    .{ .revision = 7, .code = "CapacityExceeded" },
+    .{ .revision = 7, .code = "UnsupportedCharset" },
+    .{ .revision = 7, .code = "InvalidUtf8" },
+    .{ .revision = 7, .code = "InvalidCharsetData" },
+    .{ .revision = 7, .code = "InvalidMimeType" },
+    .{ .revision = 7, .code = "MissingMimeType" },
+    .{ .revision = 7, .code = "FilenameTooLarge" },
+    .{ .revision = 7, .code = "CalendarTooLarge" },
+    .{ .revision = 7, .code = "BodySizeMismatch" },
+    .{ .revision = 7, .code = "BodyTooLarge" },
+    .{ .revision = 7, .code = "DecodedMessageTooLarge" },
+    .{ .revision = 7, .code = "ExternalBodyRequired" },
+    .{ .revision = 7, .code = "TooManyAttachments" },
+    .{ .revision = 7, .code = "TooManyMimeParts" },
+    .{ .revision = 7, .code = "MimeTooDeep" },
 };
 pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
 
@@ -63,7 +97,7 @@ pub fn retriedByNewerDecoder(code: []const u8, recorded: u32) bool {
 }
 
 test "decoder policy: browser legacy eligibility excludes auth storage and unknown failures" {
-    for ([_][]const u8{ "UnsupportedCharset", "HeaderTooLarge", "MimeTooDeep", "BodySizeMismatch", "TooManyAttachments", "TooManyMimeParts" }) |code| {
+    for ([_][]const u8{ "UnsupportedCharset", "HeaderTooLarge", "MimeTooDeep", "BodySizeMismatch", "TooManyAttachments", "TooManyMimeParts", "InvalidHeaders" }) |code| {
         try std.testing.expect(knownDecoderRefusal(code));
         try std.testing.expect(retriedByNewerDecoder(code, 0));
         try std.testing.expect(!retriedByNewerDecoder(code, decoder_revision));
@@ -71,7 +105,16 @@ test "decoder policy: browser legacy eligibility excludes auth storage and unkno
     for ([_][]const u8{ "", "NotConnected", "AuthenticationFailed", "PermissionDenied", "NetworkFailure", "DiskQuotaExceeded", "OutOfMemory", "UnknownFutureRefusal" }) |code| try std.testing.expect(!knownDecoderRefusal(code));
     for ([_][]const u8{ "TooManyAttachments", "TooManyMimeParts" }) |code| {
         try std.testing.expect(retriedByNewerDecoder(code, 4));
-        try std.testing.expect(!retriedByNewerDecoder(code, 5));
+        try std.testing.expect(retriedByNewerDecoder(code, 6));
+        try std.testing.expect(!retriedByNewerDecoder(code, 7));
     }
-    try std.testing.expect(!retriedByNewerDecoder("UnsupportedCharset", 4));
+    try std.testing.expect(retriedByNewerDecoder("UnsupportedCharset", 6));
+    try std.testing.expect(!retriedByNewerDecoder("ReferencesTooLarge", 4));
+    try std.testing.expect(retriedByNewerDecoder("InvalidHeaders", 5));
+    try std.testing.expect(retriedByNewerDecoder("InvalidHeaders", 6));
+    try std.testing.expect(!retriedByNewerDecoder("InvalidHeaders", 7));
+    for ([_][]const u8{ "AmbiguousSender", "InvalidAddress", "CalendarTooLarge", "BodySizeMismatch", "MimeTooDeep", "FilenameTooLarge" }) |code| {
+        try std.testing.expect(retriedByNewerDecoder(code, 6));
+        try std.testing.expect(!retriedByNewerDecoder(code, 7));
+    }
 }

@@ -6,6 +6,7 @@ test {
     std.testing.refAllDecls(@import("terminal/original_mail.zig"));
     std.testing.refAllDecls(@import("terminal/markdown_mail.zig"));
     std.testing.refAllDecls(@import("terminal/decoder_policy.zig"));
+    std.testing.refAllDecls(@import("terminal/charsets.zig"));
     std.testing.refAllDecls(@import("terminal/html_document.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));
     std.testing.refAllDecls(@import("terminal/gmail_decode.zig"));
@@ -64,13 +65,23 @@ test "synthetic MIME limit corpus fails with explicit bounded errors" {
     const Case = struct { name: []const u8, expected: anyerror };
     for ([_]Case{
         .{ .name = "declaredBodyOver2MiB", .expected = error.BodyTooLarge },
-        .{ .name = "sizeMismatch", .expected = error.BodySizeMismatch },
-        .{ .name = "unsupportedCharset", .expected = error.UnsupportedCharset },
-        .{ .name = "depth33", .expected = error.MimeTooDeep },
     }) |case| {
         var object: std.json.ObjectMap = .empty;
         try object.put(a, "payload", cases.get(case.name).?);
         try std.testing.expectError(case.expected, mime.parseGmail(.{ .object = object }, a));
+    }
+    // Received defects that are not hard memory bounds degrade with a named
+    // warning instead of refusing the message.
+    const Degraded = struct { name: []const u8, warning: []const u8 };
+    for ([_]Degraded{
+        .{ .name = "sizeMismatch", .warning = "BodySizeMismatch" },
+        // ASCII text under an unmapped charset label is exact and needs no warning.
+        .{ .name = "unsupportedCharset", .warning = "" },
+        .{ .name = "depth33", .warning = "ContentTruncated" },
+    }) |case| {
+        var object: std.json.ObjectMap = .empty;
+        try object.put(a, "payload", cases.get(case.name).?);
+        try std.testing.expectEqualStrings(case.warning, (try mime.parseGmail(.{ .object = object }, a)).decode_warning);
     }
     // The former 128-part refusal is now a readable accumulated chain.
     var wrapped: std.json.Value = .{ .object = .empty };
@@ -86,5 +97,6 @@ test "synthetic MIME limit corpus fails with explicit bounded errors" {
     try oversized_parts.appendSlice(items);
     try oversized.object.put(a, "parts", .{ .array = oversized_parts });
     try wrapped.object.put(a, "payload", oversized);
-    try std.testing.expectError(error.TooManyMimeParts, mime.parseGmail(wrapped, a));
+    // Beyond the part bound the remainder is left out with a warning.
+    try std.testing.expectEqualStrings("ContentTruncated", (try mime.parseGmail(wrapped, a)).decode_warning);
 }

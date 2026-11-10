@@ -30,6 +30,8 @@ pub const Invitation = struct {
     stamp: b.Text(16) = .{},
     uid: b.Text(1024) = .{},
     organizer: b.Text(254) = .{},
+    /// Sanitized ORGANIZER CN; shown when the address itself is unusable.
+    organizer_name: b.Text(254) = .{},
     attendee: b.Text(254) = .{},
     attendee_status: b.Text(32) = .{},
     sequence: u32 = 0,
@@ -45,25 +47,57 @@ pub const Invitation = struct {
     join_url: b.Text(4096) = .{},
     recurrence_rule: b.Text(1024) = .{},
     timezones: b.Text(32 * 1024) = .{},
+    /// Defect bits recorded by parseDisplay. Strict parsers leave this zero.
+    defects: u16 = 0,
+    /// A response is a write: it needs a clean single REQUEST. Any display
+    /// recovery means some reply field could differ from what was sent.
     pub fn canRespond(self: *const Invitation) bool {
-        return self.method == .request and !self.cancelled and !self.response_blocked and self.additional_events == 0 and self.attendee.len > 0;
+        return self.defects == 0 and self.method == .request and !self.cancelled and !self.response_blocked and self.additional_events == 0 and self.attendee.len > 0;
     }
+};
+
+/// Recoveries made by the read-only display parser. Any bit means the card
+/// shows best-effort data which must never authorize or prove a write.
+pub const Defect = struct {
+    /// Skipped or repaired content lines, control bytes and line endings.
+    pub const syntax: u16 = 1;
+    /// Missing or contradictory calendar/component structure or identity.
+    pub const structure: u16 = 2;
+    pub const organizer: u16 = 4;
+    pub const stamp: u16 = 8;
+    /// A repeated single-valued property; the first value is shown.
+    pub const duplicate: u16 = 16;
+    pub const reply: u16 = 32;
+    /// Embedded VTIMEZONE data was dropped; times are not rule-verified.
+    pub const timezone: u16 = 64;
+    pub const sequence: u16 = 128;
+    /// A value exceeded its display field and was truncated or omitted.
+    pub const truncated: u16 = 256;
 };
 
 /// A REQUEST for exactly one event/instance. Deliberately rejects ambiguous
 /// calendars rather than choosing an event or attendee implicitly.
 pub fn parse(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
-    try parseMethod(ics, account, aliases, "REQUEST", out);
+    try parseMethod(ics, account, aliases, "REQUEST", false, out);
 }
 pub fn parseReply(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
-    try parseMethod(ics, account, aliases, "REPLY", out);
+    try parseMethod(ics, account, aliases, "REPLY", false, out);
 }
 /// Read-only display accepts scheduling notices which cannot authorize RSVP.
-/// The write parser remains REQUEST-only and requires a verified attendee.
+/// It degrades a defective property or component instead of refusing the
+/// card and records every recovery in `defects`. Only the calendar byte
+/// budget and invalid caller identities remain errors. Never use this as
+/// evidence for a write: use parseProof.
 pub fn parseDisplay(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
-    try parseMethod(ics, account, aliases, null, out);
+    try parseMethod(ics, account, aliases, null, true, out);
 }
-fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8, expected_method: ?[]const u8, out: *Invitation) !void {
+/// Strict any-method parser for write-side proof (receipt matching, durable
+/// operation replay). Refuses everything parseDisplay would merely degrade.
+pub fn parseProof(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
+    try parseMethod(ics, account, aliases, null, false, out);
+    if (out.defects != 0) return error.InvalidCalendar;
+}
+fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8, expected_method: ?[]const u8, lenient: bool, out: *Invitation) !void {
     if (ics.len > max_calendar_bytes) return error.CalendarTooLarge;
     try recipients.validateAddress(account);
     if (aliases.len > recipients.max_recipients) return error.TooManyAliases;
@@ -74,27 +108,62 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
     // and component nesting, including malformed scheduling messages.
     const source = if (std.mem.startsWith(u8, ics, "\xef\xbb\xbf")) ics[3..] else ics;
     if (expected_method == null) out.method = .publish;
-    var method_lines = Lines{ .input = source };
+    var method_lines = Lines{ .input = source, .lenient = lenient };
     // A folded Outlook DESCRIPTION/X-ALT-DESC can exceed4KiB. One reused
     // scratch buffer is bounded by the complete calendar byte budget.
     var unfolded: [max_calendar_bytes]u8 = undefined;
     var method_depth: usize = 0;
+    var method_found = false;
+    // Display only: a series notice may list overridden instances before the
+    // master event. Prefer the VEVENT without RECURRENCE-ID when every event
+    // shares one UID. Strict parsers always inspect the first event.
+    var shown: usize = 1;
+    var scan_events: usize = 0;
+    var scan_event = false;
+    var scan_instance = false;
+    var scan_master: usize = 0;
+    var scan_uid: ?u64 = null;
+    var scan_same_uid = true;
     while (try method_lines.next(&unfolded)) |line| {
         if (line.len == 0) continue;
-        const prop = try property(line);
-        if (std.ascii.eqlIgnoreCase(prop.name, "BEGIN")) method_depth += 1 else if (std.ascii.eqlIgnoreCase(prop.name, "END")) method_depth -|= 1 else if (method_depth == 1 and std.ascii.eqlIgnoreCase(prop.name, "METHOD")) {
-            out.method = try methodValue(prop.value);
+        const prop = property(if (lenient) blank(unfolded[0..line.len]) else line) catch |err| if (lenient) continue else return err;
+        if (std.ascii.eqlIgnoreCase(prop.name, "BEGIN")) {
+            method_depth += 1;
+            if (method_depth == 2 and std.ascii.eqlIgnoreCase(prop.value, "VEVENT")) {
+                scan_events += 1;
+                scan_event = true;
+                scan_instance = false;
+            }
+        } else if (std.ascii.eqlIgnoreCase(prop.name, "END")) {
+            if (scan_event and method_depth == 2 and std.ascii.eqlIgnoreCase(prop.value, "VEVENT")) {
+                scan_event = false;
+                if (!scan_instance and scan_master == 0) scan_master = scan_events;
+            }
+            method_depth -|= 1;
+        } else if (method_depth == 1 and std.ascii.eqlIgnoreCase(prop.name, "METHOD")) {
+            if (lenient and method_found) continue;
+            out.method = methodValue(prop.value) catch |err| if (lenient) continue else return err;
+            method_found = true;
+        } else if (scan_event and method_depth == 2) {
+            if (std.ascii.eqlIgnoreCase(prop.name, "RECURRENCE-ID")) scan_instance = true else if (std.ascii.eqlIgnoreCase(prop.name, "UID")) {
+                const hash = std.hash.Wyhash.hash(0, prop.value);
+                if (scan_uid) |first| scan_same_uid = scan_same_uid and first == hash else scan_uid = hash;
+            }
         }
     }
-    var lines = Lines{ .input = source };
+    if (lenient and scan_same_uid and scan_master > 1) shown = scan_master;
+    var lines = Lines{ .input = source, .lenient = lenient };
     var calendar = false;
     var ended = false;
     var event = false;
     var events: usize = 0;
     var nested: usize = 0;
     var nested_names: [8]b.Text(64) = @splat(.{});
+    // Display only: components nested beyond the retained names are skipped.
+    var deep: usize = 0;
     var in_timezone = false;
     var timezone_count: usize = 0;
+    var zones_dropped = false;
     var method = false;
     var version = false;
     var uid = false;
@@ -111,91 +180,230 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
     var duration_seen = false;
     var rule_seen = false;
     var join_priority: u8 = 0;
-    while (try lines.next(&unfolded)) |line| {
-        if (line.len == 0) continue;
+    var defects: u16 = 0;
+    while (try lines.next(&unfolded)) |raw_line| {
+        if (raw_line.len == 0) continue;
         // Unfold first: RFC 5545 permits a physical fold to divide a UTF-8
         // sequence. The logical content line must still be valid UTF-8.
-        if (!std.unicode.utf8ValidateSlice(line)) return error.InvalidUtf8;
-        properties += 1;
-        if (properties > max_calendar_properties) return error.TooManyCalendarProperties;
-        const prop = try property(line);
-        if (in_timezone) try appendTimezone(out, line);
+        const valid_text = std.unicode.utf8ValidateSlice(raw_line);
+        if (!valid_text) {
+            if (!lenient) return error.InvalidUtf8;
+            defects |= Defect.syntax;
+        }
+        // The byte budget bounds a display scan; only the shown event's
+        // property count says anything about a response to it.
+        if (!lenient or events <= shown) properties += 1;
+        if (properties > max_calendar_properties) {
+            if (!lenient) return error.TooManyCalendarProperties;
+            defects |= Defect.structure;
+        }
+        var line = raw_line;
+        if (lenient) {
+            for (line) |c| if ((c < 32 and c != '\t') or c == 127) {
+                defects |= Defect.syntax;
+            };
+            line = blank(unfolded[0..line.len]);
+        }
+        const prop = property(line) catch |err| {
+            if (!lenient) return err;
+            defects |= Defect.syntax;
+            continue;
+        };
+        // Only presentation text tolerates undecodable bytes; identities,
+        // times and structure from such a line are never retained.
+        if (!valid_text and !std.ascii.eqlIgnoreCase(prop.name, "SUMMARY") and !std.ascii.eqlIgnoreCase(prop.name, "LOCATION") and !std.ascii.eqlIgnoreCase(prop.name, "DESCRIPTION")) {
+            if (in_timezone) zones_dropped = true;
+            continue;
+        }
+        if (in_timezone and !zones_dropped) appendTimezone(out, line) catch |err| {
+            if (!lenient) return err;
+            zones_dropped = true;
+        };
         if (std.ascii.eqlIgnoreCase(prop.name, "BEGIN")) {
             if (std.ascii.eqlIgnoreCase(prop.value, "VCALENDAR")) {
-                if (calendar or ended) return error.InvalidCalendar;
+                if (calendar or ended) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                }
                 calendar = true;
+                ended = false;
             } else if (std.ascii.eqlIgnoreCase(prop.value, "VEVENT")) {
-                if (!calendar or event or nested != 0) return error.InvalidCalendar;
+                if (!calendar or event or nested != 0) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                    calendar = true;
+                    ended = false;
+                    nested = 0;
+                    deep = 0;
+                    if (in_timezone) zones_dropped = true;
+                    in_timezone = false;
+                }
                 events += 1;
                 if (events > 1 and expected_method != null) return error.AmbiguousInvitation;
                 out.additional_events = events - 1;
                 event = true;
             } else {
-                if (!calendar or ended) return error.InvalidCalendar;
-                if (std.ascii.eqlIgnoreCase(prop.value, "VTIMEZONE")) {
-                    if (event or nested != 0) return error.InvalidCalendar;
-                    timezone_count += 1;
-                    if (timezone_count > 8) return error.TooManyTimezones;
-                    in_timezone = true;
-                    try appendTimezone(out, line);
+                if (!calendar or ended) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                    calendar = true;
+                    ended = false;
                 }
-                if (nested == nested_names.len) return error.CalendarTooDeep;
-                try nested_names[nested].set(prop.value);
-                nested += 1;
+                if (std.ascii.eqlIgnoreCase(prop.value, "VTIMEZONE")) {
+                    if (event or nested != 0) {
+                        if (!lenient) return error.InvalidCalendar;
+                        defects |= Defect.structure;
+                    } else {
+                        timezone_count += 1;
+                        if (timezone_count > 8) {
+                            if (!lenient) return error.TooManyTimezones;
+                            zones_dropped = true;
+                        }
+                        in_timezone = true;
+                        if (!zones_dropped) appendTimezone(out, line) catch |err| {
+                            if (!lenient) return err;
+                            zones_dropped = true;
+                        };
+                    }
+                }
+                if (nested == nested_names.len or deep != 0 or prop.value.len > 64) {
+                    if (!lenient) return if (nested == nested_names.len) error.CalendarTooDeep else error.CapacityExceeded;
+                    defects |= Defect.structure;
+                    deep += 1;
+                } else {
+                    try nested_names[nested].set(prop.value);
+                    nested += 1;
+                }
             }
             continue;
         }
         if (std.ascii.eqlIgnoreCase(prop.name, "END")) {
             if (std.ascii.eqlIgnoreCase(prop.value, "VCALENDAR")) {
-                if (!calendar or event or nested != 0) return error.InvalidCalendar;
+                if (!calendar or event or nested != 0) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                    event = false;
+                    nested = 0;
+                    deep = 0;
+                    if (in_timezone) zones_dropped = true;
+                    in_timezone = false;
+                }
                 calendar = false;
                 ended = true;
             } else if (std.ascii.eqlIgnoreCase(prop.value, "VEVENT")) {
-                if (!event or nested != 0) return error.InvalidCalendar;
+                if (!event or nested != 0) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                    nested = 0;
+                    deep = 0;
+                    in_timezone = false;
+                }
                 event = false;
+            } else if (deep != 0) {
+                deep -= 1;
             } else {
-                if (nested == 0) return error.InvalidCalendar;
-                if (!std.ascii.eqlIgnoreCase(nested_names[nested - 1].slice(), prop.value)) return error.InvalidCalendar;
+                if (nested == 0 or !std.ascii.eqlIgnoreCase(nested_names[nested - 1].slice(), prop.value)) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                    // Close through the nearest open component of this name;
+                    // an unmatched END is skipped like any other bad line.
+                    var open = nested;
+                    while (open > 0 and !std.ascii.eqlIgnoreCase(nested_names[open - 1].slice(), prop.value)) open -= 1;
+                    if (open == 0) continue;
+                    nested = open;
+                }
                 nested -= 1;
                 if (in_timezone and nested == 0) in_timezone = false;
             }
             continue;
         }
-        if (!calendar or ended) return error.InvalidCalendar;
-        if (nested != 0) continue;
+        if (!calendar or ended) {
+            if (!lenient) return error.InvalidCalendar;
+            defects |= Defect.syntax;
+            continue;
+        }
+        if (nested != 0 or deep != 0) continue;
         if (!event) {
             if (std.ascii.eqlIgnoreCase(prop.name, "METHOD")) {
-                if (method) return error.AmbiguousInvitation;
+                if (method) {
+                    if (!lenient) return error.AmbiguousInvitation;
+                    defects |= Defect.duplicate;
+                    continue;
+                }
                 if (expected_method) |expected| if (!std.ascii.eqlIgnoreCase(prop.value, expected)) return error.NotInvitationRequest;
-                out.method = try methodValue(prop.value);
+                if (methodValue(prop.value)) |value| {
+                    out.method = value;
+                } else |err| {
+                    if (!lenient) return err;
+                    defects |= Defect.structure;
+                }
                 method = true;
             } else if (std.ascii.eqlIgnoreCase(prop.name, "VERSION")) {
-                if (version or !std.mem.eql(u8, prop.value, "2.0")) return error.InvalidCalendar;
+                if (version or !std.mem.eql(u8, prop.value, "2.0")) {
+                    if (!lenient) return error.InvalidCalendar;
+                    defects |= Defect.structure;
+                }
                 version = true;
             }
             continue;
         }
         // Display the first event of a series notice, but never let that
         // preview authorize a response for an implicitly chosen occurrence.
-        if (events > 1) continue;
+        if (events != shown) continue;
         if (std.ascii.eqlIgnoreCase(prop.name, "UID")) {
-            if (uid or prop.value.len == 0) return error.AmbiguousInvitation;
-            try out.uid.set(prop.value);
+            if (uid or prop.value.len == 0) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= if (uid) Defect.duplicate else Defect.structure;
+                continue;
+            }
+            out.uid.set(prop.value) catch |err| {
+                if (!lenient) return err;
+                defects |= Defect.structure;
+                continue;
+            };
             uid = true;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "ORGANIZER")) {
-            if (organizer) return error.AmbiguousInvitation;
-            try out.organizer.set(try mailto(prop.value));
+            if (organizer) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             organizer = true;
+            out.organizer_name.display(@import("mime.zig").parameter(prop.parameters, "CN") orelse "");
+            const address = mailto(prop.value) catch |err| {
+                if (!lenient) return err;
+                defects |= Defect.organizer;
+                continue;
+            };
+            try out.organizer.set(address);
         } else if (std.ascii.eqlIgnoreCase(prop.name, "SEQUENCE")) {
-            if (sequence) return error.AmbiguousInvitation;
-            out.sequence = std.fmt.parseInt(u32, prop.value, 10) catch return error.InvalidSequence;
-            if (out.sequence > std.math.maxInt(i32)) return error.InvalidSequence;
+            if (sequence) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             sequence = true;
+            const value = std.fmt.parseInt(u32, prop.value, 10) catch std.math.maxInt(u32);
+            if (value > std.math.maxInt(i32)) {
+                if (!lenient) return error.InvalidSequence;
+                defects |= Defect.sequence;
+                continue;
+            }
+            out.sequence = value;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "RECURRENCE-ID")) {
-            if (recurrence or prop.value.len == 0) return error.AmbiguousInvitation;
+            if (recurrence or prop.value.len == 0) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= if (recurrence) Defect.duplicate else Defect.structure;
+                continue;
+            }
+            recurrence = true;
+            if (lenient and (prop.value.len > out.recurrence_id.bytes.len or prop.parameters.len > out.recurrence_parameters.bytes.len)) {
+                defects |= Defect.truncated;
+                out.recurrence_id.display(prop.value);
+                continue;
+            }
             try out.recurrence_id.set(prop.value);
             try out.recurrence_parameters.set(prop.parameters);
-            recurrence = true;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "ATTENDEE")) {
             attendees += 1;
             // Incoming meetings can have more participants than an outgoing
@@ -213,50 +421,104 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
                     out.attendee_status = .{};
                     continue;
                 }
+                var stated = true;
                 if (out.method == .reply) {
-                    const partstat = @import("mime.zig").parameter(prop.parameters, "PARTSTAT") orelse return error.InvalidInvitationStatus;
-                    if (!std.ascii.eqlIgnoreCase(partstat, "ACCEPTED") and !std.ascii.eqlIgnoreCase(partstat, "TENTATIVE") and !std.ascii.eqlIgnoreCase(partstat, "DECLINED")) return error.InvalidInvitationStatus;
+                    const partstat = @import("mime.zig").parameter(prop.parameters, "PARTSTAT") orelse "";
+                    if (!std.ascii.eqlIgnoreCase(partstat, "ACCEPTED") and !std.ascii.eqlIgnoreCase(partstat, "TENTATIVE") and !std.ascii.eqlIgnoreCase(partstat, "DECLINED")) {
+                        if (!lenient) return error.InvalidInvitationStatus;
+                        // The reply is shown; its response stays unknown.
+                        defects |= Defect.reply;
+                        stated = false;
+                    }
                 }
                 try out.attendee.set(address);
-                if (@import("mime.zig").parameter(prop.parameters, "PARTSTAT")) |partstat| {
+                if (stated) if (@import("mime.zig").parameter(prop.parameters, "PARTSTAT")) |partstat| {
                     for ([_][]const u8{ "NEEDS-ACTION", "ACCEPTED", "TENTATIVE", "DECLINED", "DELEGATED", "COMPLETED", "IN-PROCESS" }) |known| {
                         if (std.ascii.eqlIgnoreCase(partstat, known)) {
                             try out.attendee_status.set(known);
                             break;
                         }
                     }
-                }
+                };
                 attendee = true;
             }
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DTSTAMP")) {
-            if (stamp) return error.AmbiguousInvitation;
-            try validateStamp(prop.value);
-            try out.stamp.set(prop.value);
+            if (stamp) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             stamp = true;
+            validateStamp(prop.value) catch |err| {
+                if (!lenient) return err;
+                defects |= Defect.stamp;
+                continue;
+            };
+            try out.stamp.set(prop.value);
         } else if (std.ascii.eqlIgnoreCase(prop.name, "STATUS")) {
-            if (status_seen) return error.AmbiguousInvitation;
+            if (status_seen) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             status_seen = true;
             out.cancelled = std.ascii.eqlIgnoreCase(prop.value, "CANCELLED");
         } else if (std.ascii.eqlIgnoreCase(prop.name, "SUMMARY")) {
             out.summary.display(unescapeText(prop.value, &unfolded));
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DTSTART")) {
-            if (start_seen) return error.AmbiguousInvitation;
+            if (start_seen) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
+            start_seen = true;
+            if (lenient and (prop.value.len > out.start.bytes.len or prop.parameters.len > out.start_parameters.bytes.len)) {
+                defects |= Defect.truncated;
+                out.start.display(prop.value);
+                continue;
+            }
             try out.start.set(prop.value);
             try out.start_parameters.set(prop.parameters);
-            start_seen = true;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DTEND")) {
-            if (end_seen or duration_seen) return error.AmbiguousInvitation;
+            if (end_seen or duration_seen) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
+            end_seen = true;
+            if (lenient and (prop.value.len > out.end.bytes.len or prop.parameters.len > out.end_parameters.bytes.len)) {
+                defects |= Defect.truncated;
+                out.end.display(prop.value);
+                continue;
+            }
             try out.end.set(prop.value);
             try out.end_parameters.set(prop.parameters);
-            end_seen = true;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DURATION")) {
-            if (duration_seen or end_seen) return error.AmbiguousInvitation;
-            try out.duration.set(prop.value);
+            if (duration_seen or end_seen) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             duration_seen = true;
+            if (lenient and prop.value.len > out.duration.bytes.len) {
+                defects |= Defect.truncated;
+                out.duration.display(prop.value);
+                continue;
+            }
+            try out.duration.set(prop.value);
         } else if (std.ascii.eqlIgnoreCase(prop.name, "RRULE")) {
-            if (rule_seen) return error.AmbiguousInvitation;
-            try out.recurrence_rule.set(prop.value);
+            if (rule_seen) {
+                if (!lenient) return error.AmbiguousInvitation;
+                defects |= Defect.duplicate;
+                continue;
+            }
             rule_seen = true;
+            if (lenient and prop.value.len > out.recurrence_rule.bytes.len) {
+                defects |= Defect.truncated;
+                out.recurrence_rule.display(prop.value);
+                continue;
+            }
+            try out.recurrence_rule.set(prop.value);
         } else if (std.ascii.eqlIgnoreCase(prop.name, "LOCATION")) {
             const location = unescapeText(prop.value, &unfolded);
             out.location.display(location);
@@ -270,12 +532,37 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             offerJoin(out, &join_priority, @import("meeting_link.zig").plain(description), 1);
         }
     }
-    if (calendar or event or nested != 0 or !ended or events == 0 or (!method and expected_method != null) or !version or !uid or (!organizer and out.method != .publish)) return error.InvalidCalendar;
+    // Text with neither a VCALENDAR nor a VEVENT is not a degraded calendar;
+    // there is nothing to show and callers keep their non-invitation path.
+    if (events == 0 and !calendar and !ended) return error.InvalidCalendar;
+    if (calendar or event or nested != 0 or deep != 0 or !ended or events == 0 or (!method and expected_method != null) or !version or !uid or (!organizer and out.method != .publish)) {
+        if (!lenient) return error.InvalidCalendar;
+        defects |= Defect.structure;
+    }
+    if (lines.repaired) defects |= Defect.syntax;
+    if (zones_dropped) {
+        // Partial rules prove nothing. Without them a TZID is only a name.
+        out.timezones.len = 0;
+        defects |= Defect.timezone;
+    }
     out.attendee_count = attendees;
     if (expected_method != null and !attendee) return error.NotAnAttendee;
-    if (out.method == .reply and (!stamp or attendees != 1)) return error.InvalidCalendar;
+    if (out.method == .reply and (!stamp or out.stamp.len == 0 or attendees != 1)) {
+        if (!lenient) return error.InvalidCalendar;
+        defects |= Defect.reply;
+        out.attendee_status = .{};
+    }
+    out.defects = defects;
     out.cancelled = out.cancelled or out.method == .cancel;
     if (expected_method != null and out.method == .request and out.cancelled) return error.InvitationCancelled;
+}
+/// Display only: a control byte inside a content line becomes a space so the
+/// remaining value stays readable and can never reach a terminal raw.
+fn blank(line: []u8) []const u8 {
+    for (line) |*c| if ((c.* < 32 and c.* != '\t') or c.* == 127) {
+        c.* = ' ';
+    };
+    return line;
 }
 /// iCalendar TEXT escapes are presentation data, never header syntax. Input
 /// may borrow a later part of output (the parser's unfolded line buffer).
@@ -323,12 +610,15 @@ const CalendarTime = struct {
         const zone_id = @import("mime.zig").parameter(parameters, "TZID") orelse "";
         const date = raw.len == 8;
         if (date) {
-            if (zone_id.len != 0 or value_type == null or !std.ascii.eqlIgnoreCase(value_type.?, "DATE")) return error.InvalidCalendarTimestamp;
+            // Display only: eight digits are a civil DATE even when VALUE=DATE
+            // was omitted or a TZID was attached; a date has no zone.
+            if (value_type) |value| if (!std.ascii.eqlIgnoreCase(value, "DATE")) return error.InvalidCalendarTimestamp;
         } else {
             if (raw.len != 15 and raw.len != 16) return error.InvalidCalendarTimestamp;
             if (raw[8] != 'T' or (raw.len == 16 and raw[15] != 'Z')) return error.InvalidCalendarTimestamp;
             if (value_type) |value| if (!std.ascii.eqlIgnoreCase(value, "DATE-TIME")) return error.InvalidCalendarTimestamp;
-            if (raw.len == 16 and zone_id.len != 0) return error.InvalidCalendarTimestamp;
+            // A Z suffix states UTC; a contradictory TZID is ignored here and
+            // still refused by the import parser.
         }
         for (raw, 0..) |byte, index| if ((date or (index != 8 and index != 15)) and !std.ascii.isDigit(byte)) return error.InvalidCalendarTimestamp;
         const civil: timezone.CivilTime = .{
@@ -340,7 +630,8 @@ const CalendarTime = struct {
             .second = if (date) 0 else try std.fmt.parseInt(u8, raw[13..15], 10),
         };
         _ = civil.seconds() catch return error.InvalidCalendarTimestamp;
-        return .{ .civil = civil, .kind = if (date) .date else if (raw.len == 16) .utc else if (zone_id.len > 0) .zoned else .floating, .zone_id = zone_id };
+        const kind: @FieldType(CalendarTime, "kind") = if (date) .date else if (raw.len == 16) .utc else if (zone_id.len > 0) .zoned else .floating;
+        return .{ .civil = civil, .kind = kind, .zone_id = if (kind == .zoned) zone_id else "" };
     }
 };
 pub fn eventTimezone(invite: *const Invitation) []const u8 {
@@ -354,40 +645,90 @@ pub fn friendly(allocator: std.mem.Allocator, invite: *const Invitation, local_z
     return friendlyWithZone(allocator, invite, local_zone, null);
 }
 pub fn friendlyWithZone(allocator: std.mem.Allocator, invite: *const Invitation, local_zone: *const timezone.Zone, event_zone: ?*const timezone.Zone) !Friendly {
-    return friendlyResolved(allocator, invite, local_zone, event_zone, false);
+    return friendlyResolved(allocator, invite, local_zone, event_zone, null, false);
 }
+fn endTimezone(invite: *const Invitation) []const u8 {
+    return @import("mime.zig").parameter(invite.end_parameters.slice(), "TZID") orelse "";
+}
+const NativeZone = struct {
+    owned: ?timezone.Zone = null,
+    borrowed: ?*const timezone.Zone = null,
+    fn get(self: *const NativeZone) ?*const timezone.Zone {
+        return if (self.owned) |*zone| zone else self.borrowed;
+    }
+    fn deinit(self: *NativeZone, a: std.mem.Allocator) void {
+        if (self.owned) |*zone| zone.deinit(a);
+    }
+};
 /// Resolve common embedded zones by proving their offsets across the event,
-/// including nearby DST transitions. A candidate name alone proves nothing.
+/// including nearby DST transitions. A candidate name alone proves nothing
+/// against embedded rules which contradict it; rules this reader merely
+/// cannot interpret leave a loadable IANA TZID as the stated meaning.
 pub fn friendlyNative(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, invite: *const Invitation, local_zone: *const timezone.Zone) !Friendly {
     const name = eventTimezone(invite);
-    if (name.len == 0) return friendly(a, invite, local_zone);
-    if (timezone.loadNamed(io, a, env, name)) |loaded| {
+    const end_name = endTimezone(invite);
+    if (name.len == 0 and end_name.len == 0) return friendly(a, invite, local_zone);
+    var start_zone: NativeZone = if (name.len != 0) nativeZone(io, a, env, invite, local_zone, name, false) else .{};
+    defer start_zone.deinit(a);
+    // DTEND may name another zone; it is resolved and proved on its own.
+    var end_zone: NativeZone = if (end_name.len != 0 and !std.mem.eql(u8, end_name, name)) nativeZone(io, a, env, invite, local_zone, end_name, true) else .{};
+    defer end_zone.deinit(a);
+    return friendlyResolved(a, invite, local_zone, start_zone.get(), end_zone.get(), true);
+}
+fn nativeZone(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, invite: *const Invitation, local_zone: *const timezone.Zone, id: []const u8, end: bool) NativeZone {
+    const embedded = invite.timezones.len != 0;
+    if (timezone.loadNamed(io, a, env, timezone.canonicalId(id))) |loaded| {
         var zone = loaded;
-        defer zone.deinit(a);
-        if (invite.timezones.len == 0 or embeddedMatches(invite, &zone)) return friendlyResolved(a, invite, local_zone, &zone, true);
+        if (!embedded) return .{ .owned = zone };
+        switch (embeddedVerdict(invite, id, &zone, end)) {
+            .match => return .{ .owned = zone },
+            // A Windows name is only our mapping, never the sender's
+            // statement: it needs the proof. An IANA TZID is the statement.
+            .unsupported => if (!timezone.mappedWindowsName(id)) return .{ .owned = zone },
+            .mismatch => {},
+        }
+        zone.deinit(a);
     } else |_| {}
-    if (invite.timezones.len != 0) {
-        if (embeddedMatches(invite, local_zone)) return friendlyResolved(a, invite, local_zone, local_zone, true);
+    if (embedded) {
+        if (embeddedVerdict(invite, id, local_zone, end) == .match) return .{ .borrowed = local_zone };
         for ([_][]const u8{ "Europe/Berlin", "Europe/London", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney" }) |candidate| {
             var zone = timezone.loadNamed(io, a, env, candidate) catch continue;
-            defer zone.deinit(a);
-            if (embeddedMatches(invite, &zone)) return friendlyResolved(a, invite, local_zone, &zone, true);
+            if (embeddedVerdict(invite, id, &zone, end) == .match) return .{ .owned = zone };
+            zone.deinit(a);
         }
     }
-    return friendly(a, invite, local_zone);
+    return .{};
 }
 fn embeddedMatches(invite: *const Invitation, candidate: *const timezone.Zone) bool {
-    const start = CalendarTime.parse(invite.start.slice(), invite.start_parameters.slice()) catch return false;
-    if (start.kind != .zoned) return false;
-    const first = candidate.fromLocal(start.civil) catch return false;
-    const last = if (invite.end.len != 0) last: {
-        const end = CalendarTime.parse(invite.end.slice(), invite.end_parameters.slice()) catch return false;
-        if (end.kind != .zoned or !std.mem.eql(u8, start.zone_id, end.zone_id)) return false;
-        break :last candidate.fromLocal(end.civil) catch return false;
-    } else first + 86400000;
-    return @import("calendar_embedded.zig").matches(invite.timezones.slice(), start.zone_id, candidate, first, last);
+    return embeddedVerdict(invite, eventTimezone(invite), candidate, false) == .match;
 }
-fn friendlyResolved(allocator: std.mem.Allocator, invite: *const Invitation, local_zone: *const timezone.Zone, event_zone: ?*const timezone.Zone, verified_embedded: bool) !Friendly {
+const embedded_zone = @import("calendar_embedded.zig");
+/// Prove `candidate` against the embedded rules for one endpoint's TZID. The
+/// start proof spans the event when DTEND shares its zone; otherwise each
+/// endpoint is proved around its own instant.
+fn embeddedVerdict(invite: *const Invitation, id: []const u8, candidate: *const timezone.Zone, end: bool) embedded_zone.Verdict {
+    const start: ?CalendarTime = if (invite.start.len != 0) CalendarTime.parse(invite.start.slice(), invite.start_parameters.slice()) catch return .mismatch else null;
+    const finish: ?CalendarTime = if (invite.end.len != 0) CalendarTime.parse(invite.end.slice(), invite.end_parameters.slice()) catch return .mismatch else null;
+    if (end) {
+        const value = finish orelse return .mismatch;
+        if (value.kind != .zoned or !std.mem.eql(u8, value.zone_id, id)) return .mismatch;
+        const instant = candidate.fromLocal(value.civil) catch return .mismatch;
+        return embedded_zone.verdict(invite.timezones.slice(), id, candidate, instant, instant);
+    }
+    const value = start orelse return .mismatch;
+    if (value.kind != .zoned or !std.mem.eql(u8, value.zone_id, id)) return .mismatch;
+    const first = candidate.fromLocal(value.civil) catch return .mismatch;
+    const last = if (finish) |other| (if (other.kind == .zoned and std.mem.eql(u8, other.zone_id, id)) candidate.fromLocal(other.civil) catch return .mismatch else first) else first + 86400000;
+    return embedded_zone.verdict(invite.timezones.slice(), id, candidate, first, last);
+}
+/// Every value interpolated into a display string passes the shared bounded
+/// sanitizer: no C0, DEL, C1 or bidirectional override reaches a terminal.
+fn clean(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    var text: b.Text(1024) = .{};
+    text.display(raw);
+    return allocator.dupe(u8, text.slice());
+}
+fn friendlyResolved(allocator: std.mem.Allocator, invite: *const Invitation, local_zone: *const timezone.Zone, event_zone: ?*const timezone.Zone, end_zone: ?*const timezone.Zone, verified_embedded: bool) !Friendly {
     var result: Friendly = .{ .location = invite.location.slice(), .join_url = if (reader_tools.safeUrl(invite.join_url.slice())) invite.join_url.slice() else "" };
     if (invite.cancelled) result.join_url = "";
     const start = if (invite.start.len > 0) CalendarTime.parse(invite.start.slice(), invite.start_parameters.slice()) catch null else null;
@@ -395,23 +736,25 @@ fn friendlyResolved(allocator: std.mem.Allocator, invite: *const Invitation, loc
     result.all_day = if (start) |value| value.kind == .date else false;
     var start_ms: ?i64 = null;
     var end_ms: ?i64 = null;
+    const usable = invite.timezones.len == 0 or verified_embedded;
     if (start) |value| {
-        if (value.kind == .zoned or value.kind == .utc) result.original_start = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}", .{ value.civil.year, value.civil.month, value.civil.day, value.civil.hour, value.civil.minute, if (value.kind == .utc) "UTC" else value.zone_id });
-        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0 or verified_embedded) event_zone else null, eventTimezone(invite));
+        if (value.kind == .zoned or value.kind == .utc) result.original_start = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}", .{ value.civil.year, value.civil.month, value.civil.day, value.civil.hour, value.civil.minute, if (value.kind == .utc) "UTC" else try clean(allocator, value.zone_id) });
+        const rendered = try friendlyTime(allocator, value, local_zone, if (usable) event_zone else null, eventTimezone(invite));
         result.start = rendered.text;
         start_ms = rendered.milliseconds;
         result.timezone_unavailable = rendered.unavailable;
     } else if (invite.start.len > 0) {
-        result.start = try std.fmt.allocPrint(allocator, "{s} (unrecognized calendar time)", .{invite.start.slice()});
+        result.start = try std.fmt.allocPrint(allocator, "{s} (unrecognized calendar time)", .{try clean(allocator, invite.start.slice())});
         result.timezone_unavailable = true;
     }
     if (end) |value| {
-        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0 or verified_embedded) event_zone else null, eventTimezone(invite));
+        const own = end_zone != null and value.kind == .zoned and !std.mem.eql(u8, value.zone_id, eventTimezone(invite));
+        const rendered = try friendlyTime(allocator, value, local_zone, if (!usable) null else if (own) end_zone else event_zone, if (own) value.zone_id else eventTimezone(invite));
         result.end = if (value.kind == .date) try std.fmt.allocPrint(allocator, "{s} (exclusive)", .{rendered.text}) else rendered.text;
         end_ms = rendered.milliseconds;
         result.timezone_unavailable = result.timezone_unavailable or rendered.unavailable;
     } else if (invite.end.len > 0) {
-        result.end = try std.fmt.allocPrint(allocator, "{s} (unrecognized calendar time)", .{invite.end.slice()});
+        result.end = try std.fmt.allocPrint(allocator, "{s} (unrecognized calendar time)", .{try clean(allocator, invite.end.slice())});
         result.timezone_unavailable = true;
     }
     if (start != null and end != null and start.?.kind == .date and end.?.kind == .date) {
@@ -427,7 +770,7 @@ fn friendlyResolved(allocator: std.mem.Allocator, invite: *const Invitation, loc
         const instance = CalendarTime.parse(invite.recurrence_id.slice(), invite.recurrence_parameters.slice()) catch null;
         // The equivalence proof covers this event, not an arbitrary recurrence
         // identifier in another season. Keep embedded recurrence IDs literal.
-        const instance_text = if (instance) |value| (try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0) event_zone else null, eventTimezone(invite))).text else invite.recurrence_id.slice();
+        const instance_text = if (instance) |value| (try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0) event_zone else null, eventTimezone(invite))).text else try clean(allocator, invite.recurrence_id.slice());
         result.recurrence = try std.fmt.allocPrint(allocator, "This occurrence: {s}", .{instance_text});
     } else if (invite.recurrence_rule.len > 0) {
         result.recurrence = try recurrenceLabel(allocator, invite.recurrence_rule.slice());
@@ -450,9 +793,9 @@ fn friendlyTime(allocator: std.mem.Allocator, value: CalendarTime, local_zone: *
             };
         },
         .zoned => {
-            detail = value.zone_id;
+            detail = try clean(allocator, value.zone_id);
             if (event_zone != null and std.mem.eql(u8, value.zone_id, event_id)) milliseconds = event_zone.?.fromLocal(date) catch |err| failed: {
-                detail = try std.fmt.allocPrint(allocator, "{s}; {s}", .{ value.zone_id, localTimeProblem(err) });
+                detail = try std.fmt.allocPrint(allocator, "{s}; {s}", .{ detail, localTimeProblem(err) });
                 break :failed null;
             };
         },
@@ -535,7 +878,7 @@ fn recurrenceLabel(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
     const label = if (std.ascii.eqlIgnoreCase(frequency, "DAILY")) "Daily" else if (std.ascii.eqlIgnoreCase(frequency, "WEEKLY")) "Weekly" else if (std.ascii.eqlIgnoreCase(frequency, "MONTHLY")) "Monthly" else if (std.ascii.eqlIgnoreCase(frequency, "YEARLY")) "Yearly" else "Recurring";
     // Keep the exact rule visible: INTERVAL/BYDAY/UNTIL/COUNT affect semantics
     // and this review does not pretend to expand the recurring event series.
-    return std.fmt.allocPrint(allocator, "{s} · {s}", .{ label, raw });
+    return std.fmt.allocPrint(allocator, "{s} · {s}", .{ label, try clean(allocator, raw) });
 }
 fn appendTimezone(out: *Invitation, line: []const u8) !void {
     const len: usize = out.timezones.len;
@@ -547,7 +890,8 @@ fn appendTimezone(out: *Invitation, line: []const u8) !void {
 
 const Property = struct { name: []const u8, parameters: []const u8, value: []const u8 };
 fn property(line: []const u8) !Property {
-    for (line) |c| if (c < 32 or c == 127) return error.InvalidCalendar;
+    // RFC 5545 SAFE-CHAR includes WSP (space and horizontal tab).
+    for (line) |c| if ((c < 32 and c != '\t') or c == 127) return error.InvalidCalendar;
     var quoted = false;
     var escaped = false;
     var colon: ?usize = null;
@@ -583,7 +927,23 @@ fn mailto(value: []const u8) ![]const u8 {
 const Lines = struct {
     input: []const u8,
     offset: usize = 0,
+    /// Display only: a bare CR or a run such as CR CR LF ends a line, and a
+    /// continuation with nothing to continue is read as its own line.
+    lenient: bool = false,
+    repaired: bool = false,
     fn physical(self: *Lines) ![]const u8 {
+        if (self.lenient) {
+            const end = std.mem.indexOfAnyPos(u8, self.input, self.offset, "\r\n") orelse self.input.len;
+            const line = self.input[self.offset..end];
+            var next_offset = end;
+            while (next_offset < self.input.len and self.input[next_offset] == '\r') next_offset += 1;
+            if (next_offset < self.input.len and self.input[next_offset] == '\n') {
+                if (next_offset - end > 1) self.repaired = true;
+                next_offset += 1;
+            } else if (next_offset != end and next_offset < self.input.len) self.repaired = true;
+            self.offset = next_offset;
+            return line;
+        }
         const end = std.mem.indexOfScalarPos(u8, self.input, self.offset, '\n') orelse self.input.len;
         var line = self.input[self.offset..end];
         self.offset = if (end < self.input.len) end + 1 else end;
@@ -593,8 +953,12 @@ const Lines = struct {
     }
     fn next(self: *Lines, out: []u8) !?[]const u8 {
         if (self.offset >= self.input.len) return null;
-        const first = try self.physical();
-        if (first.len > 0 and (first[0] == ' ' or first[0] == '\t')) return error.InvalidCalendar;
+        var first = try self.physical();
+        if (first.len > 0 and (first[0] == ' ' or first[0] == '\t')) {
+            if (!self.lenient) return error.InvalidCalendar;
+            self.repaired = true;
+            first = std.mem.trimStart(u8, first, " \t");
+        }
         if (first.len > out.len) return error.CalendarLineTooLarge;
         @memcpy(out[0..first.len], first);
         var len = first.len;
@@ -870,7 +1234,7 @@ test "invitation zones: embedded offsets must be proved before local conversion"
     try std.testing.expect(!embeddedMatches(&invite, &wrong));
     const unresolved = try friendlyWithZone(a, &invite, &local, &matching);
     try std.testing.expect(unresolved.timezone_unavailable);
-    const resolved = try friendlyResolved(a, &invite, &local, &matching, true);
+    const resolved = try friendlyResolved(a, &invite, &local, &matching, null, true);
     try std.testing.expect(!resolved.timezone_unavailable);
     try std.testing.expect(std.mem.indexOf(u8, resolved.start, "09:00 UTC") != null);
     try std.testing.expectEqualStrings("2026-10-14 10:00 Custom/Office", resolved.original_start);
@@ -929,4 +1293,297 @@ test "invitation compatibility: BOM published calendars and other scheduling not
         try std.testing.expect(!invite.canRespond());
         try std.testing.expectError(error.NotInvitationRequest, parse(source, "self@example.test", &.{}, &invite));
     };
+}
+
+const tolerant_account = "self@example.test";
+const tolerant_base = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:tolerant@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER;CN=Fixture Host:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nSUMMARY:Planning\r\nDTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+fn expectNoTerminalControls(text: []const u8) !void {
+    var view = try std.unicode.Utf8View.init(text);
+    var points = view.iterator();
+    while (points.nextCodepoint()) |cp| try std.testing.expect(cp >= 0x20 and !(cp >= 0x7f and cp <= 0x9f) and !(cp >= 0x202a and cp <= 0x202e) and !(cp >= 0x2066 and cp <= 0x2069));
+}
+/// A degraded card must not answer, and the write/proof parsers must refuse
+/// the same bytes: display tolerance never becomes write tolerance.
+fn expectDisplayOnly(raw: []const u8, invite: *Invitation, defect: u16) !void {
+    try parseDisplay(raw, tolerant_account, &.{}, invite);
+    try std.testing.expect(invite.defects & defect != 0);
+    try std.testing.expect(!invite.canRespond());
+    var strict: Invitation = .{};
+    if (parseProof(raw, tolerant_account, &.{}, &strict)) |_| return error.ProofAcceptedDefect else |_| {}
+    if (parse(raw, tolerant_account, &.{}, &strict)) |_| return error.RequestAcceptedDefect else |_| {}
+    if (parseReply(raw, tolerant_account, &.{}, &strict)) |_| return error.ReplyAcceptedDefect else |_| {}
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectError(error.NotInvitationRequest, reply(invite, .accepted, "20261013T120000Z", &buffer));
+}
+
+test "invitation tolerant: a clean request has no defects and each damaged line degrades only itself" {
+    const a = std.testing.allocator;
+    var invite: Invitation = .{};
+    try parseDisplay(tolerant_base, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqual(@as(u16, 0), invite.defects);
+    try std.testing.expect(invite.canRespond());
+    try std.testing.expectEqualStrings("Fixture Host", invite.organizer_name.slice());
+    try parseProof(tolerant_base, tolerant_account, &.{}, &invite);
+    // LF-only and a final line without a terminator are equally clean.
+    const unix = try std.mem.replaceOwned(u8, a, tolerant_base[0 .. tolerant_base.len - 2], "\r\n", "\n");
+    defer a.free(unix);
+    try parseDisplay(unix, tolerant_account, &.{}, &invite);
+    try std.testing.expect(invite.defects == 0 and invite.canRespond());
+    inline for (.{
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nnot a content line\r\n", Defect.syntax },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nX-NOTE:bell\x07here\r\n", Defect.syntax },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\r\n", Defect.syntax },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\rX-NOTE:bare carriage return\r\n", Defect.syntax },
+        .{ "BEGIN:VCALENDAR\r\n", " \tBEGIN:VCALENDAR\r\n", Defect.syntax },
+        .{ "BEGIN:VCALENDAR\r\n", "X-PREFIX:outside\r\nBEGIN:VCALENDAR\r\n", Defect.syntax },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nX-LATIN:caf\xe9\r\n", Defect.syntax },
+        .{ "VERSION:2.0\r\n", "", Defect.structure },
+        .{ "VERSION:2.0", "VERSION:1.0", Defect.structure },
+        .{ "VERSION:2.0\r\n", "VERSION:2.0\r\nVERSION:2.0\r\n", Defect.structure },
+        .{ "END:VCALENDAR\r\n", "", Defect.structure },
+        .{ "END:VEVENT\r\n", "", Defect.structure },
+        .{ "END:VEVENT\r\n", "BEGIN:VALARM\r\nEND:VEVENT\r\n", Defect.structure },
+        .{ "END:VEVENT\r\n", "END:VALARM\r\nEND:VEVENT\r\n", Defect.structure },
+        .{ "ORGANIZER;CN=Fixture Host:mailto:host@example.test\r\n", "", Defect.structure },
+        .{ "METHOD:REQUEST\r\n", "METHOD:REQUEST\r\nMETHOD:REQUEST\r\n", Defect.duplicate },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nSEQUENCE:9\r\n", Defect.duplicate },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nUID:second@example.test\r\n", Defect.duplicate },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nDTSTAMP:20270101T000000Z\r\n", Defect.duplicate },
+        .{ "SUMMARY:Planning\r\n", "SUMMARY:Planning\r\nORGANIZER:mailto:other@example.test\r\n", Defect.duplicate },
+        .{ "END:VEVENT\r\n", "DTSTART:20270101T000000Z\r\nEND:VEVENT\r\n", Defect.duplicate },
+        .{ "END:VEVENT\r\n", "DURATION:PT1H\r\nEND:VEVENT\r\n", Defect.duplicate },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nSTATUS:CONFIRMED\r\nSTATUS:CANCELLED\r\n", Defect.duplicate },
+        .{ "SEQUENCE:3\r\n", "SEQUENCE:3\r\nRRULE:FREQ=DAILY\r\nRRULE:FREQ=WEEKLY\r\n", Defect.duplicate },
+    }) |case| {
+        const raw = try std.mem.replaceOwned(u8, a, tolerant_base, case[0], case[1]);
+        defer a.free(raw);
+        try expectDisplayOnly(raw, &invite, case[2]);
+        // Everything outside the damaged line is still shown, first wins.
+        try std.testing.expectEqualStrings("tolerant@example.test", invite.uid.slice());
+        try std.testing.expectEqualStrings("Planning", invite.summary.slice());
+        try std.testing.expectEqualStrings("20261014T100000Z", invite.start.slice());
+        try std.testing.expectEqualStrings("20261013T100000Z", invite.stamp.slice());
+        try std.testing.expectEqualStrings("self@example.test", invite.attendee.slice());
+        try std.testing.expectEqual(@as(u32, 3), invite.sequence);
+        try std.testing.expect(!invite.cancelled);
+        try std.testing.expectEqual(Method.request, invite.method);
+    }
+    // A control byte inside a shown value becomes a space, never output.
+    const controlled = try std.mem.replaceOwned(u8, a, tolerant_base, "SUMMARY:Planning", "SUMMARY:Plan\x0bning\x1b[31m");
+    defer a.free(controlled);
+    try expectDisplayOnly(controlled, &invite, Defect.syntax);
+    try std.testing.expectEqualStrings("Plan ning [31m", invite.summary.slice());
+    // Latin-1 presentation text keeps its readable part.
+    const latin = try std.mem.replaceOwned(u8, a, tolerant_base, "SUMMARY:Planning", "SUMMARY:Caf\xe9 planning");
+    defer a.free(latin);
+    try expectDisplayOnly(latin, &invite, Defect.syntax);
+    try std.testing.expectEqualStrings("Caf planning", invite.summary.slice());
+    // Hard bounds and non-calendars remain refusals, not empty cards.
+    try std.testing.expectError(error.InvalidCalendar, parseDisplay("Incomplete calendar", tolerant_account, &.{}, &invite));
+    try std.testing.expectError(error.InvalidCalendar, parseDisplay("", tolerant_account, &.{}, &invite));
+    const oversized = try a.alloc(u8, max_calendar_bytes + 1);
+    defer a.free(oversized);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.CalendarTooLarge, parseDisplay(oversized, tolerant_account, &.{}, &invite));
+}
+
+test "invitation tolerant: unusable organizer identity stamp and sequence are shown empty, never guessed" {
+    const a = std.testing.allocator;
+    var invite: Invitation = .{};
+    inline for (.{ "invalid:nomail", "host@example.test", "urn:uuid:synthetic-room", "", "mailto:not an address" }) |value| {
+        const raw = try std.mem.replaceOwned(u8, a, tolerant_base, "mailto:host@example.test", value);
+        defer a.free(raw);
+        try expectDisplayOnly(raw, &invite, Defect.organizer);
+        try std.testing.expectEqualStrings("", invite.organizer.slice());
+        try std.testing.expectEqualStrings("Fixture Host", invite.organizer_name.slice());
+        try std.testing.expectEqualStrings("Planning", invite.summary.slice());
+    }
+    inline for (.{ "DTSTAMP:20261013T100000", "DTSTAMP;TZID=Europe/Vienna:20261013T100000", "DTSTAMP:20261332T100000Z", "DTSTAMP:" }) |value| {
+        const raw = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTAMP:20261013T100000Z", value);
+        defer a.free(raw);
+        try expectDisplayOnly(raw, &invite, Defect.stamp);
+        try std.testing.expectEqualStrings("", invite.stamp.slice());
+    }
+    inline for (.{ "SEQUENCE:three", "SEQUENCE:-1", "SEQUENCE:4294967295", "SEQUENCE:" }) |value| {
+        const raw = try std.mem.replaceOwned(u8, a, tolerant_base, "SEQUENCE:3", value);
+        defer a.free(raw);
+        try expectDisplayOnly(raw, &invite, Defect.sequence);
+        try std.testing.expectEqual(@as(u32, 0), invite.sequence);
+    }
+    inline for (.{ .{ "UID:tolerant@example.test\r\n", "" }, .{ "UID:tolerant@example.test", "UID:" } }) |case| {
+        const raw = try std.mem.replaceOwned(u8, a, tolerant_base, case[0], case[1]);
+        defer a.free(raw);
+        try expectDisplayOnly(raw, &invite, Defect.structure);
+        try std.testing.expectEqualStrings("", invite.uid.slice());
+        try std.testing.expectEqualStrings("Planning", invite.summary.slice());
+    }
+    // An unknown METHOD and a calendar without any event still open a card.
+    const unknown = try std.mem.replaceOwned(u8, a, tolerant_base, "METHOD:REQUEST", "METHOD:SYNTHETIC");
+    defer a.free(unknown);
+    try parseDisplay(unknown, tolerant_account, &.{}, &invite);
+    try std.testing.expect(invite.defects & Defect.structure != 0 and invite.method == .publish and !invite.canRespond());
+    try parseDisplay("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VTODO\r\nUID:todo@example.test\r\nEND:VTODO\r\nEND:VCALENDAR\r\n", tolerant_account, &.{}, &invite);
+    try std.testing.expect(invite.defects & Defect.structure != 0 and invite.uid.len == 0 and !invite.canRespond());
+}
+
+test "invitation tolerant: replies without a single stated response display with unknown status" {
+    const a = std.testing.allocator;
+    const response = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:reply@example.test\r\nDTSTAMP:20261013T120000Z\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var invite: Invitation = .{};
+    try parseDisplay(response, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqual(@as(u16, 0), invite.defects);
+    try std.testing.expectEqualStrings("ACCEPTED", invite.attendee_status.slice());
+    inline for (.{
+        .{ ";PARTSTAT=ACCEPTED", ";PARTSTAT=DELEGATED" },
+        .{ ";PARTSTAT=ACCEPTED", "" },
+        .{ ";PARTSTAT=ACCEPTED", ";PARTSTAT=SYNTHETIC" },
+        .{ "DTSTAMP:20261013T120000Z\r\n", "" },
+        .{ "DTSTAMP:20261013T120000Z", "DTSTAMP:yesterday" },
+        .{ "END:VEVENT", "ATTENDEE;PARTSTAT=DECLINED:mailto:second@example.test\r\nEND:VEVENT" },
+    }) |case| {
+        const raw = try std.mem.replaceOwned(u8, a, response, case[0], case[1]);
+        defer a.free(raw);
+        try parseDisplay(raw, tolerant_account, &.{}, &invite);
+        try std.testing.expect(invite.defects != 0 and invite.method == .reply and !invite.canRespond());
+        try std.testing.expectEqualStrings("", invite.attendee_status.slice());
+        try std.testing.expectEqualStrings("reply@example.test", invite.uid.slice());
+        var strict: Invitation = .{};
+        if (parseProof(raw, tolerant_account, &.{}, &strict)) |_| return error.ProofAcceptedDefect else |_| {}
+        if (parseReply(raw, "guest@example.test", &.{}, &strict)) |_| return error.ReplyAcceptedDefect else |_| {}
+    }
+}
+
+test "invitation tolerant: property, nesting and timezone counts degrade inside the byte budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const invite = try a.create(Invitation);
+    // More attendee lines than the response parser accepts: still a card.
+    var many: std.ArrayList(u8) = .empty;
+    try many.appendSlice(a, "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:many@example.test\nORGANIZER:mailto:host@example.test\nATTENDEE:mailto:self@example.test\n");
+    for (0..1100) |number| try many.appendSlice(a, try std.fmt.allocPrint(a, "ATTENDEE:mailto:guest{d}@example.test\n", .{number}));
+    try many.appendSlice(a, "SUMMARY:All hands\nEND:VEVENT\nEND:VCALENDAR\n");
+    try expectDisplayOnly(many.items, invite, Defect.structure);
+    try std.testing.expectEqualStrings("All hands", invite.summary.slice());
+    try std.testing.expectEqual(@as(?usize, 1101), invite.attendee_count);
+    // Lines of later occurrences are not this event's properties.
+    var series: std.ArrayList(u8) = .empty;
+    try series.appendSlice(a, "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:series@example.test\nORGANIZER:mailto:host@example.test\nATTENDEE:mailto:self@example.test\nSUMMARY:Series\nEND:VEVENT\n");
+    for (0..40) |number| {
+        try series.appendSlice(a, try std.fmt.allocPrint(a, "BEGIN:VEVENT\nUID:series@example.test\nRECURRENCE-ID:202610{d:0>2}T100000Z\n", .{number % 28 + 1}));
+        for (0..40) |_| try series.appendSlice(a, "X-NOTE:override detail\n");
+        try series.appendSlice(a, "END:VEVENT\n");
+    }
+    try series.appendSlice(a, "END:VCALENDAR\n");
+    try parseDisplay(series.items, tolerant_account, &.{}, invite);
+    try std.testing.expectEqual(@as(u16, 0), invite.defects);
+    try std.testing.expectEqual(@as(usize, 40), invite.additional_events);
+    try std.testing.expect(!invite.canRespond());
+    // Nine zones, or one beyond the retained bytes: none is kept, so no
+    // partial rule set can later "prove" a conversion.
+    var zones: std.ArrayList(u8) = .empty;
+    try zones.appendSlice(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n");
+    for (0..9) |number| try zones.appendSlice(a, try std.fmt.allocPrint(a, "BEGIN:VTIMEZONE\r\nTZID:Custom/Zone{d}\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n", .{number}));
+    const event = "BEGIN:VEVENT\r\nUID:zones@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nDTSTART;TZID=Custom/Zone0:20261014T100000\r\nSUMMARY:Zoned\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    try zones.appendSlice(a, event);
+    try expectDisplayOnly(zones.items, invite, Defect.timezone);
+    try std.testing.expectEqual(@as(usize, 0), invite.timezones.len);
+    try std.testing.expectEqualStrings("Zoned", invite.summary.slice());
+    const local = try timezone.Zone.fromPosix("UTC0");
+    const unresolved = try friendly(a, invite, &local);
+    try std.testing.expectEqualStrings("2026-10-14 10:00 (Custom/Zone0)", unresolved.start);
+    try std.testing.expect(unresolved.timezone_unavailable);
+    var large: std.ArrayList(u8) = .empty;
+    try large.appendSlice(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Custom/Zone0\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\n");
+    for (0..1800) |number| try large.appendSlice(a, try std.fmt.allocPrint(a, "RDATE:{d:0>4}0101T000000\r\n", .{1971 + number}));
+    try large.appendSlice(a, "END:STANDARD\r\nEND:VTIMEZONE\r\n" ++ event);
+    try std.testing.expect(large.items.len < max_calendar_bytes);
+    try expectDisplayOnly(large.items, invite, Defect.timezone);
+    try std.testing.expectEqual(@as(usize, 0), invite.timezones.len);
+    try std.testing.expectEqualStrings("Zoned", invite.summary.slice());
+    // Components nested deeper than the retained names are skipped whole.
+    var deep: std.ArrayList(u8) = .empty;
+    try deep.appendSlice(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:deep@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\n");
+    for (0..12) |number| try deep.appendSlice(a, try std.fmt.allocPrint(a, "BEGIN:X-LEVEL{d}\r\nSUMMARY:Nested decoy\r\n", .{number}));
+    for (0..12) |number| try deep.appendSlice(a, try std.fmt.allocPrint(a, "END:X-LEVEL{d}\r\n", .{11 - number}));
+    try deep.appendSlice(a, "SUMMARY:After nesting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    try expectDisplayOnly(deep.items, invite, Defect.structure);
+    try std.testing.expectEqualStrings("After nesting", invite.summary.slice());
+    try std.testing.expectEqual(@as(usize, 0), invite.additional_events);
+}
+
+test "invitation tolerant: bare dates and contradictory UTC zones display, recurring series prefer the master" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const local = try timezone.Zone.fromPosix("UTC0");
+    var invite: Invitation = .{};
+    const dated = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z", "DTSTART:20261014\r\nDTEND;TZID=Europe/Vienna:20261016");
+    try parseDisplay(dated, tolerant_account, &.{}, &invite);
+    const day = try friendly(a, &invite, &local);
+    try std.testing.expect(day.all_day and !day.timezone_unavailable);
+    try std.testing.expectEqualStrings("2026-10-14 (all day)", day.start);
+    try std.testing.expectEqualStrings("2026-10-16 (all day) (exclusive)", day.end);
+    try std.testing.expectEqualStrings("2 days", day.duration);
+    // A stated VALUE which contradicts the eight digits is still unknown.
+    const contradictory = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTART:20261014T100000Z", "DTSTART;VALUE=DATE-TIME:20261014");
+    try parseDisplay(contradictory, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqualStrings("20261014 (unrecognized calendar time)", (try friendly(a, &invite, &local)).start);
+    const zoned_utc = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTART:20261014T100000Z", "DTSTART;TZID=Europe/Vienna:20261014T100000Z");
+    try parseDisplay(zoned_utc, tolerant_account, &.{}, &invite);
+    const utc = try friendly(a, &invite, &local);
+    try std.testing.expectEqualStrings("2026-10-14 10:00 UTC", utc.start);
+    try std.testing.expectEqualStrings("2026-10-14 10:00 UTC", utc.original_start);
+    try std.testing.expectEqualStrings("1 hour", utc.duration);
+    try std.testing.expect(!utc.timezone_unavailable);
+    const master = "BEGIN:VEVENT\r\nUID:series@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nSUMMARY:Weekly planning\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\n";
+    const moved = "BEGIN:VEVENT\r\nUID:series@example.test\r\nORGANIZER:mailto:host@example.test\r\nRECURRENCE-ID:20261013T100000Z\r\nSUMMARY:Moved occurrence\r\nEND:VEVENT\r\n";
+    const other = "BEGIN:VEVENT\r\nUID:other@example.test\r\nSUMMARY:Unrelated event\r\nEND:VEVENT\r\n";
+    const head = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n";
+    const tail = "END:VCALENDAR\r\n";
+    try parseDisplay(head ++ moved ++ moved ++ master ++ tail, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqualStrings("Weekly planning", invite.summary.slice());
+    try std.testing.expectEqualStrings("FREQ=WEEKLY", invite.recurrence_rule.slice());
+    try std.testing.expectEqualStrings("", invite.recurrence_id.slice());
+    try std.testing.expectEqualStrings("self@example.test", invite.attendee.slice());
+    try std.testing.expectEqual(@as(usize, 2), invite.additional_events);
+    try std.testing.expect(!invite.canRespond());
+    // Different UIDs are different events: the first stays the preview.
+    try parseDisplay(head ++ moved ++ other ++ master ++ tail, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqualStrings("Moved occurrence", invite.summary.slice());
+    try std.testing.expectEqual(@as(usize, 2), invite.additional_events);
+    // Strict parsers never choose among events.
+    try std.testing.expectError(error.AmbiguousInvitation, parse(head ++ moved ++ master ++ tail, tolerant_account, &.{}, &invite));
+    // The proof parser keeps the first event and reports the others; its
+    // callers refuse any notice with additional events.
+    try parseProof(head ++ moved ++ master ++ tail, tolerant_account, &.{}, &invite);
+    try std.testing.expectEqualStrings("Moved occurrence", invite.summary.slice());
+    try std.testing.expectEqual(@as(usize, 1), invite.additional_events);
+}
+
+test "invitation tolerant: interpolated zone rule and time values never carry terminal controls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const local = try timezone.Zone.fromPosix("UTC0");
+    var invite: Invitation = .{};
+    // C1 CSI, a bidirectional override and an isolate: all valid UTF-8.
+    const hostile = "\xc2\x9b31m\xe2\x80\xae\xe2\x81\xa6";
+    const raw = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z", "DTSTART;TZID=\"Evil" ++ hostile ++ "Zone\":20261014T100000\r\nDTEND:tomorrow" ++ hostile ++ "\r\nRRULE:FREQ=WEEKLY;X-NOTE=" ++ hostile);
+    try parseDisplay(raw, tolerant_account, &.{}, &invite);
+    const display = try friendly(a, &invite, &local);
+    try std.testing.expect(std.mem.indexOf(u8, display.start, "Evil") != null and std.mem.indexOf(u8, display.start, "Zone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, display.end, "unrecognized calendar time") != null);
+    try std.testing.expect(std.mem.startsWith(u8, display.recurrence, "Weekly · FREQ=WEEKLY;X-NOTE="));
+    for ([_][]const u8{ display.start, display.end, display.original_start, display.recurrence, display.duration, display.location }) |text| try expectNoTerminalControls(text);
+    const instance = try std.mem.replaceOwned(u8, a, tolerant_base, "SEQUENCE:3", "SEQUENCE:3\r\nRECURRENCE-ID:sometime" ++ hostile);
+    try parseDisplay(instance, tolerant_account, &.{}, &invite);
+    const occurrence = try friendly(a, &invite, &local);
+    try std.testing.expect(std.mem.startsWith(u8, occurrence.recurrence, "This occurrence: sometime"));
+    try expectNoTerminalControls(occurrence.recurrence);
+    // Values too long for their display field are cut and sanitized.
+    const long = try std.mem.replaceOwned(u8, a, tolerant_base, "DTSTART:20261014T100000Z", "DTSTART:" ++ hostile ++ (@as([300]u8, @splat('9'))));
+    try expectDisplayOnly(long, &invite, Defect.truncated);
+    try expectNoTerminalControls((try friendly(a, &invite, &local)).start);
+    try std.testing.expectEqualStrings("Planning", invite.summary.slice());
 }

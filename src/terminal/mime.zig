@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const markdown_logo = @import("markdown_logo.zig");
 const byte_stream = @import("../byte_stream.zig");
 const mail_limits = @import("mail_limits.zig");
+const charsets = @import("charsets.zig");
 pub const Source = byte_stream.Source;
 
 pub const max_raw_bytes = types.Limits.request_bytes;
@@ -73,9 +74,10 @@ fn parseGmailExternal(message: std.json.Value, allocator: std.mem.Allocator, ext
 fn parseGmailExternalMode(message: std.json.Value, allocator: std.mem.Allocator, external_bodies: ?std.json.Value, compose: bool) !ParsedMessage {
     const payload = try b.field(message, "payload");
     const headers = try gmailHeaders(payload, allocator);
-    var result = try envelope(headers, allocator);
+    var result = try gmailEnvelope(headers, allocator);
     var context: Context = .{
         .allocator = allocator,
+        .lenient = true,
         .external_bodies = external_bodies,
         .body_limit = if (compose) types.Limits.compose_body_bytes else types.Limits.body_bytes,
         .decoded_limit = if (compose) @max(types.Limits.compose_body_bytes, max_raw_bytes) else max_raw_bytes,
@@ -112,7 +114,6 @@ fn normalizeGmailMode(value: std.json.Value, allocator: std.mem.Allocator, exter
         dest.* = try allocator.dupe(u8, text);
         unread = unread or std.mem.eql(u8, text, "UNREAD");
     }
-    if (parsed.from.len > 1) return error.AmbiguousSender;
     const attachments = try allocator.alloc(types.Attachment, parsed.attachments.len);
     for (parsed.attachments, attachments, 0..) |item, *dest, i| {
         const encoded = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(item.data.len));
@@ -136,7 +137,7 @@ fn normalizeGmailMode(value: std.json.Value, allocator: std.mem.Allocator, exter
     return .{
         .id = try allocator.dupe(u8, id),
         .threadId = try allocator.dupe(u8, thread),
-        .from = if (parsed.from.len == 1) .{ .address = try allocator.dupe(u8, parsed.from[0].address), .name = try allocator.dupe(u8, parsed.from[0].name) } else .{ .address = "" },
+        .from = if (parsed.from.len >= 1) .{ .address = try allocator.dupe(u8, parsed.from[0].address), .name = try allocator.dupe(u8, parsed.from[0].name) } else .{ .address = "" },
         .replyTo = try dtoAddresses(parsed.reply_to, allocator),
         .to = try dtoAddresses(parsed.to, allocator),
         .cc = try dtoAddresses(parsed.cc, allocator),
@@ -147,7 +148,7 @@ fn normalizeGmailMode(value: std.json.Value, allocator: std.mem.Allocator, exter
         .bodyHtmlAmbiguous = parsed.html_documents > 1,
         .bodySource = parsed.body_source,
         .decodeWarning = if (parsed.decode_warning.len != 0) parsed.decode_warning else if (snippet_clipped) "SnippetTooLarge" else "",
-        .metadataPartial = snippet_clipped,
+        .metadataPartial = snippet_clipped or (parsed.from.len == 1 and parsed.from[0].address.len == 0),
         .messageId = parsed.message_id,
         .references = parsed.references,
         .inReplyTo = parsed.in_reply_to,
@@ -165,8 +166,16 @@ fn safeFilename(filename: []const u8, allocator: std.mem.Allocator) ![]const u8 
         offset = i + 1;
     };
     const base = std.mem.trim(u8, filename[offset..], " .\t\r\n");
-    if (base.len > mail_limits.filename_bytes) return error.FilenameTooLarge;
-    return try sanitizeText(if (base.len == 0) "attachment" else base, allocator);
+    // Received names are display data: shorten an over-long one but keep its
+    // extension, and never return an empty name.
+    var clipped: []const u8 = base;
+    if (base.len > mail_limits.filename_bytes and std.unicode.utf8ValidateSlice(base)) {
+        const dot = std.mem.lastIndexOfScalar(u8, base, '.');
+        const extension = if (dot) |at| if (base.len - at <= 16) base[at..] else "" else "";
+        clipped = try std.mem.concat(allocator, u8, &.{ charsets.clip(base, mail_limits.filename_bytes - extension.len), extension });
+    } else if (base.len > mail_limits.filename_bytes) return error.FilenameTooLarge;
+    const clean = try sanitizeText(if (clipped.len == 0) "attachment" else clipped, allocator);
+    return if (std.mem.trim(u8, clean, " .").len == 0) "attachment" else clean;
 }
 fn dtoAddresses(source: []const recipients.IncomingMailbox, allocator: std.mem.Allocator) ![]const types.Address {
     const out = try allocator.alloc(types.Address, source.len);
@@ -223,18 +232,67 @@ fn splitEntity(raw: []const u8, allocator: std.mem.Allocator) !Entity {
 }
 
 pub const OriginalSource = struct { subject: []const u8, attachment: types.Attachment };
+const RawInspection = struct {
+    subject: []const u8,
+    header_bytes: usize,
+    /// The strict header grammar accepted the original. Otherwise it is
+    /// enclosed as opaque bytes and never labelled as a message type.
+    well_formed: bool,
+};
+/// A received original is forwarded as exact bytes; only its Subject and a
+/// MIME classification are needed. Header syntax this client would refuse
+/// (duplicate or oversized fields, long routing chains, a line without a
+/// colon, raw escape bytes) therefore never prevents the forward: the Subject
+/// is then read line-wise for display and the file is typed as opaque data.
+fn inspectRawOriginal(a: std.mem.Allocator, prefix: []const u8) !RawInspection {
+    strict: {
+        const entity = splitEntity(prefix, a) catch |err| if (err == error.OutOfMemory) return err else break :strict;
+        const subject_value = header(entity.headers, "Subject") catch break :strict;
+        const from_value = header(entity.headers, "From") catch break :strict;
+        const date_value = header(entity.headers, "Date") catch break :strict;
+        if (subject_value.len == 0 and from_value.len == 0 and date_value.len == 0) return error.InvalidHeaders;
+        // The reader, replies and this forward share one bounded display fallback.
+        return .{ .subject = try displayHeader(subject_value, a), .header_bytes = prefix.len - entity.body.len, .well_formed = true };
+    }
+    var subject: std.ArrayList(u8) = .empty;
+    var in_subject = false;
+    var found_subject = false;
+    var recognizable = false;
+    var offset: usize = 0;
+    var lines = std.mem.splitScalar(u8, prefix, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+        if (line.len == 0) break;
+        offset += raw_line.len + 1;
+        const continuation = line[0] == ' ' or line[0] == '\t';
+        if (continuation) {
+            if (in_subject and subject.items.len + line.len < mail_limits.subject_bytes) try subject.appendSlice(a, line);
+            continue;
+        }
+        in_subject = false;
+        inline for (.{ "Subject:", "From:", "Date:", "Received:", "Message-ID:", "To:" }) |name| {
+            if (std.ascii.startsWithIgnoreCase(line, name)) recognizable = true;
+        }
+        if (!found_subject and std.ascii.startsWithIgnoreCase(line, "Subject:")) {
+            found_subject = true;
+            in_subject = true;
+            try subject.appendSlice(a, line["Subject:".len..@min(line.len, mail_limits.subject_bytes)]);
+        }
+    }
+    if (!recognizable) return error.InvalidHeaders;
+    const unfolded = try unfoldHeader(subject.items, a);
+    return .{ .subject = try lenientDisplay(unfolded, a, mail_limits.subject_bytes), .header_bytes = @min(offset, prefix.len), .well_formed = false };
+}
 /// Only inspect headers: arbitrary MIME bodies need not be understood by the
 /// terminal reader before the original can be enclosed without alteration.
 pub fn originalSource(a: std.mem.Allocator, raw: []const u8) !OriginalSource {
     if (raw.len > max_body_bytes) return error.BodyTooLarge;
-    const entity = try splitEntity(raw, a);
-    if ((try header(entity.headers, "Subject")).len == 0 and (try header(entity.headers, "From")).len == 0 and (try header(entity.headers, "Date")).len == 0) return error.InvalidHeaders;
-    // The reader, replies and this forward share one bounded display fallback.
-    const decoded = try displayHeader(try header(entity.headers, "Subject"), a);
+    const inspected = try inspectRawOriginal(a, raw);
+    const decoded = inspected.subject;
     const subject = if (decoded.len == 0) "Original message" else decoded;
     var ascii = true;
     for (raw) |c| ascii = ascii and c < 128;
-    const headers_utf8 = std.unicode.utf8ValidateSlice(raw[0 .. raw.len - entity.body.len]);
+    const headers_utf8 = inspected.well_formed and std.unicode.utf8ValidateSlice(raw[0..inspected.header_bytes]);
     const mime_type: []const u8 = if (!identityEncodingSafe(raw) or !headers_utf8) "application/octet-stream" else if (ascii) "message/rfc822" else "message/global";
     const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
     return .{ .subject = subject, .attachment = .{ .id = "", .filename = "original.eml", .mimeType = mime_type, .size = raw.len, .data = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw) } };
@@ -267,10 +325,9 @@ pub fn originalSourceStream(a: std.mem.Allocator, source: Source, size: usize) !
         if (count == 0) break;
         header_size += count;
     }
-    const entity = try splitEntity(header_buffer[0..header_size], a);
-    if ((try header(entity.headers, "Subject")).len == 0 and (try header(entity.headers, "From")).len == 0 and (try header(entity.headers, "Date")).len == 0) return error.InvalidHeaders;
-    const decoded = try displayHeader(try header(entity.headers, "Subject"), a);
-    const headers_utf8 = std.unicode.utf8ValidateSlice(header_buffer[0 .. header_size - entity.body.len]);
+    const inspected = try inspectRawOriginal(a, header_buffer[0..header_size]);
+    const decoded = inspected.subject;
+    const headers_utf8 = inspected.well_formed and std.unicode.utf8ValidateSlice(header_buffer[0..inspected.header_bytes]);
     var ascii = true;
     var safe = true;
     var previous_cr = false;
@@ -348,46 +405,93 @@ fn identityEncodingSafe(raw: []const u8) bool {
     return true;
 }
 
+/// Headers the Gmail decoder consults. Everything else (Received, ARC, DKIM,
+/// X-* chains) is skipped unvalidated, so its size, count or content can never
+/// refuse a readable message.
+const GmailHeaderKind = enum { single, address_list, identifiers };
+const gmail_header_names = [_]struct { name: []const u8, kind: GmailHeaderKind }{
+    .{ .name = "From", .kind = .single },
+    .{ .name = "To", .kind = .address_list },
+    .{ .name = "Cc", .kind = .address_list },
+    .{ .name = "Bcc", .kind = .address_list },
+    .{ .name = "Reply-To", .kind = .address_list },
+    .{ .name = "Subject", .kind = .single },
+    .{ .name = "Date", .kind = .single },
+    .{ .name = "Message-ID", .kind = .single },
+    .{ .name = "In-Reply-To", .kind = .single },
+    .{ .name = "References", .kind = .identifiers },
+    .{ .name = "Content-Type", .kind = .single },
+    .{ .name = "Content-Disposition", .kind = .single },
+    .{ .name = "Content-Transfer-Encoding", .kind = .single },
+    .{ .name = "Content-ID", .kind = .single },
+    .{ .name = "Content-Location", .kind = .single },
+};
+/// Received Gmail JSON headers never refuse a message. Gmail's field boundary
+/// is already established, so decoded line breaks and control bytes are
+/// display whitespace rather than injected headers. Repeated address and
+/// reference headers are merged; for every other consulted name the first
+/// occurrence wins, as mail readers conventionally do. Values are clipped to
+/// the shared per-header allowance. The result holds at most one entry per
+/// consulted name, so strict `header` lookups cannot be ambiguous. Outgoing
+/// mail is validated separately and stays strict.
 fn gmailHeaders(payload: std.json.Value, allocator: std.mem.Allocator) ![]const Header {
     const field = b.optional(payload, "headers") orelse return &.{};
-    if (field != .array or field.array.items.len > max_headers) return error.TooManyHeaders;
-    const out = try allocator.alloc(Header, field.array.items.len);
-    var bytes: usize = 0;
-    for (field.array.items, out) |entry, *dest| {
-        const name = try b.string(try b.field(entry, "name"));
-        const value = try b.string(try b.field(entry, "value"));
-        bytes = std.math.add(usize, bytes, name.len) catch return error.HeadersTooLarge;
-        bytes = std.math.add(usize, bytes, value.len) catch return error.HeadersTooLarge;
-        if (bytes > max_headers_bytes or name.len == 0) return error.HeadersTooLarge;
-        for (name) |c| if (c < 33 or c > 126 or c == ':') return error.InvalidHeaders;
-        const unfolded = try unfoldHeader(value, allocator);
-        if (unfolded.len > mail_limits.header_value_bytes) return error.HeadersTooLarge;
-        dest.* = .{ .name = try allocator.dupe(u8, name), .value = unfolded };
+    if (field != .array) return &.{};
+    var out: [gmail_header_names.len]Header = undefined;
+    var present = @as([gmail_header_names.len]bool, @splat(false));
+    for (field.array.items) |entry| {
+        if (entry != .object) continue;
+        const name_value = entry.object.get("name") orelse continue;
+        const value_value = entry.object.get("value") orelse continue;
+        if (name_value != .string or value_value != .string) continue;
+        const index = for (gmail_header_names, 0..) |wanted, i| {
+            if (std.ascii.eqlIgnoreCase(wanted.name, name_value.string)) break i;
+        } else continue;
+        const wanted = gmail_header_names[index];
+        if (present[index] and wanted.kind == .single) continue;
+        const unfolded = try unfoldHeader(value_value.string[0..@min(value_value.string.len, 2 * mail_limits.header_value_bytes)], allocator);
+        if (unfolded.len == 0) continue;
+        if (!present[index]) {
+            out[index] = .{ .name = wanted.name, .value = unfolded };
+            present[index] = true;
+            continue;
+        }
+        const separator: []const u8 = if (wanted.kind == .address_list) ", " else " ";
+        if (out[index].value.len + separator.len + unfolded.len > mail_limits.header_value_bytes) continue;
+        out[index].value = try std.mem.concat(allocator, u8, &.{ out[index].value, separator, unfolded });
     }
-    return out;
+    var count: usize = 0;
+    for (present) |set| count += @intFromBool(set);
+    const result = try allocator.alloc(Header, count);
+    var used: usize = 0;
+    for (out, present) |item, set| if (set) {
+        result[used] = item;
+        used += 1;
+    };
+    return result;
 }
+/// Total: invalid UTF-8 becomes U+FFFD, any line break with its following
+/// whitespace becomes one space, and C0/DEL/C1 controls become spaces.
 fn unfoldHeader(value: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-    const out = try allocator.alloc(u8, value.len);
+    const valid = if (std.unicode.utf8ValidateSlice(value)) value else (try charsets.decodeLossy(value, "utf-8", allocator, 2 * mail_limits.header_value_bytes)).text;
+    const out = try allocator.alloc(u8, valid.len);
     var used: usize = 0;
     var pos: usize = 0;
-    while (pos < value.len) : (pos += 1) {
-        const c = value[pos];
+    while (pos < valid.len) : (pos += 1) {
+        const c = valid[pos];
         if (c == '\r' or c == '\n') {
-            if (c == '\r') {
-                if (pos + 1 >= value.len or value[pos + 1] != '\n') return error.InvalidHeaders;
-                pos += 1;
-            }
-            if (pos + 1 >= value.len or (value[pos + 1] != ' ' and value[pos + 1] != '\t')) return error.InvalidHeaders;
-            while (pos + 1 < value.len and (value[pos + 1] == ' ' or value[pos + 1] == '\t')) pos += 1;
+            while (pos + 1 < valid.len and (valid[pos + 1] == ' ' or valid[pos + 1] == '\t' or valid[pos + 1] == '\r' or valid[pos + 1] == '\n')) pos += 1;
             out[used] = ' ';
-        } else {
-            if ((c < 32 and c != '\t') or c == 127) return error.InvalidHeaders;
-            out[used] = if (c == '\t') ' ' else c;
-        }
+        } else if ((c == 0xc2 and pos + 1 < valid.len and valid[pos + 1] >= 0x80 and valid[pos + 1] <= 0x9f) or (c < 32 and c != '\t') or c == 127) {
+            // C0, DEL and UTF-8 encoded C1 controls (including ESC and CSI)
+            // collapse into the surrounding whitespace.
+            if (c == 0xc2) pos += 1;
+            if (used != 0 and out[used - 1] == ' ') continue;
+            out[used] = ' ';
+        } else out[used] = if (c == '\t') ' ' else c;
         used += 1;
     }
-    return std.mem.trim(u8, out[0..used], " ");
+    return std.mem.trim(u8, charsets.clip(std.mem.trim(u8, out[0..used], " "), mail_limits.header_value_bytes), " ");
 }
 
 pub fn header(headers: []const Header, name: []const u8) ![]const u8 {
@@ -427,6 +531,66 @@ fn envelope(headers: []const Header, allocator: std.mem.Allocator) !ParsedMessag
     };
 }
 
+/// Display names from received mail: decoded, sanitized and clipped; never an
+/// error other than allocation failure.
+fn lenientDisplay(input: []const u8, allocator: std.mem.Allocator, limit: usize) error{OutOfMemory}![]const u8 {
+    const source = charsets.clip(if (std.unicode.utf8ValidateSlice(input)) input else "", @min(limit * 4, mail_limits.header_value_bytes));
+    const decoded = displayHeader(source, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => sanitizeHeaderText(source, allocator) catch |inner| switch (inner) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => "",
+        },
+    };
+    return charsets.clip(decoded, limit);
+}
+fn lenientAddressList(raw: []const u8, allocator: std.mem.Allocator, degraded: *bool) error{OutOfMemory}![]const recipients.IncomingMailbox {
+    const parsed = try recipients.parseIncomingLenient(raw, allocator);
+    degraded.* = degraded.* or parsed.degraded;
+    for (parsed.list) |*mailbox| {
+        const decoded = try lenientDisplay(mailbox.name, allocator, mail_limits.display_name_bytes);
+        mailbox.name = decoded;
+    }
+    return parsed.list;
+}
+/// Received Gmail envelopes degrade per field. A defect in one address header
+/// leaves the other recipients, the identifiers and the body untouched.
+/// Callers use arena-style allocators, like the rest of Gmail normalization.
+fn gmailEnvelope(headers: []const Header, allocator: std.mem.Allocator) error{OutOfMemory}!ParsedMessage {
+    const lookup = struct {
+        fn first(list: []const Header, name: []const u8) []const u8 {
+            for (list) |item| if (std.ascii.eqlIgnoreCase(item.name, name)) return item.value;
+            return "";
+        }
+    }.first;
+    var degraded = false;
+    var from = try lenientAddressList(lookup(headers, "From"), allocator, &degraded);
+    var sender_warning: []const u8 = "";
+    const raw_from = lookup(headers, "From");
+    if (from.len != 1 and raw_from.len != 0) {
+        // Display-only sender text; never an input to recipient derivation.
+        // Several authors stay ambiguous rather than guessing a reply target.
+        sender_warning = if (from.len == 0) "SenderUnavailable" else "AmbiguousSender";
+        const single = try allocator.alloc(recipients.IncomingMailbox, 1);
+        single[0] = .{ .address = "", .name = try lenientDisplay(raw_from, allocator, mail_limits.display_name_bytes) };
+        from = single;
+    }
+    return .{
+        .headers = headers,
+        .from = from,
+        .to = try lenientAddressList(lookup(headers, "To"), allocator, &degraded),
+        .cc = try lenientAddressList(lookup(headers, "Cc"), allocator, &degraded),
+        .bcc = try lenientAddressList(lookup(headers, "Bcc"), allocator, &degraded),
+        .reply_to = try lenientAddressList(lookup(headers, "Reply-To"), allocator, &degraded),
+        .subject = try lenientDisplay(lookup(headers, "Subject"), allocator, mail_limits.subject_bytes),
+        .date = try allocator.dupe(u8, lookup(headers, "Date")),
+        .message_id = try allocator.dupe(u8, lookup(headers, "Message-ID")),
+        .in_reply_to = try allocator.dupe(u8, lookup(headers, "In-Reply-To")),
+        .references = try allocator.dupe(u8, lookup(headers, "References")),
+        .decode_warning = sender_warning,
+    };
+}
+
 fn isAttached(headers: []const Header, filename: []const u8) !bool {
     const disposition = try header(headers, "Content-Disposition");
     return filename.len > 0 or std.ascii.startsWithIgnoreCase(disposition, "attachment");
@@ -447,12 +611,12 @@ fn dispositionToken(headers: []const Header) ![]const u8 {
 }
 
 /// Some Outlook exports carry the calendar as a named binary .ics attachment.
-/// Only explicit calendar MIME types or .ics octet-stream files qualify; a
+/// Only explicit calendar MIME types or named .ics text/binary files qualify; a
 /// conference URL or arbitrary body text never creates an invitation.
 pub fn isCalendarPart(mime_type: []const u8, filename: []const u8) bool {
     return std.ascii.eqlIgnoreCase(mime_type, "text/calendar") or
         std.ascii.eqlIgnoreCase(mime_type, "application/ics") or
-        (std.ascii.eqlIgnoreCase(mime_type, "application/octet-stream") and
+        ((std.ascii.eqlIgnoreCase(mime_type, "application/octet-stream") or std.ascii.eqlIgnoreCase(mime_type, "text/plain")) and
             filename.len >= 4 and std.ascii.eqlIgnoreCase(filename[filename.len - 4 ..], ".ics"));
 }
 fn calendarEnvelope(data: []const u8) bool {
@@ -524,6 +688,30 @@ const Context = struct {
     calendar_ambiguous: bool = false,
     attachments: std.ArrayList(Attachment) = .empty,
     external_bodies: ?std.json.Value = null,
+    /// Received Gmail mail: a defect in one part degrades that part only.
+    /// Raw parsing of our own generated mail keeps every strict refusal.
+    lenient: bool = false,
+    /// Text decoded with replacement characters inside multipart/alternative.
+    /// Used only when no cleanly decoded body exists.
+    lossy_plain: std.ArrayList(u8) = .empty,
+    lossy_html: std.ArrayList(u8) = .empty,
+    lossy: bool = false,
+    truncated: bool = false,
+    /// Gmail's declared size disagreed with the bytes it returned. The bytes
+    /// are shown; the reader is told the body may be incomplete.
+    size_mismatch: bool = false,
+    fn appendText(self: *Context, target: *std.ArrayList(u8), text: []const u8) !void {
+        const separator = @intFromBool(target.items.len != 0);
+        var piece = text;
+        if (piece.len + separator > self.body_limit - target.items.len) {
+            if (!self.lenient) return error.BodyTooLarge;
+            self.truncated = true;
+            if (self.body_limit - target.items.len <= separator) return;
+            piece = charsets.clip(piece, self.body_limit - target.items.len - separator);
+        }
+        if (separator != 0) try target.append(self.allocator, '\n');
+        try target.appendSlice(self.allocator, piece);
+    }
     fn enter(self: *Context, depth: usize) !void {
         if (depth > max_depth) return error.MimeTooDeep;
         self.parts += 1;
@@ -537,14 +725,27 @@ const Context = struct {
         const attached = try isAttached(headers, filename);
         const decoded_filename = try displayHeader(filename, self.allocator);
         const calendar_type = std.ascii.eqlIgnoreCase(mime_type, "text/calendar");
-        if (data.len != 0 and isCalendarPart(mime_type, decoded_filename)) {
-            if (data.len > max_calendar_bytes) return error.CalendarTooLarge;
+        // An oversized or undecodable calendar in received mail offers no
+        // invitation and stays an ordinary file; exact bytes are required for
+        // a reply, so calendar text is never decoded lossily.
+        var calendar_file = false;
+        if (data.len != 0 and isCalendarPart(mime_type, decoded_filename)) calendar: {
+            if (data.len > max_calendar_bytes) {
+                if (!self.lenient) return error.CalendarTooLarge;
+                calendar_file = true;
+                break :calendar;
+            }
             const calendar: ?[]const u8 = calendarText(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator) catch |err| switch (err) {
-                error.InvalidUtf8, error.InvalidCharsetData, error.UnsupportedCharset => if (calendar_type) return err else null,
+                error.InvalidUtf8, error.InvalidCharsetData, error.UnsupportedCharset => if (calendar_type and !self.lenient) return err else null,
                 else => return err,
             };
+            if (calendar == null) calendar_file = true;
             if (calendar) |value| {
-                if (value.len > max_calendar_bytes) return error.CalendarTooLarge;
+                if (value.len > max_calendar_bytes) {
+                    if (!self.lenient) return error.CalendarTooLarge;
+                    calendar_file = true;
+                    break :calendar;
+                }
                 // Binary .ics files need an actual VCALENDAR envelope. The
                 // invitation parser performs full method/identity validation
                 // before either inspection or submission.
@@ -558,13 +759,41 @@ const Context = struct {
                 }
             }
         }
-        if (attached or (!std.ascii.eqlIgnoreCase(mime_type, "text/plain") and !std.ascii.eqlIgnoreCase(mime_type, "text/html") and !std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) {
-            if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
+        if (attached or (calendar_file and calendar_type) or (!std.ascii.eqlIgnoreCase(mime_type, "text/plain") and !std.ascii.eqlIgnoreCase(mime_type, "text/html") and !std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) {
+            if (self.attachments.items.len == max_attachments) {
+                if (!self.lenient) return error.TooManyAttachments;
+                self.truncated = true;
+                return;
+            }
             try self.attachments.append(self.allocator, .{ .filename = decoded_filename, .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .disposition = try dispositionToken(headers), .content_location = try self.allocator.dupe(u8, try header(headers, "Content-Location")), .size = data.len, .data = data });
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
-            const text = convertCharsetBounded(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator, self.body_limit) catch |err| {
+            const charset = parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8";
+            const is_plain = std.ascii.eqlIgnoreCase(mime_type, "text/plain");
+            const text = convertCharsetBounded(data, charset, self.allocator, self.body_limit) catch |err| {
+                if (self.lenient and (err == error.UnsupportedCharset or err == error.InvalidUtf8 or err == error.InvalidCharsetData or err == error.BodyTooLarge)) {
+                    // Received text is always shown. An exactly mapped legacy
+                    // charset is a clean body; replacement characters are
+                    // used directly only where no alternative can exist.
+                    const converted = try charsets.decodeLossy(data, charset, self.allocator, self.body_limit);
+                    self.truncated = self.truncated or converted.truncated;
+                    // Pure ASCII (without ISO-2022 escapes) reads the same
+                    // in every unmapped encoding a sender may declare.
+                    var ascii = true;
+                    for (data) |c| ascii = ascii and c < 128 and c != 0x1b;
+                    const clean = !converted.lossy and (ascii or charsets.supported(charset));
+                    if (!clean and charset_alternative) {
+                        self.unsupported_text_parts += 1;
+                        try self.appendText(if (is_plain) &self.lossy_plain else &self.lossy_html, converted.text);
+                        return;
+                    }
+                    if (!clean) self.lossy = true;
+                    if (!is_plain) self.html_documents += 1;
+                    try self.appendText(if (is_plain) &self.plain else &self.html, converted.text);
+                    if (converted.text.len != 0) self.supported_text_parts += 1;
+                    return;
+                }
                 // Only a text decoding refusal is recoverable here. Parsing,
                 // transfer validation, attachment handling, quotas and OOM
                 // keep their ordinary errors and never erase accepted parts.
@@ -572,11 +801,8 @@ const Context = struct {
                 self.unsupported_text_parts += 1;
                 return;
             };
-            const target = if (std.ascii.eqlIgnoreCase(mime_type, "text/plain")) &self.plain else &self.html;
-            if (std.ascii.eqlIgnoreCase(mime_type, "text/html")) self.html_documents += 1;
-            if (text.len + @intFromBool(target.items.len != 0) > self.body_limit - target.items.len) return error.BodyTooLarge;
-            if (target.items.len != 0) try target.append(self.allocator, '\n');
-            try target.appendSlice(self.allocator, text);
+            if (!is_plain) self.html_documents += 1;
+            try self.appendText(if (is_plain) &self.plain else &self.html, text);
             if (text.len != 0) self.supported_text_parts += 1;
         }
     }
@@ -629,25 +855,40 @@ const Context = struct {
         try self.add(entity.headers, if (mime_type.len == 0) "text/plain" else mime_type, filename, decoded, charset_alternative);
     }
     fn gmailPart(self: *Context, part: std.json.Value, depth: usize, charset_alternative: bool) anyerror!void {
-        try self.enter(depth);
-        const mime_type = if (b.optional(part, "mimeType")) |value| try b.string(value) else if (b.optional(part, "body") == null and b.optional(part, "parts") == null) return else return error.MissingMimeType;
-        try validateMimeType(mime_type);
+        self.enter(depth) catch |err| {
+            // Work stays bounded by the same counters: deeper or further
+            // parts are left out and the collected content remains readable.
+            if (!self.lenient) return err;
+            self.truncated = true;
+            return;
+        };
+        const declared_type = if (b.optional(part, "mimeType")) |value| try b.string(value) else if (b.optional(part, "body") == null and b.optional(part, "parts") == null) return else if (self.lenient) "" else return error.MissingMimeType;
+        // A malformed or missing received media type is an opaque file (or a
+        // plain container). The stored type is always a valid token.
+        const bare_type = std.mem.trim(u8, declared_type[0 .. std.mem.indexOfScalar(u8, declared_type, ';') orelse declared_type.len], " \t");
+        const mime_type = if (validateMimeType(declared_type)) |_| declared_type else |err| if (!self.lenient) return err else if (validateMimeType(bare_type)) |_| bare_type else |_| if (b.optional(part, "parts") != null) "multipart/mixed" else "application/octet-stream";
         const headers = try gmailHeaders(part, self.allocator);
         const alternative = std.ascii.eqlIgnoreCase(mime_type, "multipart/alternative");
         const supported_before = self.supported_text_parts;
         const unsupported_before = self.unsupported_text_parts;
         var child_count: usize = 0;
         if (b.optional(part, "parts")) |children| {
-            if (children != .array or children.array.items.len > max_parts) return error.TooManyMimeParts;
-            child_count = children.array.items.len;
-            for (children.array.items) |child| try self.gmailPart(child, depth + 1, charset_alternative or alternative);
+            if (children != .array or children.array.items.len > max_parts) {
+                if (!self.lenient) return error.TooManyMimeParts;
+                self.truncated = true;
+            } else {
+                child_count = children.array.items.len;
+                for (children.array.items) |child| try self.gmailPart(child, depth + 1, charset_alternative or alternative);
+            }
         }
-        if (alternative and !charset_alternative and self.unsupported_text_parts > unsupported_before and self.supported_text_parts == supported_before) return error.UnsupportedCharset;
+        if (!self.lenient and alternative and !charset_alternative and self.unsupported_text_parts > unsupported_before and self.supported_text_parts == supported_before) return error.UnsupportedCharset;
         const body = b.optional(part, "body") orelse return;
         const declared = if (b.optional(body, "size")) |v| try b.integer(v) else 0;
         if (declared < 0 or declared > types.Limits.incoming_attachment_bytes) return error.BodyTooLarge;
         const filename = if (b.optional(part, "filename")) |v| try b.string(v) else "";
-        if (isCalendarPart(mime_type, filename) and declared > max_calendar_bytes) return error.CalendarTooLarge;
+        // An oversized received calendar is an ordinary file without an invitation.
+        const calendar_part = isCalendarPart(mime_type, filename) and (declared <= max_calendar_bytes or !self.lenient);
+        if (calendar_part and declared > max_calendar_bytes) return error.CalendarTooLarge;
         const inline_data = if (b.optional(body, "data")) |v| try b.string(v) else "";
         const large = declared > self.body_limit;
         // A large part may only remain an unloaded external descriptor, which
@@ -657,7 +898,12 @@ const Context = struct {
         // loaded for invitations) and data present in the response keep the
         // loaded-content cap.
         const text_body = (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) and !(try isAttached(headers, filename));
-        if (large and (inline_data.len != 0 or text_body or isCalendarPart(mime_type, filename))) return error.BodyTooLarge;
+        if (large and (inline_data.len != 0 or text_body or calendar_part)) {
+            // An oversized received text alternative stays a downloadable
+            // file; the other alternative and all attachments stay readable.
+            if (!(self.lenient and inline_data.len == 0 and b.optional(body, "attachmentId") != null)) return error.BodyTooLarge;
+            self.truncated = true;
+        }
         const part_id = if (b.optional(part, "partId")) |v| try b.string(v) else "";
         var external_id: ?[]const u8 = null;
         var external_data: ?[]const u8 = null;
@@ -669,10 +915,22 @@ const Context = struct {
                 if (self.external_bodies) |map| if (b.optional(map, text)) |v| {
                     external_data = if (v == .object) try b.string(try b.field(v, "data")) else try b.string(v);
                 };
-                if (large and external_data != null) return error.BodyTooLarge;
+                if (large and external_data != null) {
+                    if (!self.lenient) return error.BodyTooLarge;
+                    external_data = null;
+                }
                 if (external_data == null) {
-                    if (isCalendarPart(mime_type, filename) or (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")))) return error.ExternalBodyRequired;
-                    if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
+                    if (!large and (calendar_part or (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html"))))) {
+                        // With fetched bodies supplied, an absent one was
+                        // deliberately left out by a bound: keep it as a file.
+                        if (!(self.lenient and self.external_bodies != null)) return error.ExternalBodyRequired;
+                        self.truncated = true;
+                    }
+                    if (self.attachments.items.len == max_attachments) {
+                        if (!self.lenient) return error.TooManyAttachments;
+                        self.truncated = true;
+                        return;
+                    }
                     try self.attachments.append(self.allocator, .{ .id = try self.allocator.dupe(u8, text), .filename = try displayHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .disposition = try dispositionToken(headers), .content_location = try self.allocator.dupe(u8, try header(headers, "Content-Location")), .size = @intCast(declared), .data = "" });
                     return;
                 }
@@ -681,7 +939,11 @@ const Context = struct {
         if (large) return error.BodyTooLarge;
         const data = external_data orelse if (b.optional(body, "data")) |v| try b.string(v) else "";
         if (data.len == 0) {
-            if (declared != 0) return error.BodySizeMismatch;
+            // Gmail's declared size is advisory for received mail.
+            if (declared != 0) {
+                if (!self.lenient) return error.BodySizeMismatch;
+                self.size_mismatch = true;
+            }
             // A named or explicitly attached empty leaf is still a file.
             // Empty text bodies and multipart container metadata add nothing.
             if (child_count != 0 or !(try isAttached(headers, filename))) return;
@@ -708,9 +970,22 @@ const Context = struct {
                 !std.mem.startsWith(u8, decoded, utf8_bom) and
                 std.ascii.eqlIgnoreCase(parameter(try header(headers, "Content-Type"), "charset") orelse "", "utf-8") and
                 std.ascii.eqlIgnoreCase(std.mem.trim(u8, try header(headers, "Content-Transfer-Encoding"), " \t"), "base64");
-            if ((decoded.len < expected and !stripped_bom) or (!inline_text and decoded.len != expected)) return error.BodySizeMismatch;
+            if ((decoded.len < expected and !stripped_bom) or (!inline_text and decoded.len != expected)) {
+                if (!self.lenient) return error.BodySizeMismatch;
+                self.size_mismatch = true;
+            }
         }
-        try self.accountBytes(decoded.len);
+        self.accountBytes(decoded.len) catch |err| {
+            // The cumulative loaded-content bound stays; a received part
+            // beyond it is left out, or kept as a file when Gmail can
+            // deliver it separately.
+            if (!self.lenient) return err;
+            self.truncated = true;
+            if (external_id) |external| if (self.attachments.items.len < max_attachments) {
+                try self.attachments.append(self.allocator, .{ .id = try self.allocator.dupe(u8, external), .filename = try displayHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .disposition = try dispositionToken(headers), .content_location = try self.allocator.dupe(u8, try header(headers, "Content-Location")), .size = decoded.len, .data = "" });
+            };
+            return;
+        };
         const old_count = self.attachments.items.len;
         try self.add(headers, mime_type, filename, decoded, charset_alternative);
         if (self.attachments.items.len > old_count) self.attachments.items[old_count].id = try self.allocator.dupe(u8, external_id orelse part_id);
@@ -719,7 +994,17 @@ const Context = struct {
         result.body_html = try self.html.toOwnedSlice(self.allocator);
         result.html_documents = self.html_documents;
         result.body_source = if (self.plain.items.len > 0) .plain else if (result.body_html.len > 0) .html else .unknown;
-        result.decode_warning = if (self.unsupported_text_parts > 0) "UnsupportedCharset" else "";
+        // Replacement-character text is the body only when nothing decoded cleanly.
+        if (self.plain.items.len == 0 and self.html.items.len == 0 and (self.lossy_plain.items.len != 0 or self.lossy_html.items.len != 0)) {
+            self.plain = self.lossy_plain;
+            self.html = self.lossy_html;
+            self.html_documents += @intFromBool(self.html.items.len != 0);
+            self.lossy = true;
+            result.body_html = try self.html.toOwnedSlice(self.allocator);
+            result.html_documents = self.html_documents;
+            result.body_source = if (self.plain.items.len > 0) .plain else .html;
+        }
+        if (result.decode_warning.len == 0) result.decode_warning = if (self.lossy or self.unsupported_text_parts > 0) "UnsupportedCharset" else if (self.size_mismatch) "BodySizeMismatch" else if (self.truncated) "ContentTruncated" else "";
         // htmlToText already returns owned sanitized text. A second sanitize
         // retained another full body in arena callers without changing bytes.
         result.body_text = if (self.plain.items.len > 0)
@@ -732,7 +1017,8 @@ const Context = struct {
     }
 };
 
-pub fn parameter(content_type: []const u8, name: []const u8) ?[]const u8 {
+const ParameterSpan = struct { raw: []const u8, escaped: bool };
+fn parameterSpan(content_type: []const u8, name: []const u8) ?ParameterSpan {
     var pos = std.mem.indexOfScalar(u8, content_type, ';') orelse return null;
     while (pos < content_type.len) {
         pos += 1;
@@ -744,13 +1030,19 @@ pub fn parameter(content_type: []const u8, name: []const u8) ?[]const u8 {
         const key = std.mem.trim(u8, content_type[start..pos], " \t");
         pos += 1;
         while (pos < content_type.len and (content_type[pos] == ' ' or content_type[pos] == '\t')) pos += 1;
+        var escaped = false;
+        const quoted_value = pos < content_type.len and content_type[pos] == '"';
         var value_start = pos;
         var end = pos;
         if (pos < content_type.len and content_type[pos] == '"') {
             pos += 1;
             value_start = pos;
             while (pos < content_type.len and content_type[pos] != '"') : (pos += 1) {
-                if (content_type[pos] == '\\') return null;
+                if (content_type[pos] == '\\') {
+                    pos += 1;
+                    if (pos == content_type.len or (content_type[pos] < 32 and content_type[pos] != '\t') or content_type[pos] == 127) return null;
+                    escaped = true;
+                }
             }
             if (pos == content_type.len) return null;
             end = pos;
@@ -760,17 +1052,36 @@ pub fn parameter(content_type: []const u8, name: []const u8) ?[]const u8 {
             while (pos < content_type.len and content_type[pos] != ';') pos += 1;
             end = pos;
         }
-        if (std.ascii.eqlIgnoreCase(key, name)) return std.mem.trim(u8, content_type[value_start..end], " \t");
+        if (std.ascii.eqlIgnoreCase(key, name)) return .{ .raw = if (quoted_value) content_type[value_start..end] else std.mem.trim(u8, content_type[value_start..end], " \t"), .escaped = escaped };
     }
     return null;
 }
+/// Borrow simple parameters; escaped filenames use the allocating decoder.
+pub fn parameter(content_type: []const u8, name: []const u8) ?[]const u8 {
+    const value = parameterSpan(content_type, name) orelse return null;
+    return if (value.escaped) null else std.mem.trim(u8, value.raw, " \t");
+}
+fn decodedParameter(content_type: []const u8, name: []const u8, a: std.mem.Allocator) !?[]const u8 {
+    const value = parameterSpan(content_type, name) orelse return null;
+    if (!value.escaped) return std.mem.trim(u8, value.raw, " \t");
+    const output = try a.alloc(u8, value.raw.len);
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (pos < value.raw.len) : (pos += 1) {
+        if (value.raw[pos] == '\\') pos += 1;
+        if (pos == value.raw.len) return error.InvalidAttachmentFilename;
+        output[count] = value.raw[pos];
+        count += 1;
+    }
+    return output[0..count];
+}
 fn filenameParameter(value: []const u8, name: []const u8, a: std.mem.Allocator) !?[]const u8 {
     var key: [64]u8 = undefined;
-    var encoded = parameter(value, try std.fmt.bufPrint(&key, "{s}*", .{name}));
+    var encoded = try decodedParameter(value, try std.fmt.bufPrint(&key, "{s}*", .{name}), a);
     if (encoded == null) {
         var joined: std.ArrayList(u8) = .empty;
         for (0..32) |index| {
-            const item = parameter(value, try std.fmt.bufPrint(&key, "{s}*{d}*", .{ name, index })) orelse break;
+            const item = (try decodedParameter(value, try std.fmt.bufPrint(&key, "{s}*{d}*", .{ name, index }), a)) orelse break;
             if (item.len > 2048 - joined.items.len) return error.FilenameTooLarge;
             try joined.appendSlice(a, item);
         }
@@ -792,7 +1103,7 @@ fn filenameParameter(value: []const u8, name: []const u8, a: std.mem.Allocator) 
         }
         return try convertCharset(bytes[0..used], data[0..first], a);
     }
-    return parameter(value, name);
+    return decodedParameter(value, name, a);
 }
 
 pub fn decodeBase64Url(data: []const u8, allocator: std.mem.Allocator) ![]const u8 {
@@ -1101,7 +1412,14 @@ fn htmlToTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit
                     if (input[end] == q) quote = null;
                 } else if (input[end] == '\'' or input[end] == '"') quote = input[end] else if (input[end] == '>') break;
             }
-            if (end == input.len) break;
+            if (end == input.len) {
+                // A literal `<` that never closes is text, not a tag that
+                // silently swallows the rest of a received body.
+                if (hidden != null) break;
+                try output.append(allocator, '<');
+                pos += 1;
+                continue;
+            }
             const raw = std.mem.trim(u8, input[pos + 1 .. end], " \t\r\n");
             const closing = raw.len > 0 and raw[0] == '/';
             const tag = if (closing) raw[1..] else raw;
@@ -1119,10 +1437,12 @@ fn htmlToTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit
                         const href = htmlAttribute(tag[n..], "href");
                         link = if (href) |url| if (std.ascii.startsWithIgnoreCase(url, "https://") or std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "mailto:")) url else null else null;
                     } else if (link) |url| {
-                        if (url.len > 4096 or url.len + 3 > body_limit - output.items.len) return error.BodyTooLarge;
-                        try output.appendSlice(allocator, " (");
-                        try output.appendSlice(allocator, url);
-                        try output.append(allocator, ')');
+                        // An over-long tracking URL loses only its annotation.
+                        if (url.len <= 4096 and output.items.len < body_limit and url.len + 3 <= body_limit - output.items.len) {
+                            try output.appendSlice(allocator, " (");
+                            try output.appendSlice(allocator, url);
+                            try output.append(allocator, ')');
+                        }
                         link = null;
                     }
                 }
@@ -1142,7 +1462,7 @@ fn htmlToTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit
             if (std.mem.indexOfScalarPos(u8, input, pos + 1, ';')) |end| if (end - pos <= 16) {
                 if (entityCode(input[pos + 1 .. end])) |cp| {
                     var encoded: [4]u8 = undefined;
-                    const count = try std.unicode.utf8Encode(cp, &encoded);
+                    const count = std.unicode.utf8Encode(cp, &encoded) catch std.unicode.utf8Encode(0xfffd, &encoded) catch unreachable;
                     try output.appendSlice(allocator, encoded[0..count]);
                     pos = end + 1;
                     continue;
@@ -1152,9 +1472,10 @@ fn htmlToTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit
         const c = input[pos];
         if (pre or !std.ascii.isWhitespace(c)) try output.append(allocator, c) else if (output.items.len > 0 and output.items[output.items.len - 1] != ' ' and output.items[output.items.len - 1] != '\n') try output.append(allocator, ' ');
         pos += 1;
-        if (output.items.len > body_limit) return error.BodyTooLarge;
+        // Display text stops at the bound instead of refusing the message.
+        if (output.items.len >= body_limit) break;
     }
-    return try sanitizeTextBounded(std.mem.trim(u8, output.items, " \r\n\t"), allocator, body_limit);
+    return try sanitizeTextBounded(std.mem.trim(u8, charsets.clip(output.items, body_limit), " \r\n\t"), allocator, body_limit);
 }
 
 pub const ReplyHeaders = struct { in_reply_to: []const u8, references: []const u8 };
@@ -1180,8 +1501,32 @@ pub fn validateReferences(refs: []const u8) !void {
 }
 pub fn threading(message_id: []const u8, references: []const u8, in_reply_to: []const u8, allocator: std.mem.Allocator) !ReplyHeaders {
     if (!validMessageId(message_id)) return error.MissingMessageId;
-    try validateReferences(references);
-    const chain = if (references.len > 0) references else if (validMessageId(in_reply_to)) in_reply_to else "";
+    // The received chain is not ours to refuse. Keep its valid identifiers
+    // (comma-separated lists, comments and truncated tokens are common),
+    // bounded to the root and the newest ancestors; the emitted header is
+    // still validated in full below and again when the mail is encoded.
+    var kept: std.ArrayList(u8) = .empty;
+    var count: usize = 0;
+    var total: usize = 0;
+    var scan = std.mem.tokenizeAny(u8, references, " \t,");
+    while (scan.next()) |id| total += @intFromBool(validMessageId(id));
+    var index: usize = 0;
+    var words = std.mem.tokenizeAny(u8, references, " \t,");
+    // A chain the strict grammar accepts is appended byte-for-byte below.
+    const strict = if (validateReferences(references)) |_| true else |_| false;
+    while (words.next()) |id| {
+        if (strict) break;
+        if (!validMessageId(id)) continue;
+        defer index += 1;
+        // Root first, then only as many of the newest as the bounds allow.
+        // The bounded builder below trims by bytes; this only caps the count.
+        const newest = total - index <= mail_limits.reference_count - 1;
+        if (index != 0 and !newest) continue;
+        if (count != 0) try kept.append(allocator, ' ');
+        try kept.appendSlice(allocator, id);
+        count += 1;
+    }
+    const chain = if (strict and references.len > 0) references else if (kept.items.len > 0) kept.items else if (validMessageId(in_reply_to)) in_reply_to else "";
     const joined = try replyReferences(allocator, chain, message_id);
     try validateReferences(joined);
     return .{ .in_reply_to = try allocator.dupe(u8, message_id), .references = joined };
@@ -1898,7 +2243,12 @@ test "attachment streaming: Gmail large file metadata stays external while bodie
     try std.testing.expectEqualStrings("external-large", message.attachments[0].id);
     try std.testing.expectEqualStrings("", message.attachments[0].data);
     const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"large-body\",\"threadId\":\"large-body\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"text/html\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
-    try std.testing.expectError(error.BodyTooLarge, normalizeGmail(body, a, null));
+    // An oversized received body stays a downloadable file, not a refusal.
+    const oversized_body = try normalizeGmail(body, a, null);
+    try std.testing.expectEqualStrings("", oversized_body.bodyText);
+    try std.testing.expectEqual(@as(usize, 1), oversized_body.attachments.len);
+    try std.testing.expectEqualStrings("external-large", oversized_body.attachments[0].id);
+    try std.testing.expectEqualStrings("ContentTruncated", oversized_body.decodeWarning);
     // Unloaded binary descriptors stay listable whether named, inline,
     // referenced by Content-ID/Location or without a filename.
     for ([_][]const u8{
@@ -1919,16 +2269,28 @@ test "attachment streaming: Gmail large file metadata stays external while bodie
     for ([_][]const u8{
         "{\"payload\":{\"mimeType\":\"text/calendar\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
         "{\"payload\":{\"mimeType\":\"application/octet-stream\",\"filename\":\"invite.ics\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
-    }) |source| try std.testing.expectError(error.CalendarTooLarge, parseGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a));
-    // Unnamed text bodies, inline data and the receive cap refuse.
-    for ([_][]const u8{
         "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
+    }) |source| {
+        // Over their caps, a received calendar or text part offers no
+        // invitation or body and remains an ordinary unloaded file.
+        const kept = try parseGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a);
+        try std.testing.expect(kept.calendar == null);
+        try std.testing.expectEqualStrings("", kept.body_text);
+        try std.testing.expectEqual(@as(usize, 1), kept.attachments.len);
+        try std.testing.expectEqualStrings("external-large", kept.attachments[0].id);
+        try std.testing.expectEqualStrings("", kept.attachments[0].data);
+    }
+    // Loaded inline data beyond the cap and the receive cap still refuse.
+    for ([_][]const u8{
         "{\"payload\":{\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}],\"body\":{\"size\":4194304,\"data\":\"iVBORw0KGgo\"}}}",
         "{\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-ID\",\"value\":\"<pdf@example.test>\"}],\"body\":{\"size\":4194304,\"data\":\"JVBERi0\"}}}",
         "{\"payload\":{\"mimeType\":\"image/jpeg\",\"filename\":\"huge.jpg\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":52428801}}}",
     }) |source| try std.testing.expectError(error.BodyTooLarge, parseGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a));
     const loaded = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"external-large\":{\"size\":5,\"data\":\"JVBERi0\"}}", .{});
-    try std.testing.expectError(error.BodyTooLarge, parseGmailExternal(try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-ID\",\"value\":\"<pdf@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{}), a, loaded));
+    // Fetched bytes for a part declared beyond the loaded cap are not used.
+    const unloaded = try parseGmailExternal(try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-ID\",\"value\":\"<pdf@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{}), a, loaded);
+    try std.testing.expectEqual(@as(usize, 1), unloaded.attachments.len);
+    try std.testing.expectEqualStrings("", unloaded.attachments[0].data);
 }
 
 test "markdown mail: alternatives related approved CID and sixteen user files keep independent octets" {
@@ -2066,7 +2428,9 @@ test "Gmail zero-byte attachments survive without inventing empty body or contai
     try std.testing.expectEqualStrings("attachment", normalized.attachments[1].filename);
     try @import("draft_codec.zig").validateDraft(.{ .attachments = normalized.attachments }, false);
     const truncated = try @import("json.zig").value(a, .{ .payload = .{ .mimeType = "application/octet-stream", .filename = "missing.bin", .body = .{ .size = 1, .data = "" } } });
-    try std.testing.expectError(error.BodySizeMismatch, parseGmail(truncated, a));
+    const missing = try parseGmail(truncated, a);
+    try std.testing.expectEqual(@as(usize, 1), missing.attachments.len);
+    try std.testing.expectEqualStrings("BodySizeMismatch", missing.decode_warning);
 }
 
 test "growing chain MIME: incoming screenshots retain every descriptor through the shared source count" {
@@ -2105,7 +2469,10 @@ test "growing chain MIME: incoming screenshots retain every descriptor through t
         }
     }
     const overflow = try j.value(a, .{ .payload = .{ .mimeType = "multipart/related", .parts = parts } });
-    try std.testing.expectError(error.TooManyAttachments, parseGmail(overflow, a));
+    // Beyond the descriptor bound the rest is left out and the reader is told.
+    const bounded = try parseGmail(overflow, a);
+    try std.testing.expectEqual(@as(usize, max_attachments), bounded.attachments.len);
+    try std.testing.expectEqualStrings("ContentTruncated", bounded.decode_warning);
 }
 
 test "growing chain MIME: over sixty four embedded images retain exact octets beside sixteen ordinary files" {
@@ -2179,7 +2546,10 @@ test "Gmail metadata omits bodies and labels while encoded names keep comma gram
     try std.testing.expectEqual(@as(usize, 1), result.to.len);
     try std.testing.expectEqual(@as(usize, 0), result.labels.len);
     try std.testing.expectEqualStrings("", result.bodyText);
-    try std.testing.expectError(error.InvalidHeaders, unfoldHeader("safe@example.test\r\nBcc: hidden@example.test", a));
+    // Gmail's JSON scalar is the field boundary: a decoded line break is
+    // display whitespace and can never start another header.
+    try std.testing.expectEqualStrings("safe@example.test Bcc: hidden@example.test", try unfoldHeader("safe@example.test\r\nBcc: hidden@example.test", a));
+    try std.testing.expectEqualStrings("a b c", try unfoldHeader("a\x1b\x00b\n\n \tc\xc2\x9b", a));
 }
 test "Gmail internal dates stay inside independently specified calendar endpoints" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2227,7 +2597,13 @@ test "incoming MIME types reject header controls and parameters in Gmail bare me
     try validateMimeType("application/vnd.fixture+json");
     try std.testing.expectError(error.InvalidMimeType, validateMimeType("text/plain\x1b]52;payload"));
     const source = try std.json.parseFromSlice(std.json.Value, a, "{\"payload\":{\"mimeType\":\"text/plain; charset=utf-8\",\"body\":{\"size\":1,\"data\":\"eA\"}}}", .{});
-    try std.testing.expectError(error.InvalidMimeType, parseGmail(source.value, a));
+    // Received parameters on the bare type are dropped; an unusable type is
+    // an opaque file whose stored type is still a valid token.
+    try std.testing.expectEqualStrings("x", (try parseGmail(source.value, a)).body_text);
+    const hostile = try std.json.parseFromSlice(std.json.Value, a, "{\"payload\":{\"mimeType\":\"text/pl\\u001bain\",\"filename\":\"odd.bin\",\"body\":{\"size\":1,\"data\":\"eA\"}}}", .{});
+    const opaque_part = try parseGmail(hostile.value, a);
+    try std.testing.expectEqualStrings("application/octet-stream", opaque_part.attachments[0].mime_type);
+    try std.testing.expectEqualStrings("", opaque_part.body_text);
 }
 test "encoded address name overflow is explicit and does not truncate via bar display helper" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2300,9 +2676,13 @@ test "malformed encoded words fall back to literal display text and keep address
     try std.testing.expectEqualStrings("self@example.test", message.to[0].address);
     try std.testing.expectEqualStrings("abc", message.body_text);
     try std.testing.expectEqualStrings("=?UTF-8?Q?bad=ZZ.pdf?=", message.attachments[0].filename);
-    // Address syntax and header injection remain refusals.
-    const invalid = parseGmail(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"From\",\"value\":\"=?UTF-8?B?%%%?= <not an address>\"}],\"body\":{\"size\":3,\"data\":\"YWJj\"}}}"), a);
-    if (invalid) |_| return error.TestExpectedError else |err| try std.testing.expect(err != error.InvalidEncodedWord and err != error.InvalidBase64);
+    // An unreadable sender address is display-only text and never becomes a
+    // reply target; the body stays readable.
+    const invalid = try parseGmail(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"From\",\"value\":\"=?UTF-8?B?%%%?= <not an address>\"}],\"body\":{\"size\":3,\"data\":\"YWJj\"}}}"), a);
+    try std.testing.expectEqualStrings("", invalid.from[0].address);
+    try std.testing.expectEqualStrings("SenderUnavailable", invalid.decode_warning);
+    try std.testing.expectEqualStrings("abc", invalid.body_text);
+    try std.testing.expectError(error.InvalidAddress, recipients.parseIncoming("<not an address>", a));
 }
 
 test "mail metadata: decoded incoming names retain 1024 bytes and reject 1025" {
@@ -2339,15 +2719,14 @@ test "incoming raw and Gmail headers accept routing-rich mail within fixed budge
             try std.testing.expectEqual(i + 1, (try splitEntity(mail, a)).headers.len);
             const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = values[0 .. i + 1] }, .{});
             const payload = try std.json.parseFromSliceLeaky(std.json.Value, a, encoded, .{ .allocate = .alloc_always });
-            const headers = try gmailHeaders(payload, a);
-            try std.testing.expectEqual(i + 1, headers.len);
-            try std.testing.expectEqualStrings("route", headers[i].value);
+            // Routing headers are never consulted by the Gmail decoder.
+            try std.testing.expectEqual(@as(usize, 0), (try gmailHeaders(payload, a)).len);
         }
     }
     try std.testing.expectError(error.TooManyHeaders, splitEntity(try std.fmt.allocPrint(a, "{s}\r\nBody", .{raw.items}), a));
     const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = values }, .{});
     const payload = try std.json.parseFromSliceLeaky(std.json.Value, a, encoded, .{ .allocate = .alloc_always });
-    try std.testing.expectError(error.TooManyHeaders, gmailHeaders(payload, a));
+    try std.testing.expectEqual(@as(usize, 0), (try gmailHeaders(payload, a)).len);
 
     const long = try a.alloc(u8, max_headers_bytes / 4);
     @memset(long, 'x');
@@ -2358,7 +2737,22 @@ test "incoming raw and Gmail headers accept routing-rich mail within fixed budge
         .{ .name = "X-Route-D", .value = long },
     } }, .{});
     const oversized = try std.json.parseFromSliceLeaky(std.json.Value, a, large, .{ .allocate = .alloc_always });
-    try std.testing.expectError(error.HeadersTooLarge, gmailHeaders(oversized, a));
+    try std.testing.expectEqual(@as(usize, 0), (try gmailHeaders(oversized, a)).len);
+    // Consulted headers survive any amount of routing data, repeated
+    // recipients merge, the first Subject wins and long values are clipped.
+    const mixed = try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{
+        .{ .name = "X-Route-A", .value = long },
+        .{ .name = "To", .value = "ada@example.test" },
+        .{ .name = "subject", .value = "First\nline" },
+        .{ .name = "X-Route-B", .value = long },
+        .{ .name = "TO", .value = "bob@example.test" },
+        .{ .name = "Subject", .value = "Second" },
+        .{ .name = "Date", .value = try a.alloc(u8, 0) },
+    } }, .{});
+    const kept = try gmailHeaders(try std.json.parseFromSliceLeaky(std.json.Value, a, mixed, .{ .allocate = .alloc_always }), a);
+    try std.testing.expectEqual(@as(usize, 2), kept.len);
+    try std.testing.expectEqualStrings("ada@example.test, bob@example.test", try header(kept, "To"));
+    try std.testing.expectEqualStrings("First line", try header(kept, "Subject"));
 }
 
 test "mail metadata: heavily folded old-valid subject unfolds in linear fixed storage" {
@@ -2546,7 +2940,8 @@ test "mail metadata: exact reference byte limit survives raw and Gmail folding" 
     try std.testing.expectEqualStrings("<next@example.test>", reply.in_reply_to);
     const expected = try std.fmt.allocPrint(a, "{s} {s} <next@example.test>", .{ refs[0..512], refs[1025..] });
     try std.testing.expectEqualStrings(expected, reply.references);
-    try std.testing.expectError(error.ReferencesTooLarge, threading("<next@example.test>", try std.fmt.allocPrint(a, "{s} ", .{refs}), "", a));
+    // Stray whitespace or separators in a received chain never refuse a reply.
+    try std.testing.expectEqualStrings(expected, (try threading("<next@example.test>", try std.fmt.allocPrint(a, "{s} ", .{refs}), "", a)).references);
 }
 
 test "mail metadata: bounded reply references preserve ordinary bytes and reject invalid chains" {
@@ -2559,7 +2954,8 @@ test "mail metadata: bounded reply references preserve ordinary bytes and reject
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s} {s}", .{ ordinary, parent }), reply.references);
     try std.testing.expectEqualStrings("<fallback@example.test> <parent@example.test>", (try threading(parent, "", "<fallback@example.test>", a)).references);
     try std.testing.expectEqualStrings(parent, (try threading(parent, "", "invalid fallback", a)).references);
-    try std.testing.expectError(error.InvalidMessageId, threading(parent, "<root@example.test> malformed", "", a));
+    // Unreadable tokens in a received chain are dropped, not refused.
+    try std.testing.expectEqualStrings("<root@example.test> <recent@example.test> <parent@example.test>", (try threading(parent, "<root@example.test>, malformed (comment) <recent@example.test> <cut", "", a)).references);
     const whitespace = try a.alloc(u8, mail_limits.references_bytes);
     @memset(whitespace, ' ');
     try std.testing.expectEqualStrings(parent, (try threading(parent, whitespace, "", a)).references);
@@ -2648,7 +3044,9 @@ test "Gmail external attached calendar binary and container sizes remain exact" 
         "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"parts\":[],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
         "{\"payload\":{\"mimeType\":\"text/html\",\"parts\":[{\"mimeType\":\"text/plain\",\"body\":{\"size\":0}}],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
     };
-    for (cases) |source| try std.testing.expectError(error.BodySizeMismatch, parseGmailExternal(try GmailSizeOracle.json(a, source), a, external));
+    // Gmail's declared size is advisory for received mail: the returned bytes
+    // are shown and the reader is told the content may be incomplete.
+    for (cases) |source| try std.testing.expectEqualStrings("BodySizeMismatch", (try parseGmailExternal(try GmailSizeOracle.json(a, source), a, external)).decode_warning);
     const mixed = try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"body\":{\"size\":0},\"parts\":[{\"mimeType\":\"text/html\",\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}},{\"partId\":\"attachment-part\",\"mimeType\":\"text/plain\",\"filename\":\"fixture.txt\",\"body\":{\"size\":8,\"data\":\"YWJjZGVmZ2g\"}}]}}");
     const parsed = try parseGmail(mixed, a);
     try std.testing.expectEqualStrings("<p>X</p>", parsed.body_html);
@@ -2667,7 +3065,7 @@ test "Gmail inline shorter empty invalid and declared-over-budget data stays ref
         "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":9,\"data\":\"PHA-WDwvcD4\"}}}",
         "{\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"size\":9,\"data\":\"YWJjZGVmZ2g\"}}}",
         "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":1,\"data\":\"\"}}}",
-    }) |source| try std.testing.expectError(error.BodySizeMismatch, parseGmail(try GmailSizeOracle.json(a, source), a));
+    }) |source| try std.testing.expectEqualStrings("BodySizeMismatch", (try parseGmail(try GmailSizeOracle.json(a, source), a)).decode_warning);
     for ([_][]const u8{
         "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":-1,\"data\":\"PHA-WDwvcD4\"}}}",
         "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":2097153,\"data\":\"PHA-WDwvcD4\"}}}",
@@ -2710,10 +3108,10 @@ test "Gmail base64 UTF-8 inline text may lack exactly a stripped byte order mark
         "{\"payload\":{\"mimeType\":\"application/octet-stream\",\"filename\":\"data.bin\",\"headers\":[{\"name\":\"Content-Transfer-Encoding\",\"value\":\"base64\"}],\"body\":{\"size\":11,\"data\":\"YWJjZGVmZ2g\"}}}",
         "{\"payload\":{\"mimeType\":\"text/calendar\",\"filename\":\"invite.ics\",\"headers\":[{\"name\":\"Content-Type\",\"value\":\"text/calendar; charset=utf-8\"},{\"name\":\"Content-Transfer-Encoding\",\"value\":\"base64\"}],\"body\":{\"size\":11,\"data\":\"YWJjZGVmZ2g\"}}}",
         "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"headers\":[],\"body\":{\"size\":11,\"data\":\"YWJjZGVmZ2g\"},\"parts\":[{\"mimeType\":\"text/plain\",\"headers\":" ++ utf8_base64 ++ ",\"body\":{\"size\":8,\"data\":\"YWJjZGVmZ2g\"}}]}}",
-    }) |source| try std.testing.expectError(error.BodySizeMismatch, parseGmail(try GmailSizeOracle.json(a, source), a));
+    }) |source| try std.testing.expectEqualStrings("BodySizeMismatch", (try parseGmail(try GmailSizeOracle.json(a, source), a)).decode_warning);
     // An external inline body uses the fetched attachment data with an exact size.
     const external = try GmailSizeOracle.json(a, "{\"external-fixture\":{\"size\":8,\"data\":\"YWJjZGVmZ2g\"}}");
-    try std.testing.expectError(error.BodySizeMismatch, parseGmailExternal(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":" ++ utf8_base64 ++ ",\"body\":{\"size\":11,\"attachmentId\":\"external-fixture\"}}}"), a, external));
+    try std.testing.expectEqualStrings("BodySizeMismatch", (try parseGmailExternal(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":" ++ utf8_base64 ++ ",\"body\":{\"size\":11,\"attachmentId\":\"external-fixture\"}}}"), a, external)).decode_warning);
 }
 
 test "Actual Gmail decoded leaf and accumulated text caps ignore smaller metadata" {
@@ -2728,7 +3126,9 @@ test "Actual Gmail decoded leaf and accumulated text caps ignore smaller metadat
     var parent = try GmailSizeOracle.part(a, "multipart/alternative", 0, "");
     try GmailSizeOracle.children(a, &parent, &.{ first, second });
     // Two one-MiB HTML parts plus the inter-part newline exceed two MiB.
-    try std.testing.expectError(error.BodyTooLarge, parseGmail(try GmailSizeOracle.wrap(a, parent), a));
+    const clipped = try parseGmail(try GmailSizeOracle.wrap(a, parent), a);
+    try std.testing.expectEqual(@as(usize, types.Limits.body_bytes), clipped.body_html.len);
+    try std.testing.expectEqualStrings("ContentTruncated", clipped.decode_warning);
     const external_data = try GmailSizeOracle.filled(a, 1572864);
     var external_part = try GmailSizeOracle.part(a, "text/plain", 1572864, "");
     var external_body = try b.field(external_part, "body");
@@ -2742,7 +3142,10 @@ test "Actual Gmail decoded leaf and accumulated text caps ignore smaller metadat
     try attachment_body.object.put(a, "size", .{ .integer = 1572864 });
     try map.object.put(a, "external-caps", attachment_body);
     // Individually valid plain/html leaves total 3,145,729 decoded bytes.
-    try std.testing.expectError(error.DecodedMessageTooLarge, parseGmailExternal(try GmailSizeOracle.wrap(a, parent), a, map));
+    // The part beyond the cumulative bound is left out; the rest is readable.
+    const partial = try parseGmailExternal(try GmailSizeOracle.wrap(a, parent), a, map);
+    try std.testing.expectEqual(@as(usize, 1572864), partial.body_text.len);
+    try std.testing.expectEqualStrings("ContentTruncated", partial.decode_warning);
 }
 
 test "Raw MIME and outgoing attachment bytes retain their independent rules" {
@@ -2762,7 +3165,7 @@ test "invitation MIME: named Outlook Teams and Zoom calendar attachments are act
     // and a folded Teams description. The conferencing service is irrelevant
     // to the calendar transport.
     const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:teams-fixture@example.test\r\nDTSTAMP:20261007T090000Z\r\nDTSTART;TZID=\"W. Europe Standard Time\":20261012T100000\r\nORGANIZER;CN=\"Fixture Host\":MAILTO:host@example.test\r\nATTENDEE;CN=\"Fixture Guest\";RSVP=TRUE:MAILTO:self@example.test\r\nDESCRIPTION:Join the fixture meeting at https://teams.microsoft.com/\r\n l/meetup-join/fictional\r\nSUMMARY:Calendar fixture\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream", "text/plain" }) |kind| {
         const raw = try std.fmt.allocPrint(a, "From: host@example.test\r\nTo: self@example.test\r\nContent-Type: {s}; charset=utf-8; method=REQUEST; name=\"invite.ics\"\r\nContent-Disposition: attachment; filename=\"invite.ics\"\r\n\r\n{s}", .{ kind, calendar });
         const message = try parse(raw, a);
         try std.testing.expect(message.calendar != null);
@@ -2788,7 +3191,7 @@ test "invitation MIME: named Gmail external calendar payloads require and preser
     var download: std.json.Value = .{ .object = .empty };
     try download.object.put(a, "data", .{ .string = data });
     try map.object.put(a, "calendar-download", download);
-    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream", "text/plain" }) |kind| {
         var part = try GmailSizeOracle.part(a, kind, @intCast(calendar.len), "");
         try part.object.put(a, "filename", .{ .string = "invite.ics" });
         var body = try b.field(part, "body");
@@ -2867,7 +3270,9 @@ test "invitation MIME: calendar folds may divide UTF8 but ordinary attachments a
     try std.testing.expect(!isCalendarPart("application/octet-stream", "notes.txt"));
     try std.testing.expect(!isCalendarPart("text/html", "invite.ics"));
     const oversized = try GmailSizeOracle.part(a, "text/calendar", 131073, "");
-    try std.testing.expectError(error.CalendarTooLarge, parseGmail(try GmailSizeOracle.wrap(a, oversized), a));
+    // An oversized received calendar offers no invitation and stays a file.
+    const large_calendar = try parseGmail(try GmailSizeOracle.wrap(a, oversized), a);
+    try std.testing.expect(large_calendar.calendar == null);
 }
 
 test "MIME charset: numeric German and Windows punctuation bytes obey explicit declarations" {
@@ -2949,7 +3354,9 @@ test "MIME charset: supported alternative survives unknown encoding with attachm
         fixed.reset();
         const normalized = try normalizeGmail(input, fixed.allocator(), null);
         try std.testing.expectEqualStrings("abc", normalized.bodyText);
-        try std.testing.expectEqualStrings("UnsupportedCharset", normalized.decodeWarning);
+        // The received alternative is ASCII under an unmapped label: exact
+        // text, so nothing is degraded and no warning is shown.
+        try std.testing.expectEqualStrings("", normalized.decodeWarning);
         try std.testing.expect(!normalized.metadataPartial);
         try std.testing.expect(normalized.labelsVerified);
         try std.testing.expectEqualStrings("sender@example.test", normalized.from.address);
@@ -3051,4 +3458,40 @@ test "HTML reader fallback keeps legacy literal escaped technical fragments byte
     try std.testing.expectEqual(types.BodySource.plain, plain.body_source);
     try std.testing.expectEqualStrings("<div>Literal technical body</div>", plain.body_text);
     try std.testing.expectEqualStrings("", plain.body_html);
+}
+
+test "parser tabs: quoted filename pairs preserve named calendar discovery and later parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "From:\tBilling <billing@example.test>\r\nTo:\tself@example.test\r\nContent-Type:\ttext/plain; name=\"Bill\\\t2026.ICS\"; charset=utf-8\r\nContent-Disposition: attachment; filename=\"Bill\\\t2026.ICS\"\r\n\r\nBEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:tab-file@example.test\r\nDTSTAMP:20261109T080000Z\r\nDTSTART;VALUE=DATE:20261123\r\nSUMMARY:Payment due\r\nDESCRIPTION:Reference\tEXAMPLE-42\r\nEND:VEVENT\r\nEND:VCALENDAR";
+    const decoded = try parse(raw, a);
+    try std.testing.expect(decoded.calendar != null);
+    try std.testing.expectEqual(@as(usize, 1), decoded.attachments.len);
+    try std.testing.expectEqualStrings("Bill 2026.ICS", decoded.attachments[0].filename);
+    try std.testing.expectEqualStrings("utf-8", parameter("text/plain; name=\"Bill\\\t2026.ICS\"; charset=utf-8", "charset").?);
+    try std.testing.expectEqualStrings("invite.ics", (try filenameParameter("attachment; filename=\"invite.ics \"", "filename", a)).?);
+    try std.testing.expectEqualStrings("Bill\t", (try filenameParameter("attachment; filename=\"Bill\\\t\"", "filename", a)).?);
+    try std.testing.expectEqualStrings("A\"B.ICS", (try filenameParameter("attachment; filename=\"A\\\"B.ICS\"", "filename", a)).?);
+    try std.testing.expect((try filenameParameter("attachment; filename=\"bad\\\x1b.ICS\"", "filename", a)) == null);
+}
+
+test "parser leniency: an original with header syntax this client refuses still forwards as opaque bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "From sender@example.test Mon Jan  1 00:00:00 2024\r\nSubject: Quarterly\r\n report\r\nFrom: sender@example.test\r\n\r\nBody\r\n",
+        "Subject: Quarterly report\r\nSubject: Duplicate\r\nFrom: sender@example.test\r\n\r\nBody\r\n",
+        "From: sender@example.test\r\nbroken line without colon\r\nSubject: Quarterly report\r\n\r\nBody\r\n",
+        "Subject: Quarterly report\r\nFrom: sender@example.test\r\nX-Raw: \x1b$B\r\n\r\nBody\r\n",
+    }) |raw| {
+        const original = try originalSource(a, raw);
+        try std.testing.expectEqualStrings("Quarterly report", original.subject);
+        try std.testing.expectEqualStrings("application/octet-stream", original.attachment.mimeType);
+        try std.testing.expectEqualStrings(raw, try decodeBase64Url(original.attachment.data, a));
+    }
+    try std.testing.expectError(error.InvalidHeaders, originalSource(a, "not a message at all\r\n\r\nBody"));
+    const ordinary = try originalSource(a, "Subject: Plain\r\nFrom: sender@example.test\r\n\r\nBody\r\n");
+    try std.testing.expectEqualStrings("message/rfc822", ordinary.attachment.mimeType);
 }

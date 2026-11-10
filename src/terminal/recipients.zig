@@ -393,6 +393,97 @@ pub fn parseIncoming(raw: []const u8, allocator: std.mem.Allocator) ![]IncomingM
     try scan(raw, &sink);
     return try sink.list.toOwnedSlice(allocator);
 }
+pub const LenientList = struct {
+    list: []IncomingMailbox,
+    /// Some text could not be read as a mailbox and was left out.
+    degraded: bool = false,
+};
+/// Received address headers never refuse a message. A header the strict
+/// grammar accepts is returned unchanged. Otherwise every mailbox that can be
+/// read is kept and the remaining text is dropped: unquoted commas in display
+/// names (`Doe, John <j@example.test>`), stray separators, Outlook semicolons,
+/// unterminated groups, `undisclosed-recipients` and bare local names. Only
+/// syntactically valid addresses are returned, so reply derivation and the
+/// outgoing validators see the same data shape as before.
+pub fn parseIncomingLenient(raw: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!LenientList {
+    if (parseIncoming(raw, allocator)) |list| return .{ .list = list } else |err| if (err == error.OutOfMemory) return error.OutOfMemory;
+    var list: std.ArrayList(IncomingMailbox) = .empty;
+    errdefer {
+        for (list.items) |item| {
+            allocator.free(item.address);
+            allocator.free(item.name);
+        }
+        list.deinit(allocator);
+    }
+    const text = raw[0..@min(raw.len, policy.header_value_bytes)];
+    var quotes: usize = 0;
+    for (text) |c| quotes += @intFromBool(c == '"');
+    const honor_quotes = quotes % 2 == 0;
+    // Display-name fragments before the token that carries the address.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(allocator);
+    var quote = false;
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index <= text.len) : (index += 1) {
+        const end = index == text.len;
+        if (!end) {
+            const c = text[index];
+            if (honor_quotes and c == '"') quote = !quote;
+            if (quote) continue;
+            if (c != ',' and c != ';') continue;
+        }
+        const token = std.mem.trim(u8, text[start..index], " \t");
+        start = index + 1;
+        if (token.len == 0) continue;
+        if (list.items.len == max_incoming_recipients) break;
+        if (try lenientMailbox(token, pending.items, allocator)) |item| {
+            errdefer {
+                allocator.free(item.address);
+                allocator.free(item.name);
+            }
+            try list.append(allocator, item);
+            pending.clearRetainingCapacity();
+        } else if (std.mem.indexOfScalar(u8, token, '@') == null and std.mem.indexOfScalar(u8, token, '<') == null and pending.items.len + token.len + 2 <= policy.display_name_bytes) {
+            if (pending.items.len != 0) try pending.appendSlice(allocator, ", ");
+            try pending.appendSlice(allocator, token);
+        } else pending.clearRetainingCapacity();
+    }
+    return .{ .list = try list.toOwnedSlice(allocator), .degraded = true };
+}
+fn lenientMailbox(token: []const u8, prefix: []const u8, allocator: std.mem.Allocator) error{OutOfMemory}!?IncomingMailbox {
+    if (prefix.len == 0) {
+        if (incomingMailbox(token, allocator)) |item| return item else |err| if (err == error.OutOfMemory) return error.OutOfMemory;
+    }
+    // `Name <address>` with anything the grammar refuses in Name, or a bare
+    // address surrounded by stray punctuation or a group label.
+    var address: []const u8 = "";
+    var name: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, token, '<')) |left| {
+        const right = std.mem.indexOfScalarPos(u8, token, left, '>') orelse token.len;
+        address = std.mem.trim(u8, token[left + 1 .. right], " \t'\"");
+        name = token[0..left];
+    } else {
+        var words = std.mem.tokenizeAny(u8, token, " \t");
+        while (words.next()) |word| if (std.mem.indexOfScalar(u8, word, '@') != null) {
+            address = std.mem.trim(u8, word, "'\"()[]:.");
+            name = token[0 .. @intFromPtr(word.ptr) - @intFromPtr(token.ptr)];
+            break;
+        };
+    }
+    if (std.mem.startsWith(u8, address, "mailto:")) address = address["mailto:".len..];
+    validateAddressSyntax(address, true) catch return null;
+    var clean: std.ArrayList(u8) = .empty;
+    defer clean.deinit(allocator);
+    if (prefix.len != 0) {
+        try clean.appendSlice(allocator, prefix);
+        try clean.appendSlice(allocator, ", ");
+    }
+    for (std.mem.trim(u8, name, " \t:")) |c| if (c != '"' and c != '\\' and c != '<' and c != '>') try clean.append(allocator, if (c == '\t') ' ' else c);
+    const address_copy = try allocator.dupe(u8, address);
+    errdefer allocator.free(address_copy);
+    return .{ .address = address_copy, .name = try allocator.dupe(u8, std.mem.trim(u8, clean.items[0..@min(clean.items.len, policy.display_name_bytes)], " ,")) };
+}
 fn scan(raw: []const u8, out: anytype) !void {
     if (!std.unicode.utf8ValidateSlice(raw)) return error.InvalidUtf8;
     for (raw) |c| if ((c < 32 and c != '\t') or c == 127) return error.HeaderInjection;
@@ -525,7 +616,9 @@ fn mailbox(raw: []const u8) !Mailbox {
                     if (pos >= name.len - 1) return error.InvalidRecipients;
                 }
                 if (n == decoded.len) return error.RecipientTooLarge;
-                decoded[n] = name[pos];
+                // Quoted-pair can escape WSP, including HTAB. Normalize a
+                // display name without changing mailbox identity validation.
+                decoded[n] = if (name[pos] == '\t') ' ' else name[pos];
                 n += 1;
             }
             try out.name.set(decoded[0..n]);
@@ -599,7 +692,7 @@ fn incomingMailbox(raw: []const u8, allocator: std.mem.Allocator) !IncomingMailb
                 pos += 1;
                 if (pos >= name.len - 1) return error.InvalidRecipients;
             }
-            bytes[n] = name[pos];
+            bytes[n] = if (name[pos] == '\t') ' ' else name[pos];
             n += 1;
         }
         // Copy exact owned slices so deallocation also works with accounting
@@ -862,4 +955,62 @@ fn allocationProbe(a: std.mem.Allocator) !void {
 test "incoming parser cleans up every allocation failure and malformed final mailbox" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
     try std.testing.expectError(error.InvalidAddress, parseIncoming("a@example.test, b@example.test, invalid", std.testing.allocator));
+}
+
+test "parser tabs: escaped display-name whitespace preserves recipient identity" {
+    var list: List = .{};
+    try parse("\"Jane\\\tDoe\" <jane@example.test>", &list);
+    try std.testing.expectEqual(@as(usize, 1), list.slice().len);
+    try std.testing.expectEqualStrings("Jane Doe", list.items[0].name.slice());
+    try std.testing.expectEqualStrings("jane@example.test", list.items[0].address.slice());
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const outgoing = try parseOutgoing(arena.allocator(), "\"Jane\\\tDoe\" <jane@example.test>");
+    try std.testing.expectEqualStrings("Jane Doe", outgoing[0].name);
+    try std.testing.expectEqualStrings("jane@example.test", outgoing[0].address);
+    const incoming = try parseIncoming("\"Jane\\\tDoe\" <jane@example.test>", arena.allocator());
+    try std.testing.expectEqualStrings("Jane Doe", incoming[0].name);
+    var reply_to: Envelope = .{};
+    try replyIncoming(arena.allocator(), "self@example.test", &.{}, "\"Jane\\\tDoe\" <jane@example.test>", "", "self@example.test", "", false, &reply_to);
+    try std.testing.expectEqualStrings("Jane Doe", reply_to.to.items[0].name.slice());
+    try std.testing.expectEqualStrings("jane@example.test", reply_to.to.items[0].address.slice());
+    // Tabs in a bare identity remain invalid; whitespace is not an excuse
+    // to reinterpret one recipient as a different mailbox.
+    try std.testing.expectError(error.InvalidAddress, validateAddress("jane\t@example.test"));
+    try std.testing.expectError(error.HeaderInjection, parse("\"Jane\\\x1bDoe\" <jane@example.test>", &list));
+}
+
+test "parser leniency: received address lists keep every readable mailbox" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { raw: []const u8, addresses: []const []const u8, first_name: []const u8 = "", degraded: bool = true }{
+        .{ .raw = "Ada Example <ada@example.test>, bob@example.test", .addresses = &.{ "ada@example.test", "bob@example.test" }, .first_name = "Ada Example", .degraded = false },
+        .{ .raw = "Example, Ada <ada@example.test>", .addresses = &.{"ada@example.test"}, .first_name = "Example, Ada" },
+        .{ .raw = "Acme, Inc. <news@example.test>, Other <o@example.test>", .addresses = &.{ "news@example.test", "o@example.test" }, .first_name = "Acme, Inc." },
+        .{ .raw = "ada@example.test,", .addresses = &.{"ada@example.test"} },
+        .{ .raw = "ada@example.test,, bob@example.test", .addresses = &.{ "ada@example.test", "bob@example.test" } },
+        .{ .raw = "ada@example.test; bob@example.test", .addresses = &.{ "ada@example.test", "bob@example.test" } },
+        .{ .raw = "undisclosed-recipients", .addresses = &.{} },
+        .{ .raw = "undisclosed-recipients:", .addresses = &.{} },
+        .{ .raw = "MAILER-DAEMON", .addresses = &.{} },
+        .{ .raw = "Team: Sales <sales@example.test>", .addresses = &.{"sales@example.test"}, .first_name = "Team: Sales" },
+        .{ .raw = "\"Unbalanced <ada@example.test>", .addresses = &.{"ada@example.test"}, .first_name = "Unbalanced" },
+        .{ .raw = "Ada (work <ada@example.test>", .addresses = &.{"ada@example.test"}, .first_name = "Ada (work" },
+        .{ .raw = "Ada <ada@example.test, bob@example.test", .addresses = &.{ "ada@example.test", "bob@example.test" }, .first_name = "Ada" },
+        .{ .raw = "Ada <ada@example.test> trailing words", .addresses = &.{"ada@example.test"}, .first_name = "Ada" },
+        .{ .raw = "broken@, bob@example.test", .addresses = &.{"bob@example.test"} },
+    };
+    for (cases) |case| {
+        const result = try parseIncomingLenient(case.raw, a);
+        defer deinitIncoming(result.list, a);
+        errdefer std.debug.print("case: {s}\n", .{case.raw});
+        try std.testing.expectEqual(case.degraded, result.degraded);
+        try std.testing.expectEqual(case.addresses.len, result.list.len);
+        for (case.addresses, result.list) |expected, item| {
+            try std.testing.expectEqualStrings(expected, item.address);
+            try validateIncomingAddress(item.address);
+        }
+        if (result.list.len != 0) try std.testing.expectEqualStrings(case.first_name, result.list[0].name);
+    }
+    // The strict grammar is unchanged for composing and for trusted parsing.
+    try std.testing.expectError(error.InvalidAddress, parseIncoming("Example, Ada <ada@example.test>", a));
 }

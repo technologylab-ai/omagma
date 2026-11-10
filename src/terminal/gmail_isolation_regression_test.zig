@@ -93,11 +93,20 @@ test "message isolation: legal multiple From plus Sender and unsupported Bcc ret
         var peer: Peer = .{ .kind = kind };
         const message = try gmail.readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, peer.transport(), "odd");
         try std.testing.expectEqualStrings("Body", message.bodyText);
-        try std.testing.expect(message.decodeWarning.len != 0);
-        try std.testing.expectEqualStrings("", message.from.address);
-        try std.testing.expectEqual(@as(usize, 0), message.replyTo.len + message.to.len + message.cc.len);
-        try std.testing.expectEqualStrings("", message.messageId);
-        try std.testing.expectError(error.UnsafeReplyMetadata, @import("conversation_draft.zig").reply(a, message, .{ .account = "self@example.test" }));
+        try std.testing.expectEqualStrings("", message.bodyCacheError);
+        if (kind == .multi_from) {
+            // Several authors stay ambiguous: readable, but never a guessed
+            // reply target. The rest of the envelope is unaffected.
+            try std.testing.expectEqualStrings("AmbiguousSender", message.decodeWarning);
+            try std.testing.expectEqualStrings("", message.from.address);
+            try std.testing.expectError(error.UnsafeReplyMetadata, @import("conversation_draft.zig").reply(a, message, .{ .account = "self@example.test" }));
+        } else {
+            // An unreadable Bcc mailbox is dropped on its own; the sender
+            // and the reply path are intact.
+            try std.testing.expectEqualStrings("", message.decodeWarning);
+            try std.testing.expectEqualStrings("one@example.test", message.from.address);
+            _ = try @import("conversation_draft.zig").reply(a, message, .{ .account = "self@example.test" });
+        }
         try std.testing.expectEqual(@as(usize, 0), peer.writes);
     }
 }
@@ -122,7 +131,9 @@ test "message isolation: good unusual good survives list bootstrap history and t
         try assertNeighbors(thread);
         if (kind == .bad_body) {
             for (j.get(thread, "messages").?.array.items) |message| {
-                if (std.mem.eql(u8, j.text(message, "id"), "odd")) try std.testing.expectEqualStrings("BodySizeMismatch", j.text(message, "bodyCacheError")) else try std.testing.expectEqualStrings("Body", j.text(message, "bodyText"));
+                // A size disagreement is a warning on a readable body.
+                try std.testing.expectEqualStrings("Body", j.text(message, "bodyText"));
+                if (std.mem.eql(u8, j.text(message, "id"), "odd")) try std.testing.expectEqualStrings("BodySizeMismatch", j.text(message, "decodeWarning"));
             }
         }
         try std.testing.expectEqual(@as(usize, 0), peer.writes);

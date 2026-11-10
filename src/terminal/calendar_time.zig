@@ -35,7 +35,10 @@ pub fn parse(raw: []const u8, parameters: []const u8) !Stamp {
     const zone = (try parameter(parameters, "TZID")) orelse "";
     const date = raw.len == 8;
     if (date) {
-        if (zone.len != 0 or value_type == null or !std.ascii.eqlIgnoreCase(value_type.?, "DATE")) return error.InvalidCalendarTime;
+        // Eight digits can only be a DATE; producers often omit VALUE=DATE.
+        // A contradictory VALUE or a TZID on a civil date stays refused.
+        if (zone.len != 0) return error.InvalidCalendarTime;
+        if (value_type) |value| if (!std.ascii.eqlIgnoreCase(value, "DATE")) return error.InvalidCalendarTime;
     } else {
         if ((raw.len != 15 and raw.len != 16) or raw[8] != 'T' or (raw.len == 16 and raw[15] != 'Z')) return error.InvalidCalendarTime;
         if (value_type) |value| if (!std.ascii.eqlIgnoreCase(value, "DATE-TIME")) return error.InvalidCalendarTime;
@@ -248,6 +251,12 @@ test "calendar: RFC3339 fractional offset instants and date types remain distinc
     const day = try resolve(try parse("20261013", ";VALUE=DATE"), null, false);
     try std.testing.expectEqual(.date, day.kind);
     try std.testing.expectError(error.InvalidCalendarTime, parse("20261013T080000Z", ";TZID=Europe/Vienna"));
+    // VALUE=DATE is commonly omitted; the eight-digit form is unambiguous.
+    const bare = try parse("20261013", "");
+    try std.testing.expectEqual(.date, bare.kind);
+    try std.testing.expectEqual(day.value, (try resolve(bare, null, false)).value);
+    try std.testing.expectError(error.InvalidCalendarTime, parse("20261013", ";VALUE=DATE-TIME"));
+    try std.testing.expectError(error.InvalidCalendarTime, parse("20261013", ";TZID=Europe/Vienna"));
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_][]const u8{ "1970-01-01T00:00:00.000Z", "1969-12-31T23:59:59.999Z", "2026-10-13T14:00:00.000Z", "2000-02-29T01:02:03.004Z", "0001-01-01T00:00:00.000Z", "9999-12-31T23:59:59.999Z" }) |input| {

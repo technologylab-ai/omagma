@@ -116,13 +116,35 @@ This is separate from accepting a meeting invitation. Messages listing another
 attendee still require a matching account or verified alias. Existing recurrence,
 ambiguous-event, cancellation and timezone review limits remain in effect.
 
+## Other calendar attachments
+
+Named `.ics` attachments also work when the sender labels them `text/plain` or
+uses an uppercase `.ICS` extension. Published, attendee-free events and ordinary
+calendar files without `METHOD` use the same primary-calendar confirmation flow
+as booked appointments. They create a personal event, with no guests or RSVP.
+Opening or reviewing a file does not add it.
+
+The review preserves the event's dates, title, place and full notes. An all-day
+end date is exclusive in iCalendar and Google; the card shows only included days.
+Supported DISPLAY alarms become Google popup reminders, shown before confirming.
+Unsupported alarms are disclosed and never executed. This includes email/audio,
+absolute, repeating and nominal day/week alarms; nominal days can differ from
+elapsed minutes at a daylight-saving change. With no source alarm, the calendar's
+default reminders apply. Limits remain one non-recurring event per import,
+128 KiB of source, at most five supported reminders and four weeks before start.
+
+The standard meeting invitation and RSVP flow is separate and retains its
+verified-attendee checks. Calendar attachments do not infer an invitation from
+a join link, invent guests, or turn a published notice into a meeting request.
+
 ## Permissions
 
 Calendar creation and editing use the existing optional
 `calendar-write-owned` or `calendar-write-shared` permission. No Meet-specific
 OAuth permission is required to create a Google Meet conference attached to a
-Calendar event. The existing account grant must also include calendar-list
-access. See [Calendar permissions](CALENDAR-PERMISSIONS.md) before changing a
+Calendar event. Automatic Meet AI notes additionally need the optional
+`meet-settings` permission (see below). The existing account grant must also
+include calendar-list access. See [Calendar permissions](CALENDAR-PERMISSIONS.md) before changing a
 grant; preserve the complete existing desired capability set.
 
 Ordinary creation makes the selected calendar the organizer. This is separate
@@ -269,6 +291,66 @@ Existing v0.2.9 invitation and RSVP reviews, including uncertain outcomes, are
 recognized when upgrading. Switching back to v0.2.9 with that updated store is
 unsupported.
 
-### Automatic Meet AI notes
+## Automatic Meet AI notes
 
 Auto Meet AI notes + transcript. When you create a new event with Google Meet on the account’s primary calendar, check this box to have Google take AI notes and a transcript automatically when you or a co-host joins Meet on the web, subject to participant consent and admin policy. Unchecked sends no Meet setting, so Google's or your admin's defaults apply. It needs the optional meet-settings permission: if it is missing, Ctrl+S opens a guide that keeps your form and copies an authorization command keeping your current capabilities; Ctrl+R rechecks after you run it. Google also requires the Meet REST API to be enabled in your Cloud project and a Workspace plan and admin policy that allow AI notes. The event is saved first. Success means Google's read-back showed both settings on at that time; they can change later. If the Meet link is still being created, r checks with reads only, and y sends the setting once the link is ready. If Google refuses, or the outcome is unconfirmed, the event stays saved and Omagma says so; nothing is resent automatically, so check AI notes in Meet when you join. Esc keeps the saved status; check it later with omagma calendar meet-event-pending and meet-event-reconcile. Omagma never joins or monitors the meeting.
+
+### From the CLI
+
+The Meet commands create new events only, on the account's primary calendar.
+Check `accounts.list` for `meet-settings` and a Calendar write capability. Then
+choose the entry whose `calendar.primary` is true from
+`omagma calendar list --account personal@example.com`. A bare `meeting.json`
+uses the ordinary event fields and must request Google Meet:
+
+```json
+{
+  "summary": "Project kickoff",
+  "start": "2026-10-22T10:00",
+  "end": "2026-10-22T10:45",
+  "timeZone": "Europe/Vienna",
+  "attendees": ["colleague@example.com"],
+  "conference": "google_meet"
+}
+```
+
+```sh
+omagma calendar meet-event-review --account personal@example.com \
+  --calendar-id RETURNED_CALENDAR_ID --event-file meeting.json \
+  --meet-ai-notes on --send-updates all --operation-id UNIQUE_MEET_EVENT_ID
+```
+
+`--meet-ai-notes on` is the only setting: it turns on AI notes and
+transcription together. The review reads provider state and saves a local
+review; it creates no event and sends nothing. Inspect the account, calendar,
+resolved times, guests and `sendUpdates`, then confirm with the returned hash:
+
+```sh
+omagma calendar meet-event-apply --account personal@example.com \
+  --calendar-id RETURNED_CALENDAR_ID --operation-id UNIQUE_MEET_EVENT_ID \
+  --review-hash RETURNED_REVIEW_HASH
+```
+
+Apply creates the event (with `--send-updates all`, Google emails the guests),
+then sends the AI notes setting to its Meet link. Inspect `state`,
+`meetAiNotes.state` and `current` even when `ok` is true:
+
+| Result | Meaning and next step |
+| --- | --- |
+| `state: applied`, `meetAiNotes.state: on` | The event was created and Google's read-back (`current`) showed both settings on at that time. |
+| `state: partial` | The event is saved, but AI notes are not confirmed; `meetAiNotes.state` and `reason` say why. Do not create the event again. |
+| `meetAiNotes.state: waiting_for_link` | The Meet link is still being created. Check with `meet-event-reconcile`; once it reports `meetAiNotes.phase: ready`, run `meet-event-apply` again with the same operation ID and review hash. That sends only the first Meet settings request and never writes Calendar again. |
+| `meetAiNotes.state: refused` | Final for this operation; it does not show the current setting. The event stays saved, so check AI notes in Meet. |
+| `state: unknown` or `meetAiNotes.state: unknown` | Run `meet-event-reconcile`. Never retry under a new operation ID or create the event again; an unknown AI notes outcome is never resent. |
+| `state: rejected` | Calendar refused the event and nothing was changed. |
+| `state: not_sent` | No request reached Google. |
+
+`meet-event-reconcile` takes the same account, calendar, operation ID and review
+hash. It sends only Google reads; it never writes Calendar, changes Meet
+settings or emails guests. After a restart,
+`omagma calendar meet-event-pending --account personal@example.com --calendar-id RETURNED_CALENDAR_ID`
+shows the saved operation from the local journal without contacting Google.
+`calendar event --calendar-id RETURNED_CALENDAR_ID --event-id RETURNED_EVENT_ID`
+returns the created event's Meet URL; emailing it to a thread is a separate, explicitly authorized `mail reply`.
+JSONL callers use the same command names; see
+`omagma cli --help calendar.meet-event-review`.

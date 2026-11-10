@@ -85,5 +85,7 @@ test "calendar duration: parsed invitation import resolves derived end in the or
     try std.testing.expectEqualStrings("Europe/Vienna", j.text(j.get(body, "end").?, "timeZone"));
     var zero = source;
     zero.duration = try time.parseDuration("PT0S");
-    try std.testing.expectError(error.CalendarEndRequiresReview, invitation.resolveSpan(zero, binding, null));
+    // PT0S is the same zero-length event as DTEND equal to DTSTART.
+    const instant = try invitation.resolveSpan(zero, binding, null);
+    try std.testing.expectEqual(instant.start.value, instant.end.value);
 }

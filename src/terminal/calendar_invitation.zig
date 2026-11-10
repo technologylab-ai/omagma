@@ -10,8 +10,8 @@ pub fn parse(a: std.mem.Allocator, raw: []const u8, account: []const u8, verifie
     return parseWithPolicy(a, raw, account, verified_aliases, false);
 }
 
-/// An explicitly reviewed Calendar import may also copy a booking that lists
-/// no attendees at all. Listed-but-unmatched attendees remain an error; this
+/// An explicitly reviewed Calendar import may also copy an attendee-free
+/// booking, PUBLISH event or ordinary event without METHOD. Listed-but-unmatched attendees remain an error; this
 /// does not authorize a reply or alter the strict RSVP parser.
 pub fn parseForCalendar(a: std.mem.Allocator, raw: []const u8, account: []const u8, verified_aliases: []const []const u8) !t.Invitation {
     return parseWithPolicy(a, raw, account, verified_aliases, true);
@@ -26,7 +26,7 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
     const unfolded = try unfold(a, source);
     var source_hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(source, &source_hash, .{});
-    var result: t.Invitation = .{ .account = try a.dupe(u8, account), .source = source, .unfolded = unfolded, .source_hash = source_hash, .method = .request, .uid = "", .organizer = "", .attendee = "", .version = .{ .sequence = 0, .dtstamp_ms = 0 } };
+    var result: t.Invitation = .{ .account = try a.dupe(u8, account), .source = source, .unfolded = unfolded, .source_hash = source_hash, .method = if (allow_unaddressed) .publish else .request, .uid = "", .organizer = "", .attendee = "", .version = .{ .sequence = 0, .dtstamp_ms = 0 } };
     var stack: [8][]const u8 = undefined;
     var depth: usize = 0;
     var events: usize = 0;
@@ -36,6 +36,9 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
     var attendees: usize = 0;
     var recurrence: std.ArrayList([]const u8) = .empty;
     var join_priority: u8 = 0;
+    var alarm: Alarm = .{};
+    var reminders: std.ArrayList(t.Reminder) = .empty;
+    var unsupported_reminders: usize = 0;
     var lines = std.mem.splitScalar(u8, unfolded, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -53,13 +56,22 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
                 zones += 1;
                 if (zones > 8) return error.TooManyTimezones;
                 result.has_timezones = true;
-            } else if (depth == 1) return error.UnsupportedCalendarComponent;
+            } else if (depth == 1 and !same(p.value, "VTODO") and !same(p.value, "VJOURNAL") and !std.ascii.startsWithIgnoreCase(p.value, "X-")) return error.UnsupportedCalendarComponent;
+            // VTODO, VJOURNAL and X- components are carried in the retained
+            // source but never inspected: only the single VEVENT is planned.
+            if (depth == 2 and same(stack[1], "VEVENT") and same(p.value, "VALARM")) alarm = .{};
+            if (depth > 2 and same(stack[2], "VALARM")) alarm.unsupported = true;
             stack[depth] = p.value;
             depth += 1;
             continue;
         }
         if (same(p.name, "END")) {
             if (depth == 0 or !same(stack[depth - 1], p.value)) return error.InvalidCalendar;
+            if (depth == 3 and same(stack[1], "VEVENT") and same(stack[2], "VALARM")) {
+                if (alarm.reminder()) |minutes| {
+                    if (reminders.items.len < 5) try reminders.append(a, .{ .minutes = minutes }) else unsupported_reminders += 1;
+                } else unsupported_reminders += 1;
+            }
             depth -= 1;
             if (depth == 0) ended = true;
             continue;
@@ -71,8 +83,12 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
                 if (!std.mem.eql(u8, p.value, "2.0")) return error.InvalidCalendar;
             } else if (same(p.name, "METHOD")) {
                 try unique(&seen, 1);
-                result.method = if (same(p.value, "REQUEST")) .request else if (same(p.value, "CANCEL")) .cancel else return error.UnsupportedCalendarMethod;
+                result.method = if (same(p.value, "REQUEST")) .request else if (same(p.value, "CANCEL")) .cancel else if (allow_unaddressed and same(p.value, "PUBLISH")) .publish else return error.UnsupportedCalendarMethod;
             }
+            continue;
+        }
+        if (depth == 3 and same(stack[1], "VEVENT") and same(stack[2], "VALARM")) {
+            alarm.property(p);
             continue;
         }
         if (depth != 2 or !same(stack[1], "VEVENT")) continue;
@@ -114,7 +130,9 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
             try recurrence.append(a, line);
         } else if (same(p.name, "ATTENDEE")) {
             attendees += 1;
-            const address = try mailto(p.value);
+            // A room, group URN or malformed address can never be the
+            // selected identity; it still counts as a listed attendee.
+            const address = mailto(p.value) catch continue;
             var selected = same(address, account);
             for (verified_aliases) |alias| selected = selected or same(address, alias);
             if (selected) {
@@ -122,39 +140,45 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
                 result.attendee = address;
             }
         } else if (same(p.name, "SUMMARY")) {
-            try unique(&seen, 11);
+            if (!first(&seen, 11)) continue;
             result.summary = try unescape(a, p.value);
         } else if (same(p.name, "DESCRIPTION")) {
-            try unique(&seen, 12);
+            if (!first(&seen, 12)) continue;
             result.description = try unescape(a, p.value);
             offerJoin(&result, &join_priority, @import("meeting_link.zig").plain(result.description), 1);
         } else if (same(p.name, "LOCATION")) {
-            try unique(&seen, 13);
+            if (!first(&seen, 13)) continue;
             result.location = try unescape(a, p.value);
             offerJoin(&result, &join_priority, result.location, 2);
         } else if (same(p.name, "URL")) {
-            try unique(&seen, 14);
+            if (!first(&seen, 14)) continue;
             result.url = p.value;
             offerJoin(&result, &join_priority, p.value, 3);
         } else if (same(p.name, "CONFERENCE") or same(p.name, "X-MICROSOFT-SKYPETEAMSMEETINGURL") or same(p.name, "X-MICROSOFT-ONLINEMEETINGEXTERNALLINK")) {
             offerJoin(&result, &join_priority, p.value, 4);
         } else if (same(p.name, "STATUS")) {
             try unique(&seen, 15);
-            if (!same(p.value, "CONFIRMED") and !same(p.value, "TENTATIVE") and !same(p.value, "CANCELLED")) return error.InvalidCalendarStatus;
+            // An unknown value keeps the default; the reviewed plan shows it.
             result.cancelled = same(p.value, "CANCELLED");
         } else if (same(p.name, "TRANSP")) {
             try unique(&seen, 16);
-            if (!same(p.value, "OPAQUE") and !same(p.value, "TRANSPARENT")) return error.InvalidCalendar;
             result.transparent = same(p.value, "TRANSPARENT");
         } else if (same(p.name, "CLASS")) {
             try unique(&seen, 17);
-            if (!same(p.value, "PUBLIC") and !same(p.value, "PRIVATE") and !same(p.value, "CONFIDENTIAL")) return error.InvalidCalendar;
             result.private = same(p.value, "PRIVATE") or same(p.value, "CONFIDENTIAL");
         }
     }
-    if (!ended or depth != 0 or events != 1 or seen & 0x1f != 0x1f) return error.InvalidCalendar;
+    // Scheduling messages retain all original required identity fields.
+    // RFC 5545 ordinary events may omit METHOD and ORGANIZER; never infer REQUEST.
+    const required: u32 = if (allow_unaddressed and result.method == .publish) 0x15 else 0x1f;
+    if (!ended or depth != 0 or events != 1 or seen & required != required) return error.InvalidCalendar;
+    if (result.method == .publish and attendees != 0) return error.UnsupportedCalendarAttendees;
+    if (result.method == .publish) {
+        result.reminders = try reminders.toOwnedSlice(a);
+        result.unsupported_reminders = unsupported_reminders;
+    }
     if (result.attendee.len == 0 and (attendees != 0 or (result.method == .request and !allow_unaddressed))) return error.NotAnAttendee;
-    if (result.method == .request and result.start == null) return error.CalendarStartRequired;
+    if (result.method != .cancel and result.start == null) return error.CalendarStartRequired;
     if (result.start) |start| {
         if (result.end) |end| if ((start.kind == .date) != (end.kind == .date)) return error.InvalidCalendarTime;
         if (result.duration) |duration| if (start.kind == .date and duration.seconds != 0) return error.InvalidCalendarDuration;
@@ -162,6 +186,43 @@ fn parseWithPolicy(a: std.mem.Allocator, raw: []const u8, account: []const u8, v
     }
     result.recurrence = try recurrence.toOwnedSlice(a);
     return result;
+}
+
+// Bounded, passive conversion only. EMAIL/AUDIO/absolute/repeating alarms never
+// execute; the review discloses every alarm that cannot be copied faithfully.
+const Alarm = struct {
+    action_seen: bool = false,
+    display: bool = false,
+    trigger_seen: bool = false,
+    minutes: ?u32 = null,
+    unsupported: bool = false,
+
+    fn property(self: *Alarm, p: Property) void {
+        if (same(p.name, "ACTION")) {
+            if (self.action_seen) self.unsupported = true;
+            self.action_seen = true;
+            self.display = same(p.value, "DISPLAY");
+        } else if (same(p.name, "TRIGGER")) {
+            if (self.trigger_seen) self.unsupported = true;
+            self.trigger_seen = true;
+            self.minutes = alarmMinutes(p.value, p.parameters);
+        } else if (!same(p.name, "DESCRIPTION") and !std.ascii.startsWithIgnoreCase(p.name, "X-")) self.unsupported = true;
+    }
+    fn reminder(self: Alarm) ?u32 {
+        return if (!self.unsupported and self.action_seen and self.display and self.trigger_seen) self.minutes else null;
+    }
+};
+fn alarmMinutes(raw: []const u8, parameters: []const u8) ?u32 {
+    if (time.parameter(parameters, "VALUE") catch return null) |value| if (!same(value, "DURATION")) return null;
+    if (time.parameter(parameters, "RELATED") catch return null) |value| if (!same(value, "START")) return null;
+    const negative = std.mem.startsWith(u8, raw, "-");
+    const duration = time.parseDuration(if (negative) raw[1..] else raw) catch return null;
+    // Nominal days/weeks may cross a DST change; Google accepts elapsed
+    // minutes. Do not silently turn P1D into PT24H.
+    if (duration.days != 0) return null;
+    const seconds = @as(u64, duration.seconds);
+    if ((!negative and seconds != 0) or seconds % 60 != 0 or seconds / 60 > 40320) return null;
+    return @intCast(seconds / 60);
 }
 
 fn offerJoin(result: *t.Invitation, priority: *u8, value: []const u8, rank: u8) void {
@@ -181,7 +242,9 @@ pub fn resolveSpan(invitation: t.Invitation, start_binding: ?time.Binding, end_b
         }
         break :blk time.Point{ .kind = start.kind, .value = start.value + (if (start.kind == .date) @as(i64, 1) else 0), .zone = start.zone };
     };
-    if (start.kind != end.kind or end.value <= start.value) return error.CalendarEndRequiresReview;
+    // A zero-length instant (DTEND equal to DTSTART) is a valid event; an
+    // all-day DATE needs an exclusive end after its start.
+    if (start.kind != end.kind or end.value < start.value or (start.kind == .date and end.value == start.value)) return error.CalendarEndRequiresReview;
     return .{ .start = start, .end = end };
 }
 
@@ -193,6 +256,13 @@ fn unique(seen: *u32, comptime index: u5) !void {
     if (seen.* & bit != 0) return error.AmbiguousInvitation;
     seen.* |= bit;
 }
+/// Repeated presentation text: the first value is planned and reviewed.
+fn first(seen: *u32, comptime index: u5) bool {
+    const bit = @as(u32, 1) << index;
+    if (seen.* & bit != 0) return false;
+    seen.* |= bit;
+    return true;
+}
 fn mailto(value: []const u8) ![]const u8 {
     if (!std.ascii.startsWithIgnoreCase(value, "mailto:")) return error.UnsupportedCalendarAddress;
     const address = value[7..];
@@ -201,7 +271,8 @@ fn mailto(value: []const u8) ![]const u8 {
 }
 const Property = struct { name: []const u8, parameters: []const u8, value: []const u8 };
 fn property(line: []const u8) !Property {
-    for (line) |byte| if (byte < 32 or byte == 127) return error.InvalidCalendar;
+    // RFC 5545 SAFE-CHAR includes WSP (space and horizontal tab).
+    for (line) |byte| if ((byte < 32 and byte != '\t') or byte == 127) return error.InvalidCalendar;
     var quoted = false;
     for (line, 0..) |byte, index| {
         if (byte == '"') quoted = !quoted;
@@ -209,9 +280,9 @@ fn property(line: []const u8) !Property {
             const semi = std.mem.indexOfScalar(u8, line[0..index], ';') orelse index;
             if (semi == 0) return error.InvalidCalendar;
             for (line[0..semi]) |name_byte| if (!std.ascii.isAlphanumeric(name_byte) and name_byte != '-') return error.InvalidCalendar;
-            const parameters = line[semi..index];
-            _ = try time.parameter(parameters, "__validate_parameters__");
-            return .{ .name = line[0..semi], .parameters = parameters, .value = line[index + 1 ..] };
+            // Parameters are validated by the properties which read them; an
+            // odd parameter on an ignored property must not refuse the event.
+            return .{ .name = line[0..semi], .parameters = line[semi..index], .value = line[index + 1 ..] };
         }
     }
     return error.InvalidCalendar;
@@ -250,15 +321,19 @@ fn unescape(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
     var pos: usize = 0;
     while (pos < raw.len) : (pos += 1) {
         var byte = raw[pos];
-        if (byte == '\\') {
-            pos += 1;
-            if (pos == raw.len) return error.InvalidCalendarText;
-            byte = switch (raw[pos]) {
-                'n', 'N' => '\n',
-                '\\', ',', ';' => raw[pos],
-                else => return error.InvalidCalendarText,
-            };
-        }
+        // An unknown escape (Outlook writes "\:" and bare backslashes) keeps
+        // its backslash and character literally; the plan is reviewed.
+        if (byte == '\\' and pos + 1 < raw.len) switch (raw[pos + 1]) {
+            'n', 'N' => {
+                byte = '\n';
+                pos += 1;
+            },
+            '\\', ',', ';' => {
+                byte = raw[pos + 1];
+                pos += 1;
+            },
+            else => {},
+        };
         output[written] = byte;
         written += 1;
     }

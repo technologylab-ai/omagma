@@ -102,8 +102,8 @@ script execution and terminal hyperlinks are unsupported.
 
 Preparation owns a document arena per displayed message; a separate layout
 arena is reused until the pane width or terminal width method changes. Scrolling
-and color reloads reuse the document/layout. Structural and layout budgets refuse
-excess complexity with the existing complete plain conversion as fallback.
+and color reloads reuse the document/layout. Structural and layout budgets truncate the
+formatted view with a notice; the complete plain conversion remains one key away.
 
 MIME records which nonempty alternative supplied `bodyText`, preserving the
 plain-text converter and reply behavior. An old cache without provenance is

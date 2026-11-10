@@ -324,11 +324,13 @@ def formatted_action(binary, directory, source, terminal, manifest, action, know
     terminal.send(b"q")  # Save locally and return to the mailbox.
     terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
                    and "Compose" not in terminal.screen.lines()[0])
-    # A formatted composer owns its saved source separately and clears the
-    # mailbox reader. Reopen through the normal key after the Back frame ends.
+    # Back may already restore the retained reader. Enter on that reader need
+    # not change any cells or produce a frame. Reopen only when it is absent.
     frame = terminal.screen.completed_frames
-    terminal.send(b"\r")
-    terminal.until(lambda: terminal.screen.completed_frames > frame and accepted_reader(terminal, manifest))
+    if not accepted_reader(terminal, manifest):
+        terminal.send(b"\r")
+        terminal.until(lambda: terminal.screen.completed_frames > frame and accepted_reader(terminal, manifest))
+    require_available(terminal)
     with Client(binary, directory, extra=source.options()) as client:
         saved = client.request("draft.read", draftId=created["id"])
         require(saved["bodyText"] == note, f"{action} lost the editable note when returning to the reader")
@@ -516,9 +518,11 @@ def run_case(binary, directory, terminal_type=Terminal):
                 "refresh did not fetch each recovered legacy body exactly once")
         require(entries(warmed)[GOOD]["bytes"] > 0 and not entries(warmed)[GOOD]["bodyError"],
                 "accepted provider full body was not persisted")
-        require(entries(warmed)[INVALID]["bytes"] == 0
-                and entries(warmed)[INVALID]["bodyError"] == "BodySizeMismatch",
-                "refresh accepted the genuinely truncated neighboring body")
+        # A size disagreement is a reader warning on the returned bytes, not a
+        # refusal of the whole neighboring message.
+        require(entries(warmed)[INVALID]["bytes"] > 0
+                and not entries(warmed)[INVALID]["bodyError"],
+                "refresh did not retain the size-mismatched neighboring body with its warning")
         preserved(warmed, legacy)
 
         stage = "reopen-reader-and-document"
@@ -552,10 +556,10 @@ def run_case(binary, directory, terminal_type=Terminal):
 
         stage = "visible-refusal-and-revisit"
         terminal.send(b"J")  # Normal adjacent-mail navigation from the reader.
-        terminal.until(lambda: reader_contains(terminal.screen, "Body unavailable")
+        terminal.until(lambda: reader_contains(terminal.screen, "Unrecoverable truncated message.")
                        and reader_contains(terminal.screen, "BodySizeMismatch"))
-        require(not reader_contains(terminal.screen, "Unrecoverable truncated message."),
-                "refused mail rendered the truncated body")
+        require(not reader_contains(terminal.screen, "Body unavailable"),
+                "size-mismatched mail was refused instead of shown with a warning")
         terminal.send(b"K")
         terminal.until(lambda: accepted_reader(terminal, manifest))
         before_repeat = index(account)
@@ -597,11 +601,10 @@ def run_case(binary, directory, terminal_type=Terminal):
             require(all(retained[key] == value for key, value in draft.items()),
                     "decoder upgrade changed the unsent local draft")
             refused = client.request("mail.read", messageId=INVALID, cacheOnly=True)
-            require(refused["id"] == INVALID and refused["bodyCached"] is False
-                    and refused["bodyCacheError"] == "BodySizeMismatch"
-                    and refused["bodyText"] == "" and not refused.get("bodyHtml")
-                    and not refused["attachments"],
-                    "refused cache DTO lost its diagnostic or exposed rejected body bytes")
+            require(refused["id"] == INVALID and refused["bodyCacheError"] == ""
+                    and refused["decodeWarning"] == "BodySizeMismatch"
+                    and "Unrecoverable truncated message." in refused["bodyText"],
+                    "size-mismatched cache DTO lost its warning or its readable bytes")
             for value in formatted:
                 require(client.request("draft.read", draftId=value["id"]) == value,
                         "saved formatted draft changed during later reader actions")
@@ -632,7 +635,8 @@ def run_case(binary, directory, terminal_type=Terminal):
         require(last["decoderRevision"] == first["decoderRevision"], "restart changed the accepted decoder revision")
         require(last["generation"] >= first["generation"], "restart reset the cache generation")
         require(last["syncBodyGets"] == first["syncBodyGets"], "restart refetched cached or same-revision refused bodies")
-        require(entries(last)[INVALID]["bodyError"] == "BodySizeMismatch", "restart forgot the current decoder refusal")
+        require(entries(last)[INVALID]["bytes"] > 0 and not entries(last)[INVALID]["bodyError"],
+                "restart forgot the size warning or refused the readable body")
         with Client(binary, directory, extra=source.options()) as restarted:
             for value in formatted:
                 require(restarted.request("draft.read", draftId=value["id"]) == value,

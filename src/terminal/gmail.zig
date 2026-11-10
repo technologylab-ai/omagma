@@ -920,10 +920,13 @@ fn providerLabel(value: j.Value) !@import("store.zig").Label {
     };
 }
 const ExternalBodiesBudget = struct { parts: usize = 0, bytes: usize = 0 };
+/// Fetches the separately stored text and calendar bodies a reader needs.
+/// A part beyond a bound is not fetched: the MIME decoder then keeps it as a
+/// downloadable file instead of refusing the received message.
 fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, payload: j.Value, map: *std.json.ObjectMap, depth: usize, budget: *ExternalBodiesBudget) anyerror!void {
-    if (depth > mime.max_depth) return error.MimeTooDeep;
+    if (depth > mime.max_depth) return;
     budget.parts += 1;
-    if (budget.parts > mime.max_parts) return error.TooManyMimeParts;
+    if (budget.parts > mime.max_parts) return;
     const body = j.get(payload, "body");
     const mime_type = j.text(payload, "mimeType");
     if (body) |value| {
@@ -931,21 +934,22 @@ fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, pa
         const filename = j.text(payload, "filename");
         const calendar = mime.isCalendarPart(mime_type, filename);
         const inline_text = filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html"));
-        if (attachment.len > 0 and (calendar or inline_text)) {
-            if (attachment.len > 1024) return error.InvalidAttachmentId;
-            const declared = if (j.get(value, "size")) |size| try b.integer(size) else 0;
-            if (declared < 0 or declared > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) return error.BodyTooLarge;
-            if (calendar and declared > mime.max_calendar_bytes) return error.CalendarTooLarge;
+        fetch: {
+            if (!(attachment.len > 0 and (calendar or inline_text))) break :fetch;
+            if (attachment.len > 1024) break :fetch;
+            const declared = if (j.get(value, "size")) |size| b.integer(size) catch break :fetch else 0;
+            if (declared < 0 or declared > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) break :fetch;
+            if (calendar and declared > mime.max_calendar_bytes) break :fetch;
             const declared_bytes: usize = @intCast(declared);
             if (!map.contains(attachment)) {
-                if (declared_bytes > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) return error.DecodedMessageTooLarge;
+                if (declared_bytes > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) break :fetch;
                 const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, id, ""), try escaped(a, attachment) });
                 const response = try transport.request(a, .GET, url, null);
                 const encoded = try j.required(response, "data");
                 const decoded = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(std.mem.trimEnd(u8, encoded, "=")) catch return error.InvalidBase64;
-                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) return error.BodyTooLarge;
-                if (calendar and decoded > mime.max_calendar_bytes) return error.CalendarTooLarge;
-                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) return error.DecodedMessageTooLarge;
+                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) break :fetch;
+                if (calendar and decoded > mime.max_calendar_bytes) break :fetch;
+                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) break :fetch;
                 budget.bytes += decoded;
                 try map.put(a, attachment, response);
             }
@@ -1004,12 +1008,18 @@ fn identities(a: std.mem.Allocator, transport: Transport) ![]const @import("stor
     if (entries.len > (if (types.Limits.native) @as(usize, 1024) else 32)) return error.TooManyAliases;
     var out: std.ArrayList(@import("store.zig").Identity) = .empty;
     for (entries) |entry| {
-        const address = try j.required(entry, "sendAsEmail");
-        try recipients.validateAddress(address);
-        const name = j.text(entry, "displayName");
-        const signature = j.text(entry, "signature");
-        if (name.len > @import("mail_limits.zig").display_name_bytes or signature.len > 8192) return error.IdentityTooLarge;
-        if (std.mem.eql(u8, j.text(entry, "verificationStatus"), "accepted") or try j.boolean(entry, "isPrimary", false)) try out.append(a, .{ .address = address, .name = try mime.sanitizeText(name, a), .signature = try mime.htmlToText(signature, a), .isDefault = try j.boolean(entry, "isDefault", false) });
+        // One unusual alias must not disable every identity (and with it
+        // every reply). An unusable address is skipped; an over-long name is
+        // omitted; a signature is bounded after conversion to text, and one
+        // that still exceeds the bound is left out rather than cut short.
+        const address = j.text(entry, "sendAsEmail");
+        recipients.validateAddress(address) catch continue;
+        const raw_name = j.text(entry, "displayName");
+        const name = if (raw_name.len > @import("mail_limits.zig").display_name_bytes) "" else raw_name;
+        const raw_signature = j.text(entry, "signature");
+        const signature_text = if (raw_signature.len > 256 * 1024) "" else mime.htmlToText(raw_signature, a) catch |err| if (err == error.OutOfMemory) return err else "";
+        const signature = if (signature_text.len > 8192) "" else signature_text;
+        if (std.mem.eql(u8, j.text(entry, "verificationStatus"), "accepted") or j.boolean(entry, "isPrimary", false) catch false) try out.append(a, .{ .address = address, .name = mime.sanitizeText(name, a) catch |err| if (err == error.OutOfMemory) return err else "", .signature = signature, .isDefault = j.boolean(entry, "isDefault", false) catch false });
     }
     return try out.toOwnedSlice(a);
 }
@@ -2483,7 +2493,7 @@ test "invitation Gmail: named external Teams calendars fetch through read-only t
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream", "text/plain" }) |kind| {
         var oracle: Oracle = .{ .kind = kind };
         const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
         const message = try readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture");
@@ -2499,8 +2509,11 @@ test "invitation Gmail: named external Teams calendars fetch through read-only t
         try std.testing.expectEqualStrings("self@example.test", invite.attendee.slice());
         oracle.declared = 131073;
         const refused = try readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture");
-        try std.testing.expectEqualStrings("CalendarTooLarge", refused.bodyCacheError);
-        try std.testing.expect(refused.metadataPartial);
+        // An oversized calendar is not fetched and offers no invitation;
+        // the message and its file stay available.
+        try std.testing.expectEqualStrings("", refused.bodyCacheError);
+        try std.testing.expect(refused.invitation == null);
+        try std.testing.expectEqual(@as(usize, 1), refused.attachments.len);
         try std.testing.expectEqual(@as(usize, 2), oracle.message_calls);
         try std.testing.expectEqual(@as(usize, 1), oracle.attachment_calls);
     }
@@ -2523,7 +2536,9 @@ test "invitation Gmail: calendar candidates share the cumulative external-body q
     const payload = try j.value(a, .{ .mimeType = "application/octet-stream", .filename = "invite.ics", .body = .{ .size = 256, .attachmentId = "quota-calendar" } });
     var map: std.json.ObjectMap = .empty;
     var budget: ExternalBodiesBudget = .{ .bytes = mime.max_raw_bytes - 255 };
-    try std.testing.expectError(error.DecodedMessageTooLarge, externalBodies(a, transport, "fixture", payload, &map, 0, &budget));
+    // Beyond the shared quota the candidate is skipped, never downloaded.
+    try externalBodies(a, transport, "fixture", payload, &map, 0, &budget);
+    try std.testing.expectEqual(@as(usize, 0), map.count());
     try std.testing.expectEqual(@as(usize, 0), spy.calls);
 }
 
@@ -2886,4 +2901,43 @@ pub fn preflightSender(a: std.mem.Allocator, account: []const u8, transport: Tra
         try b.identifier(draft.threadId);
         if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
     }
+}
+
+test "calendar attachment Gmail: external plain-text uppercase ICS is fetched without downloading the bill" {
+    const Oracle = struct {
+        reads: usize = 0,
+        downloads: usize = 0,
+        const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:payment-http@example.test\r\nDTSTAMP:20261109T071718Z\r\nORGANIZER:mailto:billing@example.test\r\nDTSTART;VALUE=DATE:20261123\r\nDTEND;VALUE=DATE:20261124\r\nSUMMARY:Utility payment due\r\nDESCRIPTION:Payment reference\tEXAMPLE-42\r\nBEGIN:VALARM\r\nTRIGGER:-PT2160M\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/payment-mail?format=full")) {
+                self.reads += 1;
+                // Provider-shaped metadata, independently specified attachment
+                // identity/MIME/name. The PDF must never be fetched for preview.
+                return std.json.parseFromSliceLeaky(j.Value, a,
+                    \\{"id":"payment-mail","threadId":"payment-thread","internalDate":"1794207600000","payload":{"mimeType":"multipart/mixed","filename":"","headers":[{"name":"From","value":"billing@example.test"},{"name":"To","value":"self@example.test"},{"name":"Subject","value":"Fictional utility bill"}],"body":{"size":0},"parts":[{"partId":"0","mimeType":"text/plain","filename":"","headers":[],"body":{"size":14,"data":"QmlsbCBhdHRhY2hlZC4"}},{"partId":"1","mimeType":"text/plain","filename":"PAYMENT.ICS","headers":[{"name":"Content-Type","value":"text/plain"},{"name":"Content-Disposition","value":"attachment; filename=PAYMENT.ICS"}],"body":{"attachmentId":"calendar-source","size":392}},{"partId":"2","mimeType":"application/pdf","filename":"bill.pdf","headers":[],"body":{"attachmentId":"bill-source","size":40000}}]}}
+                , .{});
+            }
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/payment-mail/attachments/calendar-source", url);
+            self.downloads += 1;
+            const buffer = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(calendar.len));
+            return j.value(a, .{ .size = calendar.len, .data = std.base64.url_safe_no_pad.Encoder.encode(buffer, calendar) });
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const message = try readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, .{ .context = &oracle, .requestFn = Oracle.request }, "payment-mail");
+    try std.testing.expectEqual(@as(usize, 1), oracle.reads);
+    try std.testing.expectEqual(@as(usize, 1), oracle.downloads);
+    try std.testing.expectEqualStrings(Oracle.calendar, message.invitation.?);
+    try std.testing.expectEqualStrings("Bill attached.", message.bodyText);
+    try std.testing.expectEqual(@as(usize, 2), message.attachments.len);
+    try std.testing.expectEqualStrings("PAYMENT.ICS", message.attachments[0].filename);
+    var notice: invitation.Invitation = .{};
+    try invitation.parseDisplay(message.invitation.?, "self@example.test", &.{}, &notice);
+    try std.testing.expect(notice.method == .publish and !notice.canRespond());
 }
