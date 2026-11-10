@@ -536,7 +536,7 @@ def edit_dst_review_twice(binary, directory, captures):
         terminal.send(b"C")
         wait_calendar(terminal)
         terminal.send(b"\x07")
-        terminal.until(lambda: "Date YYYY-MM-DD" in terminal.text())
+        terminal.until(lambda: "Go to date" in terminal.text())
         terminal.send(b"\x05" + b"\x7f" * 10 + b"2026-10-24\r")
         wait_calendar(terminal)
         terminal.send(b"/" + title.encode() + b"\r")

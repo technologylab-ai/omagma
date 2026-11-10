@@ -281,8 +281,8 @@ def invitation_review(binary, directory):
         terminal.until(lambda: "Fictional named-calendar" in terminal.text())
         terminal.send(b"I")
         terminal.until(lambda: "Meeting · review reply" in terminal.text() and focused(terminal, "[Esc Cancel]"))
-        require(f"Account: {ACCOUNTS[0]}" in terminal.text()
-                and f"Attendee: {ACCOUNTS[0]}" in terminal.text(),
+        require(f"Account · {ACCOUNTS[0]}" in terminal.text()
+                and f"Attendee · {ACCOUNTS[0]}" in terminal.text(),
                 "RSVP controls appeared without the reviewed account and attendee")
         terminal.send(ENTER)
         terminal.until(lambda: "Meeting · review reply" not in terminal.text())
@@ -298,7 +298,7 @@ def invitation_review(binary, directory):
         terminal.until(lambda: "RSVP not sent" in terminal.text()
                        and "[s Tentative without Calendar]" in terminal.text()
                        and focused(terminal, "[Esc Cancel]"))
-        require("Reason:" in terminal.text(), "blocked Tentative omitted its Calendar reason")
+        require("Reason ·" in terminal.text(), "blocked Tentative omitted its Calendar reason")
         with Client(binary, directory, extra=source.options()) as client:
             require(client.request("cache.stats")["fixtureSends"] == 0
                     and fixture_calendar_writes(client) == 0,

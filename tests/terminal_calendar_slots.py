@@ -90,7 +90,7 @@ def open_week(terminal, day):
 
 
 def selected(terminal, literal):
-    return literal in terminal.screen.lines()[-4]
+    return literal in terminal.screen.lines()[-3]
 
 
 def select_week_event(terminal, title):
@@ -107,13 +107,15 @@ def select_week_event(terminal, title):
 
 def chooser(binary, directory, captures):
     fixture, owned, day = seed(binary, directory)
-    terminal = start(binary, owned, fixture, columns=140, rows=38, no_color=True)
+    # The compact Calendar chrome leaves more Week rows than before; 35 rows
+    # keep the earlier grid height so 11:00 still needs its +N badge.
+    terminal = start(binary, owned, fixture, columns=140, rows=35, no_color=True)
     try:
         open_week(terminal, day)
         # Fresh/date-reloaded passive selection cannot suppress a new start
         # from the saved exact Work Priority source.
         row10 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("10:00"))
-        require("10:30" in terminal.screen.lines()[row10][6:24] and "Spe" in terminal.screen.lines()[row10][6:24],
+        require(":30" in terminal.screen.lines()[row10][6:24] and "Spe" in terminal.screen.lines()[row10][6:24],
                 "passive initial routine hid the preferred new Work start")
         capture(terminal, captures, "week-passive-priority")
         select_week_event(terminal, "Weekly studio block")
@@ -134,7 +136,7 @@ def chooser(binary, directory, captures):
         require(("Also here:" in terminal.text() or "Hidden here:" in terminal.text()) and "[Space Show all 8]" in terminal.text(),
                 "selected event's union count/secondary preview is not discoverable")
         capture(terminal, captures, "week-disclosure-no-color")
-        old_selection = terminal.screen.lines()[-4]
+        old_selection = terminal.screen.lines()[-3]
         # An exact-hour badge omits Next-hour call; the keyboard union includes it.
         row = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("10:00"))
         badge_col = terminal.screen.lines()[row].find("+", 6, 24)
@@ -146,7 +148,7 @@ def chooser(binary, directory, captures):
         capture(terminal, captures, "week-exact-hour-chooser")
         terminal.send(b"\x1b")
         terminal.until(lambda: "Calendar · Week" in terminal.text())
-        require(terminal.screen.lines()[-4] == old_selection, "Escape changed the selected event/context")
+        require(terminal.screen.lines()[-3] == old_selection, "Escape changed the selected event/context")
         # Reach Show all with Tab and activate its actual button. Shift+Tab must
         # invert the cycle, and a successful choice returns focus to the event.
         button = point(terminal, "[Space Show all 8]")
@@ -195,7 +197,7 @@ def chooser(binary, directory, captures):
         terminal.send(b"q")
         terminal.until(lambda: "Calendar · Week" in terminal.text())
         terminal.resize(140, 38)
-        terminal.until(lambda: "Sun" in terminal.text())
+        terminal.until(lambda: "│Sun " in terminal.text())
         # All-day disclosure is separate from timed rows and uses civil ends.
         badge = point(terminal, "+1 all-day")
         click(terminal, *badge)

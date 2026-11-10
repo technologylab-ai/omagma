@@ -18,6 +18,7 @@ test {
     std.testing.refAllDecls(@import("terminal/calendar_guest_picker.zig"));
     std.testing.refAllDecls(@import("terminal/calendar_slot.zig"));
     std.testing.refAllDecls(@import("terminal/calendar_week_rows.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_text.zig"));
     std.testing.refAllDecls(@import("terminal/meet_notes_provider.zig"));
     std.testing.refAllDecls(@import("terminal/meet_notes_types.zig"));
     std.testing.refAllDecls(@import("terminal/meet_notes_store.zig"));

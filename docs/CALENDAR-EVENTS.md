@@ -12,7 +12,11 @@ the editor. The destination is explicit even when the main view combines several
 calendars or accounts.
 
 Enter the title, dates, time zone and optional place or notes. Timed events show
-start and end times. For an all-day event, the editor asks for the **last included
+start and end times. Times may be typed as `1430`, `2pm` or `14:30`, dates as
+`tomorrow`, `fri`, `+2d`, `12-24` or `2026-12-24`, and End time as `+45m` or
+`+1h30m` after Start; leaving the field shows the exact value that will be
+reviewed. `n` starts on the selected event's day, and `c` starts a new event
+copied from the selected one (title, place and times, never its identity). For an all-day event, the editor asks for the **last included
 date** and converts it to Google's exclusive end date. If a clock change repeats
 a local time, choose its first or second occurrence; the choices show the real
 UTC offsets. A skipped time must be corrected before review.
@@ -33,7 +37,9 @@ to notify them; adding guests notifies everyone. Existing guest responses remain
 intact. Press `Ctrl+S` to review the exact destination, dates, guests and email
 consequence, then `y` to confirm. The confirmation button spells out **Create &
 email … guests**, **Save & email … guests**, or the explicit no-email choice.
-Reviewing alone does not change Calendar or send invitations. `Esc` or **Cancel** closes an untouched form even while a read is pending. Modified forms ask before discarding; choose **Keep editing** or explicitly **Discard**. An event save already in progress finishes before you can leave.
+Reviewing alone does not change Calendar or send invitations. A review without
+guests does not mention guest emails. After the save, Back returns to the
+Calendar view with the event selected and **Saved · title · time** in the status. `Esc` or **Cancel** closes an untouched form even while a read is pending. Modified forms ask before discarding; choose **Keep editing** or explicitly **Discard**. An event save already in progress finishes before you can leave.
 
 Use `O` to open Calendar in the selected account's configured Chrome profile, or
 `b` to open the selected event there. These browser actions are separate from

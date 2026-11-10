@@ -392,7 +392,7 @@ def calendar_view_preserved(binary, directory):
                 "background reminder replaced the Calendar period or visible agenda")
         require(ACCOUNTS[1] in terminal.text(), "background reminder lost the other account")
         terminal.send(b"/")
-        terminal.until(lambda: settled(terminal) and "Loaded events /" in terminal.text())
+        terminal.until(lambda: settled(terminal) and "Find in loaded events" in terminal.text())
         terminal.send(b"M calendar literal")
         terminal.until(lambda: settled(terminal) and "M calendar literal" in terminal.text())
         require(notification not in terminal.text() and "keys here" not in terminal.text(),

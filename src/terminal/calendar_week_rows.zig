@@ -81,11 +81,15 @@ test "calendar week rows: optional bands preserve all-day capacity and exactly f
     }
 }
 
+/// Spare rows go to the working day (08–18) first, then outward.
+pub const priority = [hours]u8{ 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 7, 19, 6, 20, 5, 21, 4, 22, 3, 23, 2, 1, 0 };
+
 /// `needs[h]` is the largest candidate count in hour h across the visible days.
 /// Compact grids retain one row per visible hour. Once all 24 hours fit, spend
-/// spare rows on event titles before adding cosmetic spacing to quiet hours.
-/// Each crowded hour receives a second line before any receives a third.
-/// A larger viewport cannot hide an alternative that already fit at less height.
+/// spare rows on event titles before adding cosmetic spacing to quiet hours,
+/// in `priority` order. Each crowded hour receives a second line before any
+/// receives a third. A larger viewport cannot hide an alternative that
+/// already fit at less height.
 pub fn allocate(budget: usize, needs: [hours]usize) Plan {
     var result: Plan = .{ .count = @min(hours, budget) };
     if (result.count == 0) return result;
@@ -93,7 +97,7 @@ pub fn allocate(budget: usize, needs: [hours]usize) Plan {
     var remaining = budget - result.count;
     while (result.count == hours and remaining > 0) {
         var advanced = false;
-        for (0..hours) |hour| {
+        for (priority) |hour| {
             const wanted = @max(1, @min(max_lines, needs[hour]));
             if (result.lines[hour] >= wanted) continue;
             result.lines[hour] += 1;
@@ -107,7 +111,7 @@ pub fn allocate(budget: usize, needs: [hours]usize) Plan {
     // This fixed sequence is also monotonic when the viewport grows.
     for (2..max_lines + 1) |spacing| {
         if (result.count != hours or remaining == 0) break;
-        for (0..hours) |hour| {
+        for (priority) |hour| {
             if (result.lines[hour] >= spacing) continue;
             result.lines[hour] += 1;
             remaining -= 1;
@@ -147,7 +151,10 @@ test "calendar week rows: event titles take spare space before cosmetic spacing"
     needs[10] = 3;
     needs[11] = 3;
     const plan = allocate(50, needs);
-    try std.testing.expectEqual(@as(u8, 2), plan.lines[0]);
+    // Spacing reaches the working day first; midnight is the last to grow.
+    try std.testing.expectEqual(@as(u8, 2), plan.lines[8]);
+    try std.testing.expectEqual(@as(u8, 2), plan.lines[23]);
+    try std.testing.expectEqual(@as(u8, 1), plan.lines[0]);
     try std.testing.expectEqual(@as(u8, 3), plan.lines[9]);
     try std.testing.expectEqual(@as(u8, 3), plan.lines[10]);
     try std.testing.expectEqual(@as(u8, 3), plan.lines[11]);
@@ -167,6 +174,21 @@ test "calendar week rows: increasing height never hides previously visible alter
     }
     try std.testing.expectEqual(@as(u8, 4), allocate(47, needs).lines[9]);
     try std.testing.expectEqual(@as(u8, 4), allocate(48, needs).lines[9]);
+}
+
+test "calendar week rows: spare spacing fills 08-18 before early and late hours" {
+    const needs: [hours]usize = @splat(1);
+    const plan = allocate(hours + 11, needs);
+    for (0..hours) |hour| try std.testing.expectEqual(@as(u8, if (hour >= 8 and hour <= 18) 2 else 1), plan.lines[hour]);
+    const wider = allocate(hours + 13, needs);
+    try std.testing.expectEqual(@as(u8, 2), wider.lines[7]);
+    try std.testing.expectEqual(@as(u8, 2), wider.lines[19]);
+    try std.testing.expectEqual(@as(u8, 1), wider.lines[6]);
+    var seen: [hours]bool = @splat(false);
+    for (priority) |hour| {
+        try std.testing.expect(!seen[hour]);
+        seen[hour] = true;
+    }
 }
 
 test "calendar week rows: compact and huge viewports keep bounded disjoint hour geometry" {
