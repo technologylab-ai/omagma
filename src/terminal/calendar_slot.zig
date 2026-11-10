@@ -1,5 +1,7 @@
-//! Stable native week-cell disclosure. A cell groups events occupying the same
-//! displayed hour, not necessarily events with intersecting actual intervals.
+//! Stable native Day/Week disclosure. A bucket groups events occupying the
+//! same displayed hour (or the all-day band), not necessarily events with
+//! intersecting actual intervals. Timed events lasting a day or more belong to
+//! the band, exactly as the grid draws them (calendar_grid.inBand).
 //! No provider mutations, background rotation or inferred importance live here.
 const std = @import("std");
 const t = @import("calendar_types.zig");
@@ -7,6 +9,7 @@ const j = @import("json.zig");
 const ui = @import("calendar_ui.zig");
 const sources = @import("calendar_sources.zig");
 const tz = @import("timezone.zig");
+const grid = @import("calendar_grid.zig");
 const Value = j.Value;
 
 pub const Viewport = struct {
@@ -110,7 +113,7 @@ const Mask = struct {
                 } else return error.CalendarSelectionUnavailable;
                 const start = try point(j.get(anchor, "start") orelse return error.InvalidCalendarTime);
                 const end = try point(j.get(anchor, "end") orelse return error.InvalidCalendarTime);
-                var mask: Mask = .{ .first_day = selected.viewport.first_day, .days = selected.viewport.days, .all_day = start.kind == .date };
+                var mask: Mask = .{ .first_day = selected.viewport.first_day, .days = selected.viewport.days, .all_day = grid.inBand(start, end) };
                 for (0..mask.days) |index| {
                     const day = mask.first_day + @as(i64, @intCast(index));
                     if (mask.all_day) {
@@ -129,7 +132,7 @@ const Mask = struct {
     fn includes(self: *const Mask, event: Value, zone: *const tz.Zone) !bool {
         const start = try point(j.get(event, "start") orelse return error.InvalidCalendarTime);
         const end = try point(j.get(event, "end") orelse return error.InvalidCalendarTime);
-        if (self.all_day != (start.kind == .date)) return false;
+        if (self.all_day != grid.inBand(start, end)) return false;
         for (0..self.days) |index| {
             const day = self.first_day + @as(i64, @intCast(index));
             if (self.all_day) {
@@ -149,11 +152,12 @@ pub fn related(a: std.mem.Allocator, events: []const Projection, selection: usiz
     try viewport.validate();
     if (selection >= events.len) return &.{};
     const anchor = events[selection];
+    const anchor_band = grid.inBand(anchor.identity.start, anchor.end);
     var hours: [7]u32 = @splat(0);
     var dates: u8 = 0;
     for (0..viewport.days) |column| {
         const day = viewport.first_day + @as(i64, @intCast(column));
-        if (anchor.identity.start.kind == .date) {
+        if (anchor_band) {
             if (try ui.touchesDay(anchor.identity.start, anchor.end, day, zone)) dates |= @as(u8, 1) << @intCast(column);
         } else if (try ui.coverage(anchor.identity.start, anchor.end, day, zone)) |coverage| {
             for (0..viewport.hours) |slot| {
@@ -165,11 +169,11 @@ pub fn related(a: std.mem.Allocator, events: []const Projection, selection: usiz
     var output: std.ArrayList(usize) = .empty;
     errdefer output.deinit(a);
     for (events, 0..) |event, index| {
-        if (event.identity.start.kind != anchor.identity.start.kind) continue;
+        if (grid.inBand(event.identity.start, event.end) != anchor_band) continue;
         for (0..viewport.days) |column| {
             const day = viewport.first_day + @as(i64, @intCast(column));
             var matches = false;
-            if (event.identity.start.kind == .date) {
+            if (anchor_band) {
                 matches = dates & (@as(u8, 1) << @intCast(column)) != 0 and try ui.touchesDay(event.identity.start, event.end, day, zone);
             } else if (hours[column] != 0) {
                 const coverage = (try ui.coverage(event.identity.start, event.end, day, zone)) orelse continue;
@@ -243,75 +247,34 @@ pub fn outranks(candidate: Rank, current: Rank) bool {
     if (candidate.preferred != current.preferred) return candidate.preferred;
     return identityOrder(candidate.identity, current.identity) == .lt;
 }
-/// Only four actual title lines can be displayed in a cell. Keep the top four
-/// default candidates and the selected candidate separately, then promote a
-/// hidden selection into the last actual title line without moving line one.
-pub const Cell = struct {
-    count: usize = 0,
-    top: [4]?usize = @splat(null),
-    ranks: [4]?Rank = @splat(null),
-    selected: ?usize = null,
-    pub fn add(self: *Cell, index: usize, rank: Rank, selected: bool) void {
-        self.count += 1;
-        if (selected) self.selected = index;
-        var at: usize = 0;
-        while (at < self.top.len) : (at += 1) {
-            if (self.ranks[at] == null or outranks(rank, self.ranks[at].?)) break;
-        }
-        if (at == self.top.len) return;
-        var move = self.top.len - 1;
-        while (move > at) : (move -= 1) {
-            self.top[move] = self.top[move - 1];
-            self.ranks[move] = self.ranks[move - 1];
-        }
-        self.top[at] = index;
-        self.ranks[at] = rank;
-    }
-    pub const Shown = struct {
-        indices: [4]usize = @splat(0),
-        count: usize = 0,
-        hidden: usize = 0,
-        pub fn contains(self: Shown, index: usize) bool {
-            return std.mem.indexOfScalar(usize, self.indices[0..self.count], index) != null;
-        }
-    };
-    pub fn shown(self: Cell, capacity: usize) Shown {
-        var result: Shown = .{ .count = @min(self.count, @min(capacity, 4)) };
-        for (0..result.count) |index| result.indices[index] = self.top[index].?;
-        if (self.selected) |selected| if (result.count > 0 and !result.contains(selected)) {
-            result.indices[result.count - 1] = selected;
-        };
-        result.hidden = self.count - result.count;
-        return result;
-    }
-};
 pub fn startHour(start: t.time.Point, zone: *const tz.Zone) !u8 {
     if (start.kind != .instant) return error.InvalidCalendarTime;
     const seconds = @divFloor(start.value, 1000);
     return @intCast(@divFloor(@mod(seconds + try zone.offsetSeconds(seconds), 86400), 3600));
 }
-pub const Reveal = struct { index: usize, bucket: ?Bucket = null };
 fn inViewport(bucket: Bucket, viewport: Viewport) bool {
     return bucket.day >= viewport.first_day and bucket.day < viewport.first_day + @as(i64, @intCast(viewport.days)) and (if (bucket.hour) |hour| hour >= viewport.first_hour and hour < @as(usize, viewport.first_hour) + viewport.hours else true);
 }
 fn touchesBucket(event: Projection, bucket: Bucket, zone: *const tz.Zone) !bool {
+    const band = grid.inBand(event.identity.start, event.end);
     if (bucket.hour) |hour| {
-        if (event.identity.start.kind != .instant) return false;
+        if (band or event.identity.start.kind != .instant) return false;
         const coverage = (try ui.coverage(event.identity.start, event.end, bucket.day, zone)) orelse return false;
         return coverage.first < (@as(usize, hour) + 1) * 60 and coverage.end > @as(usize, hour) * 60;
     }
-    return event.identity.start.kind == .date and try ui.touchesDay(event.identity.start, event.end, bucket.day, zone);
+    return band and try ui.touchesDay(event.identity.start, event.end, bucket.day, zone);
 }
 /// A reveal belongs to one civil bucket, never every hour of a long routine.
 /// Clicked buckets survive refresh/resize; if clipped, use the real start or
 /// first currently visible occupied bucket without changing selected identity.
 pub fn revealBucket(event: Projection, viewport: Viewport, zone: *const tz.Zone, requested: ?Bucket) !?Bucket {
     if (requested) |bucket| if (inViewport(bucket, viewport) and try touchesBucket(event, bucket, zone)) return bucket;
-    const actual: Bucket = .{ .day = try ui.pointDay(event.identity.start, zone), .hour = if (event.identity.start.kind == .instant) try startHour(event.identity.start, zone) else null };
+    const band = grid.inBand(event.identity.start, event.end);
+    const actual: Bucket = .{ .day = try ui.pointDay(event.identity.start, zone), .hour = if (band) null else try startHour(event.identity.start, zone) };
     if (inViewport(actual, viewport) and try touchesBucket(event, actual, zone)) return actual;
     for (0..viewport.days) |column| {
         const day = viewport.first_day + @as(i64, @intCast(column));
-        if (event.identity.start.kind == .date) {
+        if (band) {
             const bucket: Bucket = .{ .day = day };
             if (try touchesBucket(event, bucket, zone)) return bucket;
         } else for (0..viewport.hours) |slot| {
@@ -321,46 +284,6 @@ pub fn revealBucket(event: Projection, viewport: Viewport, zone: *const tz.Zone,
     }
     return null;
 }
-pub const Grid = struct {
-    all_day: [7]Cell = @splat(.{}),
-    hours: [7][24]Cell = @splat(@splat(.{})),
-    earlier: [7]usize = @splat(0),
-    later: [7]usize = @splat(0),
-    needs: [24]usize = @splat(0),
-    pub fn init(events: []const Projection, viewport: Viewport, zone: *const tz.Zone, selection: ?Reveal, preferences: *const sources.Selection) !Grid {
-        try viewport.validate();
-        var result: Grid = .{};
-        const reveal = if (selection) |value| (if (value.index < events.len) try revealBucket(events[value.index], viewport, zone, value.bucket) else null) else null;
-        for (events, 0..) |event, index| {
-            const start = event.identity.start;
-            const first_day = try ui.pointDay(start, zone);
-            const actual_start_hour = if (start.kind == .instant) try startHour(start, zone) else 0;
-            for (0..viewport.days) |column| {
-                const day = viewport.first_day + @as(i64, @intCast(column));
-                var rank: Rank = .{ .identity = event.identity, .declined = std.mem.eql(u8, j.text(event.event, "response"), "declined"), .preferred = preferences.isPreferred(event.identity.target) };
-                if (start.kind == .date) {
-                    if (!try ui.touchesDay(start, event.end, day, zone)) continue;
-                    rank.starts_here = first_day == day;
-                    result.all_day[column].add(index, rank, if (selection) |value| value.index == index and reveal != null and reveal.?.eql(.{ .day = day }) else false);
-                    continue;
-                }
-                const coverage = (try ui.coverage(start, event.end, day, zone)) orelse continue;
-                const first_hour = coverage.first / 60;
-                const end_hour = (coverage.end + 59) / 60;
-                if (first_hour < viewport.first_hour) result.earlier[column] += 1;
-                if (end_hour > @as(usize, viewport.first_hour) + viewport.hours) result.later[column] += 1;
-                for (0..viewport.hours) |slot| {
-                    const hour = @as(usize, viewport.first_hour) + slot;
-                    if (hour < first_hour or hour >= end_hour) continue;
-                    rank.starts_here = first_day == day and hour == actual_start_hour;
-                    result.hours[column][slot].add(index, rank, if (selection) |value| value.index == index and reveal != null and reveal.?.eql(.{ .day = day, .hour = @intCast(hour) }) else false);
-                    result.needs[slot] = @max(result.needs[slot], result.hours[column][slot].count);
-                }
-            }
-        }
-        return result;
-    }
-};
 /// Chronological chooser ordering never follows preferred-source/grid ranking.
 fn chronological(_: void, first: Value, second: Value) bool {
     const a = Identity.init(first) catch return false;
@@ -551,30 +474,17 @@ test "calendar slots: repeated DST hour keeps both exact instants and civil all-
     try std.testing.expectError(error.InvalidCalendarViewport, (Viewport{ .first_day = 0, .days = 7, .first_hour = 23, .hours = 2 }).validate());
 }
 
-test "calendar slots: selected promotion preserves ranked top line and replaces last actual line only" {
-    const target: t.Target = .{ .account = "personal@example.com", .calendar_id = "primary" };
-    var cell: Cell = .{};
-    for (0..5) |index| {
-        cell.add(index, .{ .identity = .{ .target = target, .id = "fixture", .start = .{ .kind = .instant, .value = @intCast(index) } } }, index == 4);
+fn gridItems(a: std.mem.Allocator, values: []const Projection, day: i64, zone: *const tz.Zone) ![]const grid.Item {
+    var result: std.ArrayList(grid.Item) = .empty;
+    for (values) |value| {
+        if (grid.inBand(value.identity.start, value.end)) continue;
+        const span = (try ui.coverage(value.identity.start, value.end, day, zone)) orelse continue;
+        try result.append(a, .{ .first = span.first, .end = span.end });
     }
-    const one = cell.shown(1);
-    try std.testing.expectEqualSlices(usize, &.{4}, one.indices[0..one.count]);
-    try std.testing.expectEqual(@as(usize, 4), one.hidden);
-    const two = cell.shown(2);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 4 }, two.indices[0..two.count]);
-    try std.testing.expectEqual(@as(usize, 3), two.hidden);
-    const four = cell.shown(4);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 4 }, four.indices[0..four.count]);
-    cell.selected = 1;
-    const visible = cell.shown(4);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, visible.indices[0..visible.count]);
-    cell.count = 2;
-    cell.selected = 1;
-    const filler = cell.shown(4);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, filler.indices[0..filler.count]);
+    return result.items;
 }
 
-test "calendar slots: grid projects once shared needs ignore selection and priority and compact hours stay absolute" {
+test "calendar slots: fixture day lays every overlapping event out side by side and keeps the visible-row union" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -582,25 +492,22 @@ test "calendar slots: grid projects once shared needs ignore selection and prior
     const events = j.get(data, "events").?.array.items;
     const values = try project(a, events, "");
     const zone: tz.Zone = .{};
-    const viewport: Viewport = .{ .first_day = try tz.dateDay(j.text(data, "day")), .days = 7, .first_hour = 10, .hours = 3 };
-    var preferences: sources.Selection = .{};
-    const initial = try Grid.init(values, viewport, &zone, null, &preferences);
-    try std.testing.expectEqual(@as(usize, 3), initial.needs[0]);
-    try std.testing.expectEqual(@as(usize, 2), initial.needs[1]);
-    try std.testing.expectEqual(@as(usize, 0), initial.needs[2]);
-    try std.testing.expectEqual(@as(usize, 2), initial.hours[0][0].shown(1).indices[0]); // 10:05 beats 09:00 continuation.
-    try preferences.setPreferred((try Identity.init(events[1])).target);
-    const preferred = try Grid.init(values, viewport, &zone, null, &preferences);
-    try std.testing.expectEqual(@as(usize, 1), preferred.hours[0][0].shown(1).indices[0]); // Both start in hour; explicit source wins.
-    const selected = try Grid.init(values, viewport, &zone, .{ .index = 0, .bucket = .{ .day = viewport.first_day, .hour = 10 } }, &preferences);
-    try std.testing.expectEqualSlices(usize, &initial.needs, &selected.needs);
-    const shown = selected.hours[0][0].shown(2);
-    try std.testing.expectEqualSlices(usize, &.{ 1, 0 }, shown.indices[0..shown.count]);
+    const day = try tz.dateDay(j.text(data, "day"));
+    // Routine 09:00–12:00, check-in 10:05–10:20, visit 10:30–11:00,
+    // next-hour call 11:00–11:30 and the 23:30 overnight start.
+    const placements = try grid.place(a, try gridItems(a, values, day, &zone), 2, 3, null);
+    try std.testing.expectEqual(@as(usize, 5), placements.len);
+    for (placements) |placement| try std.testing.expect(!placement.hidden);
+    try std.testing.expectEqual(@as(u8, 0), placements[0].lane);
+    for (placements[1..4]) |placement| try std.testing.expectEqual(@as(u8, 1), placement.lane);
+    try std.testing.expectEqual(@as(u8, 2), placements[0].lanes);
+    try std.testing.expectEqual(@as(u8, 1), placements[4].lanes);
+    const viewport: Viewport = .{ .first_day = day, .days = 7, .first_hour = 10, .hours = 3 };
     const related_indices = try related(a, values, 0, viewport, &zone);
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, related_indices);
 }
 
-test "calendar slots: two-hour rollback ranks actual start separately from occupied civil coverage" {
+test "calendar slots: two-hour rollback keeps the actual start bucket and its whole civil coverage" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -609,16 +516,18 @@ test "calendar slots: two-hour rollback ranks actual start separately from occup
     const end = try t.time.rfc3339("2026-10-25T01:15:00Z");
     const values = try j.value(a, .{.{ .target = .{ .account = "personal@example.com", .calendar_id = "primary" }, .id = "rollback", .start = .{ .kind = "instant", .value = start }, .end = .{ .kind = "instant", .value = end } }});
     const projected = try project(a, values.array.items, "");
-    const viewport: Viewport = .{ .first_day = try tz.dateDay("2026-10-25"), .days = 1, .first_hour = 1, .hours = 2 };
-    const preferences: sources.Selection = .{};
-    const grid = try Grid.init(projected, viewport, &zone, null, &preferences);
+    const day = try tz.dateDay("2026-10-25");
     try std.testing.expectEqual(@as(u8, 2), try startHour(projected[0].identity.start, &zone));
-    try std.testing.expectEqual(@as(usize, 1), grid.hours[0][0].count);
-    try std.testing.expect(!grid.hours[0][0].ranks[0].?.starts_here);
-    try std.testing.expect(grid.hours[0][1].ranks[0].?.starts_here);
+    // 02:45 DST until 01:15 standard time: civil rows 01:14 to 02:46.
+    const placement = (try grid.place(a, try gridItems(a, projected, day, &zone), 1, 1, null))[0];
+    try std.testing.expectEqual(@as(usize, 1), placement.top);
+    try std.testing.expectEqual(@as(usize, 3), placement.bottom);
+    const viewport: Viewport = .{ .first_day = day, .days = 1, .first_hour = 0, .hours = 24 };
+    try std.testing.expect((try revealBucket(projected[0], viewport, &zone, null)).?.eql(.{ .day = day, .hour = 2 }));
+    try std.testing.expect((try revealBucket(projected[0], viewport, &zone, .{ .day = day, .hour = 1 })).?.eql(.{ .day = day, .hour = 1 }));
 }
 
-test "calendar slots: zero-duration event exactly on the hour is present in grid bucket and selected union" {
+test "calendar slots: zero-duration event exactly on the hour has a block, a bucket and a selected union" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -626,14 +535,40 @@ test "calendar slots: zero-duration event exactly on the hour is present in grid
     const projected = try project(a, values.array.items, "");
     const zone: tz.Zone = .{};
     const viewport: Viewport = .{ .first_day = 0, .days = 1, .first_hour = 10, .hours = 1 };
-    const preferences: sources.Selection = .{};
-    const grid = try Grid.init(projected, viewport, &zone, null, &preferences);
-    try std.testing.expectEqual(@as(usize, 1), grid.hours[0][0].count);
+    const placement = (try grid.place(a, try gridItems(a, projected, 0, &zone), 2, 2, null))[0];
+    try std.testing.expect(!placement.hidden and placement.top == 20 and placement.bottom == 21);
     var snapshot = try Snapshot.init(std.testing.allocator, values.array.items, .{ .bucket = .{ .day = 0, .hour = 10 } }, "", &zone, null);
     defer snapshot.deinit();
     try std.testing.expectEqual(@as(usize, 1), snapshot.events.len);
     const union_indices = try related(a, projected, 0, viewport, &zone);
     try std.testing.expectEqualSlices(usize, &.{0}, union_indices);
+}
+
+test "calendar slots: day-long timed events are band entries for buckets, reveal and unions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const day: i64 = 20000;
+    const base = day * 86400000;
+    const target = .{ .account = "personal@example.com", .calendar_id = "primary" };
+    const values = try j.value(a, .{
+        .{ .target = target, .id = "on-call", .start = .{ .kind = "instant", .value = base - 6 * 3600000 }, .end = .{ .kind = "instant", .value = base + 3 * 86400000 } },
+        .{ .target = target, .id = "holiday", .start = .{ .kind = "date", .value = day + 1 }, .end = .{ .kind = "date", .value = day + 2 } },
+        .{ .target = target, .id = "meeting", .start = .{ .kind = "instant", .value = base + 10 * 3600000 }, .end = .{ .kind = "instant", .value = base + 11 * 3600000 } },
+    });
+    const projected = try project(a, values.array.items, "");
+    const zone: tz.Zone = .{};
+    var all_day = try Snapshot.init(std.testing.allocator, values.array.items, .{ .bucket = .{ .day = day + 1 } }, "", &zone, null);
+    defer all_day.deinit();
+    // The chooser lists civil dates before timed starts.
+    try expectIds(all_day.events, &.{ "holiday", "on-call" });
+    var hour = try Snapshot.init(std.testing.allocator, values.array.items, .{ .bucket = .{ .day = day, .hour = 10 } }, "", &zone, null);
+    defer hour.deinit();
+    try expectIds(hour.events, &.{"meeting"});
+    const viewport: Viewport = .{ .first_day = day, .days = 7, .first_hour = 8, .hours = 10 };
+    try std.testing.expect((try revealBucket(projected[0], viewport, &zone, null)).?.eql(.{ .day = day }));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, try related(a, projected, 0, viewport, &zone));
+    try std.testing.expectEqualSlices(usize, &.{2}, try related(a, projected, 2, viewport, &zone));
 }
 
 test "calendar slots: hidden preview favors nondeclined then preferred and counts distinct undisplayed alternatives" {
