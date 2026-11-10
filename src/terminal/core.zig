@@ -250,6 +250,15 @@ pub const Session = struct {
         if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
         if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
         if ((id != .null and id != .string and id != .integer) or (id == .string and id.string.len > 256)) return failure(out_allocator, .null, account, "InvalidRequest", "id must be a bounded string or integer");
+        // Fail closed on a caller's stated intent not to act. No JSONL command
+        // implements a dry run; silently ignoring the flag would send, queue
+        // or change real mail and events that the caller asked only to plan.
+        for ([_]Value{ req, j.get(req, "draft") orelse .null, j.get(req, "event") orelse .null }) |scope| {
+            if (scope != .object) continue;
+            for ([_][]const u8{ "dryRun", "dry_run", "dry-run", "dryrun", "simulate", "validateOnly", "noSend" }) |key| {
+                if (scope.object.get(key) != null) return failure(out_allocator, id, account, "DryRunUnsupported", "Nothing was done: JSONL commands have no dry run. Use draft.preview, draft.measure or draft.delivery-plan, or the one-shot --dry-run flag");
+            }
+        }
         // A plaintext CLI/TUI may predate explicit vault activation. Check
         // its next operation too, before any source/cache/provider access.
         // Malformed or unsafe markers fail closed with correlated errors.
