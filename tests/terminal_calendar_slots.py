@@ -18,7 +18,7 @@ import traceback
 
 from build_info import read_build_info
 from terminal_calendar import Invitations, provider_state
-from terminal_calendar_tui import capture, hour_gutter, start, wait_calendar
+from terminal_calendar_tui import capture, cell_time, hour_gutter, start, wait_calendar
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_mouse import click, point
 
@@ -107,16 +107,19 @@ def select_week_event(terminal, title):
 
 def chooser(binary, directory, captures):
     fixture, owned, day = seed(binary, directory)
-    # The compact Calendar chrome leaves more Week rows than before; 35 rows
-    # keep the earlier grid height so 11:00 still needs its +N badge.
+    # The compact Calendar chrome leaves more Week rows than before: at 38
+    # rows 11:00 lists both of its events and needs no +N badge, so 35 rows
+    # keep the earlier grid height whose badge this chooser path clicks.
     terminal = start(binary, owned, fixture, columns=140, rows=35, no_color=True)
     try:
         open_week(terminal, day)
         # Fresh/date-reloaded passive selection cannot suppress a new start
         # from the saved exact Work Priority source.
         row10 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("10:00"))
-        require(":30" in terminal.screen.lines()[row10][6:24] and "Spe" in terminal.screen.lines()[row10][6:24],
-                "passive initial routine hid the preferred new Work start")
+        # The cell keeps the minute; with its row's gutter hour the full start
+        # time (10:30) is derivable from what is on screen.
+        require(cell_time(terminal.screen.lines()[row10], 6, 24) == "10:30" and "Spe" in terminal.screen.lines()[row10][6:24],
+                "passive initial routine hid the preferred new Work start or its 10:30 start time")
         capture(terminal, captures, "week-passive-priority")
         select_week_event(terminal, "Weekly studio block")
         # Choosing the routine from11:00 pins only that bucket. The10:30 Work

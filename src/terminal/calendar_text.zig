@@ -137,6 +137,9 @@ pub fn errorText(code: []const u8) ?[]const u8 {
         .{ "CacheMiss", "Not saved for offline use · connect to load this range" },
         .{ "CalendarTimezoneRequired", "The invitation has no usable time zone" },
         .{ "FloatingTimeRequiresReview", "The invitation has no time zone (floating time)" },
+        .{ "FloatingTimezoneRequired", "The invitation has no time zone (floating time)" },
+        .{ "CalendarTimezoneMismatch", "The invitation names a different time zone · choose how to read it" },
+        .{ "InvalidTimezoneName", "The invitation names a time zone Omagma can't use" },
         .{ "EmbeddedTimezoneUnresolved", "The invitation's own time-zone rules are not recognised" },
         .{ "AmbiguousLocalTime", "The invitation's time occurs twice on this day (DST)" },
         .{ "NonexistentLocalTime", "The invitation's time is skipped by daylight saving" },
@@ -151,15 +154,43 @@ pub fn errorText(code: []const u8) ?[]const u8 {
     for (labels) |label| if (std.mem.eql(u8, code, label[0])) return label[1];
     return null;
 }
+/// Invitation time-zone problems in words. Zone loading reports file-system
+/// names (FileNotFound…), which mean "no such zone here" in this context only.
+pub fn zoneErrorText(code: []const u8) ?[]const u8 {
+    const Label = struct { []const u8, []const u8 };
+    const labels = [_]Label{
+        .{ "CalendarTimezoneMismatch", "The invitation names a different zone, and reading it in the chosen zone was not confirmed" },
+        .{ "CalendarTimezoneRequired", "The invitation has no usable time zone" },
+        .{ "FloatingTimezoneRequired", "The invitation has no time zone (floating time)" },
+        .{ "FloatingTimeRequiresReview", "The invitation has no time zone (floating time)" },
+        .{ "EmbeddedTimezoneUnresolved", "The invitation's own time-zone rules don't match a zone Omagma knows" },
+        .{ "InvalidTimezoneName", "The invitation names a time zone Omagma can't use" },
+        .{ "FileNotFound", "This computer has no time zone by that name" },
+        .{ "NotDir", "This computer has no time zone by that name" },
+        .{ "InvalidTimezoneFile", "This computer's data for that time zone is unreadable" },
+        .{ "TimezoneUnavailable", "This computer's data for that time zone is unavailable" },
+        .{ "AmbiguousLocalTime", "The time occurs twice on that day in this zone (daylight saving)" },
+        .{ "NonexistentLocalTime", "The time is skipped by daylight saving in this zone" },
+        .{ "InvalidCalendarTime", "The invitation's date or time is unreadable" },
+    };
+    for (labels) |label| if (std.mem.eql(u8, code, label[0])) return label[1];
+    return null;
+}
 /// Network-class failures: offline, not a permission problem.
 pub fn offline(code: []const u8) bool {
     const text = errorText(code) orelse return false;
     return std.mem.eql(u8, text, "Connection temporarily unavailable") or std.mem.eql(u8, code, "Timeout") or std.mem.eql(u8, code, "DeadlineExceeded") or std.mem.eql(u8, code, "CalendarUnavailable");
 }
 
-/// Ctrl+G accepts YYYY-MM-DD, MM-DD (this year), today/tomorrow/yesterday,
-/// weekday names (the next such day, today included), and +Nd/-Nw offsets.
+/// Ctrl+G accepts YYYY-MM-DD, MM-DD (the next such date: a date already past
+/// this year means next year), today/tomorrow/yesterday, weekday names (the
+/// next such day; today's own name means today), and +Nd/-Nw offsets.
 pub fn jumpDate(raw_in: []const u8, today: i64) !i64 {
+    return jumpDateFrom(raw_in, today, today);
+}
+/// As jumpDate, but +N/-N offsets count from `base` (an End date counts
+/// from the Start date). Names and dates still relate to today.
+pub fn jumpDateFrom(raw_in: []const u8, today: i64, base: i64) !i64 {
     const raw = std.mem.trim(u8, raw_in, " \t");
     if (raw.len == 0) return error.InvalidCalendarDate;
     var lower_buffer: [16]u8 = undefined;
@@ -176,7 +207,7 @@ pub fn jumpDate(raw_in: []const u8, today: i64) !i64 {
         const count = std.fmt.parseInt(i64, lower[1..end], 10) catch return error.InvalidCalendarDate;
         const unit = lower[end..];
         const days: i64 = if (unit.len == 0 or std.mem.eql(u8, unit, "d")) count else if (std.mem.eql(u8, unit, "w")) count * 7 else return error.InvalidCalendarDate;
-        return if (negative) today - days else today + days;
+        return if (negative) base - days else base + days;
     }
     if (lower.len >= 2) for (full_weekdays, 0..) |name, index| {
         if (lower.len <= name.len and std.mem.startsWith(u8, name, lower) and (lower.len >= 3 or index != 5 and index != 6 and index != 1 and index != 3)) {
@@ -188,9 +219,22 @@ pub fn jumpDate(raw_in: []const u8, today: i64) !i64 {
         const year = civil(today).year;
         var buffer: [10]u8 = undefined;
         const full = std.fmt.bufPrint(&buffer, "{d:0>4}-{s}", .{ @as(u16, @intCast(@max(0, @min(year, 9999)))), raw }) catch return error.InvalidCalendarDate;
-        return tz.dateDay(full) catch error.InvalidCalendarDate;
+        const day = tz.dateDay(full) catch blk: {
+            // 02-29 in a common year may still exist next year.
+            const next = std.fmt.bufPrint(&buffer, "{d:0>4}-{s}", .{ @as(u16, @intCast(@max(0, @min(year + 1, 9999)))), raw }) catch return error.InvalidCalendarDate;
+            break :blk tz.dateDay(next) catch return error.InvalidCalendarDate;
+        };
+        if (day >= today) return day;
+        const later = std.fmt.bufPrint(&buffer, "{d:0>4}-{s}", .{ @as(u16, @intCast(@max(0, @min(year + 1, 9999)))), raw }) catch return error.InvalidCalendarDate;
+        return tz.dateDay(later) catch error.InvalidCalendarDate;
     }
     return error.InvalidCalendarDate;
+}
+/// End date relative to the Start date: "+2d" means two days after Start.
+pub fn normalizeEndDate(buffer: *[10]u8, raw: []const u8, today: i64, start: ?i64) ![]const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t");
+    if (trimmed.len == 10 and trimmed[4] == '-' and trimmed[7] == '-') return trimmed;
+    return isoDate(buffer, try jumpDateFrom(trimmed, today, start orelse today));
 }
 /// ISO text for a civil day.
 pub fn isoDate(buffer: *[10]u8, day: i64) []const u8 {
@@ -330,6 +374,13 @@ test "calendar text: damaged invitations, organizer fallback and offline errors 
     try std.testing.expectEqualStrings("Connection temporarily unavailable", errorText("ConnectionRefused").?);
     try std.testing.expect(offline("ConnectionRefused") and offline("Timeout") and !offline("CalendarWritePermissionRequired"));
     try std.testing.expect(errorText("SomethingNew") == null);
+    // Every zone code the plan can report reads as a sentence.
+    for ([_][]const u8{ "CalendarTimezoneMismatch", "CalendarTimezoneRequired", "FloatingTimezoneRequired", "EmbeddedTimezoneUnresolved", "InvalidTimezoneName", "FileNotFound", "AmbiguousLocalTime", "NonexistentLocalTime" }) |code| {
+        const sentence = zoneErrorText(code) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(std.ascii.isUpper(sentence[0]) and std.mem.indexOf(u8, sentence, code) == null);
+    }
+    try std.testing.expect(errorText("CalendarTimezoneMismatch") != null and errorText("InvalidTimezoneName") != null);
+    try std.testing.expect(zoneErrorText("ConnectionRefused") == null);
 }
 
 test "calendar text: date jumps accept offsets, names and partial dates" {
@@ -345,6 +396,36 @@ test "calendar text: date jumps accept offsets, names and partial dates" {
     try std.testing.expectEqual(try tz.dateDay("2026-12-24"), try jumpDate("12-24", today));
     try std.testing.expectEqual(try tz.dateDay("2027-01-05"), try jumpDate("2027-01-05", today));
     for ([_][]const u8{ "", "s", "+", "+3y", "13-01", "2026-02-30", "someday", "+99999d" }) |bad| try std.testing.expectError(error.InvalidCalendarDate, jumpDate(bad, today));
+}
+
+test "calendar text: lenient entry rules are pinned (past MM-DD, End offsets, today's weekday, HHMM)" {
+    const today = try tz.dateDay("2026-11-10"); // Tuesday
+    // MM-DD already past this year means next year; today itself stays.
+    try std.testing.expectEqual(try tz.dateDay("2027-11-01"), try jumpDate("11-01", today));
+    try std.testing.expectEqual(try tz.dateDay("2027-01-05"), try jumpDate("01-05", today));
+    try std.testing.expectEqual(today, try jumpDate("11-10", today));
+    try std.testing.expectEqual(try tz.dateDay("2026-12-24"), try jumpDate("12-24", today));
+    // 02-29 resolves to the next year that has it only when that is next year.
+    try std.testing.expectEqual(try tz.dateDay("2028-02-29"), try jumpDate("02-29", try tz.dateDay("2027-03-01")));
+    try std.testing.expectError(error.InvalidCalendarDate, jumpDate("02-29", today));
+    // A weekday name equal to today means today (the field echoes the date).
+    try std.testing.expectEqual(today, try jumpDate("tuesday", today));
+    var buffer: [10]u8 = undefined;
+    try std.testing.expectEqualStrings("2026-11-10", try normalizeDate(&buffer, "tue", today));
+    try std.testing.expectEqualStrings("2027-11-01", try normalizeDate(&buffer, "11-01", today));
+    // "+Nd" in End date counts from the Start date, not from today.
+    const start = try tz.dateDay("2026-12-01");
+    try std.testing.expectEqualStrings("2026-12-03", try normalizeEndDate(&buffer, "+2d", today, start));
+    try std.testing.expectEqualStrings("2026-12-08", try normalizeEndDate(&buffer, "+1w", today, start));
+    try std.testing.expectEqualStrings("2026-11-12", try normalizeEndDate(&buffer, "+2d", today, null));
+    try std.testing.expectEqualStrings("2026-11-13", try normalizeEndDate(&buffer, "fri", today, start));
+    try std.testing.expectEqualStrings("2026-12-05", try normalizeEndDate(&buffer, "2026-12-05", today, start));
+    // Four digits in a time field are HHMM only when HH < 24 and MM < 60;
+    // "2026" is 20:26, and the field echoes it as such before review.
+    try std.testing.expectEqual(@as(u16, 20 * 60 + 26), try clockMinutes("2026"));
+    var clock: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("20:26", try normalizeClock(&clock, "2026"));
+    for ([_][]const u8{ "2460", "1260", "0975", "9999" }) |bad| try std.testing.expectError(error.InvalidCalendarTime, clockMinutes(bad));
 }
 
 test "calendar text: lenient clock and end offsets normalize to HH:MM" {
