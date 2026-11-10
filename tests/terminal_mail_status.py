@@ -108,18 +108,20 @@ def status_matches(terminal, number, unread, starred, bulk=False):
     if target is None:
         return False
     left, row = target["left"], target["row"]
-    if target["column"] != left + 3 or row + 1 >= terminal.rows:
+    # Gutter: selection bar, bulk ✓, unread ●, then the subject.
+    if target["column"] != left + 4 or row + 1 >= terminal.rows:
         return False
     first = terminal.screen.cells[row]
     second = terminal.screen.cells[row + 1]
-    if first[left] != ("✓" if bulk else " ") or first[left + 1] != ("●" if unread else " ") or first[left + 2] != " ":
+    if first[left + 1] != ("✓" if bulk else " ") or first[left + 2] != ("●" if unread else " ") or first[left + 3] != " ":
         return False
-    if starred:
-        if second[left] != "⭐" or second[left + 1] != "" or second[left + 2] != " ":
-            return False
-    elif any(cell.strip() for cell in second[left:left + 3]):
+    # A single-cell star sits in the fixed flag column before the date.
+    flags = "".join(first[target["column"]:target["right"]])
+    if ("★" in flags) != starred or "⭐" in flags + "".join(second):
         return False
-    if "".join(second[left + 3:target["right"]]).startswith("Row Sender") is False:
+    if any(cell.strip() for cell in second[left + 1:left + 4]):
+        return False
+    if "".join(second[left + 4:target["right"]]).startswith("Row Sender") is False:
         return False
     # Current SGR cells prove emphasis; a historical escape sequence does not.
     for column in range(target["column"], target["column"] + len(f"Status {number:03}")):
@@ -133,7 +135,7 @@ def labels_match(terminal, account, number=96):
     other = ACCOUNTS[1] if account == ACCOUNTS[0] else ACCOUNTS[0]
     joined = "\n".join(text for _, text in reader_rows(terminal.screen))
     return (reader_contains(terminal.screen, f"Status body {account} {number:03}.")
-            and reader_contains(terminal.screen, "Labels: Inbox")
+            and reader_contains(terminal.screen, "Labels  Inbox")
             and reader_contains(terminal.screen, LABEL_NAMES[account])
             and (number != 96 or reader_contains(terminal.screen, LONG_LABEL))
             and LABEL_NAMES[other] not in joined
@@ -158,7 +160,7 @@ def list_status(binary, directory):
         require(terminal.screen.styles[focused["row"]][focused["column"]][1]
                 != terminal.screen.styles[unfocused["row"]][unfocused["column"]][1],
                 "focused read mail lacks its independent selection background")
-        require(reader_contains(terminal.screen, "Read · ⭐ Starred"),
+        require(reader_contains(terminal.screen, "★ Starred") and not reader_contains(terminal.screen, "Unread"),
                 "read/starred state absent from the selected reader header")
         terminal.send(b"q")
         terminal.until(lambda: status_matches(terminal, 96, True, True)
@@ -171,16 +173,16 @@ def list_status(binary, directory):
                        and not reader_contains(terminal.screen, "Starred"))
         terminal.send(b"s")
         terminal.until(lambda: status_matches(terminal, 96, True, True)
-                       and reader_contains(terminal.screen, "● Unread · ⭐ Starred"))
+                       and reader_contains(terminal.screen, "● Unread") and reader_contains(terminal.screen, "★ Starred"))
         terminal.send(b"u")
         terminal.until(lambda: status_matches(terminal, 96, False, True)
-                       and reader_contains(terminal.screen, "Read · ⭐ Starred")
+                       and reader_contains(terminal.screen, "★ Starred")
                        and not reader_contains(terminal.screen, "Unread"))
         require(terminal.screen.styles[card(terminal, 96)["row"]][card(terminal, 96)["column"]][2] is False,
                 "selected read subject remained bold after marking it read")
         terminal.send(b"u")
         terminal.until(lambda: status_matches(terminal, 96, True, True)
-                       and reader_contains(terminal.screen, "● Unread · ⭐ Starred"))
+                       and reader_contains(terminal.screen, "● Unread") and reader_contains(terminal.screen, "★ Starred"))
         # Preserve the actual VT cells while resizing. A fresh screen would
         # hide stale row styles and wide-glyph debris instead of detecting it.
         for columns, rows, layout in ((100, 30, "below"), (48, 24, "below"), (160, 42, "right")):
@@ -211,7 +213,7 @@ def reader_labels(binary, directory):
     terminal = start(binary, directory, source)
     try:
         terminal.until(lambda: labels_match(terminal, ACCOUNTS[0]))
-        require(reader_contains(terminal.screen, "● Unread · ⭐ Starred"),
+        require(reader_contains(terminal.screen, "● Unread") and reader_contains(terminal.screen, "★ Starred"),
                 "unread/starred state absent from the reader header")
         terminal.send(b"2")
         terminal.until(lambda: labels_match(terminal, ACCOUNTS[1]))
@@ -224,7 +226,7 @@ def reader_labels(binary, directory):
         terminal.resize(48, 24)
         terminal.until(lambda: labels_match(terminal, ACCOUNTS[0]))
         label_rows = [text for _, text in reader_rows(terminal.screen)
-                      if "Labels:" in text or "Éruption" in text or "comfortably" in text
+                      if "Labels " in text or "Éruption" in text or "comfortably" in text
                       or "reader widths" in text]
         require(len(label_rows) >= 2, "narrow reader truncated labels instead of wrapping them")
         require(terminal.screen.wide_right_edge == 0,

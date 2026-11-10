@@ -306,7 +306,7 @@ def scope_trash(binary, directory, capture_dir=None):
                     "default review Enter trashed a conversation message")
         terminal.send(b"D")
         terminal.until(lambda: "trash" in terminal.text().lower() and safe_button in terminal.text())
-        confirm = next(label for label in ("[y Confirm]", "[Confirm]", "[Trash]", "[y Trash]") if label in terminal.text())
+        confirm = next(label for label in ("[Move to Trash y]", "[y Confirm]", "[Confirm]", "[Trash]", "[y Trash]") if label in terminal.text())
         activate_button(terminal, confirm)
         terminal.until(lambda: safe_button not in terminal.text())
         for key, message in before.items():

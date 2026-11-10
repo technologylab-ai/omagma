@@ -223,7 +223,7 @@ def countdown_due(binary, directory, capture_dir=None):
         terminal.until(lambda: countdown_active(terminal))
         require(stats(binary, directory, extra)["fixtureSends"] == 0,
                 "configured grace submitted synchronously on confirmation")
-        terminal.until(lambda: "Send complete · provider accepted" in terminal.text() and not countdown_active(terminal))
+        terminal.until(lambda: "Sent to " in terminal.text() and not countdown_active(terminal))
         # The one-second timer is already proven above. Resolve its exact
         # durable intent after completion rather than racing a second CLI
         # process against that short pending window on native CI hosts.
@@ -359,7 +359,7 @@ def countdown_send_now_case(binary, directory, capture_dir, activation, narrow=F
                     and 1006 in terminal.screen.mouse_modes, "owned countdown has no active cell mouse reporting")
             click(terminal, *positions[send_now])
             click(terminal, *positions[send_now])
-        terminal.until(lambda: "Send complete" in terminal.text() and not countdown_active(terminal))
+        terminal.until(lambda: "Sent to " in terminal.text() and not countdown_active(terminal))
         applied = queued_snapshot(binary, directory, extra, settled=queued)
         require(not applied["queue"] and not applied["operations"]
                 and applied["retainedQueue"]["state"] == "applied" and applied["fixtureSends"] == 1,

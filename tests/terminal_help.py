@@ -21,7 +21,7 @@ def help_viewport(terminal):
 
 def scroll_help_to(terminal, literal):
     terminal.until(lambda: help_viewport(terminal) is not None)
-    for _ in range(160):
+    for _ in range(240):
         before = help_viewport(terminal)
         if literal in before:
             return
@@ -33,4 +33,4 @@ def scroll_help_to(terminal, literal):
         except AssertionError as error:
             raise AssertionError(f"help scrolling stopped before required literal: {literal}") from error
     if literal not in help_viewport(terminal):
-        raise AssertionError(f"complete required help literal was not reachable by 160 observed scrolls: {literal}")
+        raise AssertionError(f"complete required help literal was not reachable by 240 observed scrolls: {literal}")

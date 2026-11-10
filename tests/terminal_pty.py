@@ -925,7 +925,7 @@ def exercise(terminal, action):
                    ("Editor returned" if action == "save" else "Editor exited 1") in terminal.text())
     if action in {"save", "save-error"}:
         terminal.until(lambda: "Reviewed fixture editor body." in terminal.text())
-    require("Send complete" not in terminal.text(), "editor exit automatically sent the draft")
+    require("Send complete" not in terminal.text() and "Sent to " not in terminal.text(), "editor exit automatically sent the draft")
     result = terminal.finish()
     result.update(retained_draft(terminal, "Reviewed fixture editor body.\nCafé and emoji 👋 remain intact.\n"
                                  if action in {"save", "save-error"} else ""))

@@ -105,7 +105,7 @@ def collection(binary, directory, capture_dir=None):
         wait_label_picker(terminal, "qjk Renamed")
         filter_label_picker(terminal, "qjk Renamed", "[ ]")
         terminal.send(b" \x13")
-        terminal.until(lambda: "Mail action: 1 applied" in terminal.text() and "Labels · staged changes" not in terminal.text())
+        terminal.until(lambda: "Labels updated on 1" in terminal.text() and "Labels · staged changes" not in terminal.text())
         with Client(binary, directory, extra=source.options()) as client:
             require(created_id in client.request("mail.read", messageId="shared-msg-096", cacheOnly=True)["labels"],
                     "new definition could not be assigned through normal m picker")

@@ -155,7 +155,7 @@ def keyboard_case(binary, directory, capture_dir=None):
         all_body = copied(terminal, count=3)
         require(all_body.startswith("Alpha " + UNICODE) and PARAGRAPH in all_body and "Tail last word." in all_body,
                 "body navigation or soft-wrap joins lost received content")
-        require("From:" not in all_body and "Labels:" not in all_body and "Copy y" not in all_body,
+        require("From   " not in all_body and "Labels  " not in all_body and "Copy y" not in all_body,
                 "Visual copied envelope or UI controls")
         terminal.send(b":copy-message\r")
         terminal.until(lambda: len(clips(terminal)) == 4)

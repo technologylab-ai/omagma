@@ -99,7 +99,7 @@ def alternatives(binary, directory, captures=None):
         terminal.until(lambda: "Density compact" in terminal.text())
         capture(terminal, captures, "reader-compact")
         terminal.send(b"H")
-        terminal.until(lambda: reader_contains(terminal.screen, "To:"))
+        terminal.until(lambda: reader_contains(terminal.screen, "To     alex@example.org"))
         capture(terminal, captures, "reader-expanded-headers")
         terminal.send(b"Hq")
         terminal.until(lambda: frame_title(terminal.screen, "Mail ·") is not None)

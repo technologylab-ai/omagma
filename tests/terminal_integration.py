@@ -734,7 +734,10 @@ def native_large_quote_retention(client):
     require(message["bodyText"].encode() == data, "valid newline-heavy source body was truncated")
     before = client.request("draft.list")["drafts"]
     draft = client.request("mail.reply", messageId="shared-msg-001", all=False)
-    expected = "\n\n" + "> \n" * (len(data) + 1)
+    # The quote follows one "On <date>, <sender> wrote:" attribution line.
+    attribution = draft["bodyText"][2:].partition("\n")[0]
+    require(attribution.startswith("On ") and attribution.endswith(" wrote:"), "large reply lost its attribution line")
+    expected = "\n\n" + attribution + "\n" + "> \n" * (len(data) + 1)
     require(draft["bodyText"] == expected, "large native quote was refused or truncated at the reader's old limit")
     require(len(draft["bodyText"].encode()) > 2 * 1024**2, "quote did not cross the former compose limit")
     saved = client.request("draft.read", draftId=draft["id"])

@@ -948,7 +948,7 @@ def join_after_account_switch(binary, directory):
         lines = ["".join(terminal.screen.cells[y][left + 1:right]).strip()
                  for y in range(header["row"] + 1, header["row"] + 7)]
         return (settled(terminal) and lines[0] == "Planning version " + str(sequence)
-                and "To: " + ACCOUNTS[1] in lines)
+                and any(line.startswith("To") and ACCOUNTS[1] in line for line in lines))
 
     try:
         wait_notice(terminal, title)

@@ -463,7 +463,7 @@ def resource_case(binary, directory, cycles, idle):
             # fixture's provider name "INBOX", independently of reader scroll.
             # Settle that header before comparing complete reader projections.
             terminal.html_stage = "loaded-label-metadata"
-            terminal.until(lambda: within_reader(terminal, "Labels: INBOX") is not None)
+            terminal.until(lambda: within_reader(terminal, "Labels  Inbox") is not None)
             original = [text for _, text in reader_rows(terminal.screen)]
             terminal.html_navigation_original = original
             terminal.html_navigation_cycle = 0

@@ -133,7 +133,7 @@ def run(binary, directory, capture_dir=None, mono=False):
         terminal.until(lambda: reader_contains(terminal.screen, f"First meeting opening for {ACCOUNTS[0]}.")
                        and terminal.screen.locate("I · Respond") is not None)
         first = banner(terminal, mono)
-        require("Labels:" in "\n".join(text for _, text in reader_rows(terminal.screen)),
+        require("Labels  " in "\n".join(text for _, text in reader_rows(terminal.screen)),
                 "busy label header missing from visual contrast fixture")
         require(first["card_top"] == first["row"] - 1,
                 "roomy split reader did not render its bordered invitation card")

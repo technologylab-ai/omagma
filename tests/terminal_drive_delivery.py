@@ -131,7 +131,7 @@ def run(binary, directory):
         require(after['fixtureCalls'] == before['fixtureCalls'], 'import, save, plan or review contacted the provider')
         terminal.send(b'n')
         terminal.until(lambda: 'Compose' in terminal.text() and 'Subject:' in terminal.text())
-        terminal.send(b'\x1b')
+        terminal.send(b'q')
         terminal.until(lambda: terminal.screen.locate('Drafts') is not None and 'Subject:' not in terminal.text())
         click(terminal, *point(terminal, 'Drafts'))
         terminal.until(lambda: SUBJECT in terminal.text())

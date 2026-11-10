@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-from datetime import datetime
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -121,9 +121,38 @@ def mail_rows(terminal):
     return ["".join(cells[i][left + 1:right]) for i in range(y + 1, bottom)]
 
 
-def list_dates_match(terminal, stamps):
+def now_stamp(name):
+    """The current local date in the case's zone, as the TUI computes "today"."""
+    if name in ("utc", "invalid"):
+        zone = timezone.utc
+    elif name == "localtime":
+        with Path("/etc/localtime").open("rb") as handle:
+            zone = ZoneInfo.from_file(handle)
+    else:
+        zone = ZoneInfo(EXPECTED[name][0])
+    return datetime.now(zone).strftime("%Y-%m-%d %H:%M")
+
+
+def short_date(stamp, today):
+    """List dates: HH:MM today, weekday this past week, "Nov 7" this year, else ISO."""
+    day, current = date.fromisoformat(stamp[:10]), date.fromisoformat(today[:10])
+    if day == current:
+        return stamp[11:16]
+    if day < current and (current - day).days < 7:
+        return ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[day.weekday()]
+    if day.year == current.year:
+        return f"{('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[day.month - 1]} {day.day}"
+    return stamp[:10]
+
+
+def reader_date(stamp, today):
+    short = short_date(stamp, today)
+    return short if short == stamp[11:16] else f"{short} {stamp[11:16]}"
+
+
+def list_dates_match(terminal, stamps, today):
     rows = mail_rows(terminal)
-    return all(any(subject in row and stamp[5:16] in row for row in rows)
+    return all(any(subject in row and short_date(stamp, today) in row for row in rows)
                for (_, subject, _), stamp in zip(MAIL, stamps))
 
 
@@ -133,7 +162,8 @@ def run_case(binary, directory, name):
     terminal = start(binary, directory, fixture, environment={"TZ": zone}, columns=180, rows=40)
     try:
         fixture.wait_entered(terminal.process, pump=terminal.pump)
-        terminal.until(lambda: list_dates_match(terminal, stamps) and reader_contains(terminal.screen, "BODY TZ ROLLOVER"))
+        today = now_stamp(name)
+        terminal.until(lambda: list_dates_match(terminal, stamps, today) and reader_contains(terminal.screen, "BODY TZ ROLLOVER"))
         terminal.until(lambda: f"Synced {stamps[1]}" in terminal.screen.lines()[1])
         require(fixture.is_held(), "sync assertion raced released fixture refresh")
         if name == "invalid":
@@ -144,14 +174,14 @@ def run_case(binary, directory, name):
         require(reader_contains(terminal.screen, stamps[0]), "preview full date differs from compact list")
         terminal.send(b"\rz")
         terminal.until(lambda: reader_contains(terminal.screen, "3/3 mails")
-                       and reader_contains(terminal.screen, f"▾ 3/3 ● Timezone Fixture · {stamps[0][5:16]}")
+                       and reader_contains(terminal.screen, f"▾ 3/3 ● Timezone Fixture · {reader_date(stamps[0], today)}")
                        and reader_contains(terminal.screen, "BODY TZ ROLLOVER"))
         for index in (1, 2):
             # Earlier cards start folded; focus it, then expand its body.
             terminal.send(b"{t")
             terminal.until(lambda i=index: reader_contains(terminal.screen, f"{3 - i}/3 mails")
                            and reader_contains(terminal.screen, f"BODY {MAIL[i][1]}")
-                           and reader_contains(terminal.screen, f"▾ {3 - i}/3 ● Timezone Fixture · {stamps[i][5:16]}"))
+                           and reader_contains(terminal.screen, f"▾ {3 - i}/3 ● Timezone Fixture · {reader_date(stamps[i], today)}"))
         require(fixture.is_held(), "thread assertions exceeded the bounded refresh hold")
 
         with Client(binary, directory, extra=fixture.options()) as client:

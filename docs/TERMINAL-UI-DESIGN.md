@@ -22,7 +22,7 @@ The libvaxis package hash is `vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mec
 
 At 120 columns and above, navigation can remain alongside mail/reader panes. Horizontal splitting requires at least 80 available columns; below layout uses stacked panes when there are at least 48 columns and 16 content rows. Otherwise the focused pane uses the available space, and narrow navigation takes over when focused. `v` chooses right/below, `:layout` also changes the layout, `:split` sets bounded ratios, and `z` expands the reader. In the reader, `V` opens a text cursor in MOVE. After positioning it, `V` or Space marks the start; further `V` presses switch CHAR/LINE and Space returns to MOVE. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
 
-The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
+The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. Derived roles add an inactive-selection tint (bulk-selected rows), a border tone quieter than muted text for unfocused panes, and a raised surface; a theme without its own `selection` uses an 18% accent tint over the background. The focused pane's selected row carries an accent `▌` bar and the selection background; an unfocused pane's row keeps only a thin `▏` marker. Footers pass through one fitter that keeps essential keys (navigation, Enter, compose, search, archive/Trash, help, back/quit) longest and renders keys bold with muted labels. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
 
 Illustrative layout, not a runtime capture:
 
@@ -82,7 +82,9 @@ handler or account-scoped contact/cache navigation.
 The source-only display helper accepts IANA names, absolute TZif paths and
 explicit POSIX rules in `TZ`; an explicitly empty `TZ` means UTC. Sync and
 single-message metadata use full stamps with an abbreviation (CET/CEST, for
-example). Lists and compact thread-card headings use `MM-DD HH:MM`, with the
+example). Lists use short dates that always fit (the time today, the weekday
+within the past week, `Nov 7` this year, otherwise `YYYY-MM-DD`); compact
+reader headers and thread-card headings add the time (`Sat 09:00`), with the
 same conversion. Fractional offsets and local date rollover apply consistently.
 Snapshot files
 are capped at 128 KiB, 4,096 transitions and 256 local types. Lookup performs no
@@ -157,7 +159,8 @@ ignores injected mouse reports as well.
 | `I` | Review an invitation reply |
 | `o` | Open selected mail in its configured browser profile |
 | Ctrl+R, Ctrl+L | Refresh, redraw |
-| `?`, Escape / `q` | Help, back; quit from the mailbox screen |
+| `?`, Escape / `q` | Help, back; only `q` quits from the mailbox screen |
+| `g` then `i`/`s`/`d`/`a`/`t`, `n` / `N` | Inbox/Sent/Drafts/All Mail/Trash; next/previous unread |
 | Ctrl+C | Cancel active work; quit when idle |
 
 The provider checks capabilities and returns visible rejection errors. Legacy and enhanced keyboard input accept shifted `R`, `G`, `D`, `U` and `I`. `gg` clears on an unrelated key or after 750 ms. Help uses grouped key/action rows, fits the usual terminal height and scrolls with `j`/`k`, arrows, PageUp/PageDown or Ctrl+U/Ctrl+D when narrower; Home/End reach its ends. Mouse interaction is supported: click accounts, mailboxes, messages and contacts, and scroll the pane under the pointer with the wheel. Incoming provisional loading rows stay noninteractive until committed. Selection clicks never send mail or apply mailbox/contact changes; `--no-mouse` keeps mouse handling in the terminal.
@@ -206,7 +209,7 @@ Bracketed paste inserts data into the active field and cannot invoke navigation,
 
 ## Drafts, contacts and explicit submission
 
-The shared recipient/threading planner creates replies and reply-all drafts. The UI edits To/Cc/Bcc, subject and body without duplicating its address or self-alias rules. Escape or `q` from normal compose saves the local draft and returns to the mailbox. After a 1.5-second idle debounce (or 10 seconds of continuous edits), autosave writes a local recovery revision without blocking input or sending mail. It retains incomplete recipient text, restores it on reopen, and requires validated fields before review/submission. Autosave completion updates only identity/revision state and cannot overwrite newer input.
+The shared recipient/threading planner creates replies and reply-all drafts. The UI edits To/Cc/Bcc, subject and body without duplicating its address or self-alias rules. `q` from normal compose saves the local draft and returns to the mailbox; Escape only leaves insertion. After a 1.5-second idle debounce (or 10 seconds of continuous edits), autosave writes a local recovery revision without blocking input or sending mail. It retains incomplete recipient text, restores it on reopen, and requires validated fields before review/submission. Autosave completion updates only identity/revision state and cannot overwrite newer input.
 
 Ctrl+S or `:send` saves a draft and opens **Review send**. Review exposes account,
 From, recipients, subject, format, thread context, attachments and the outgoing
