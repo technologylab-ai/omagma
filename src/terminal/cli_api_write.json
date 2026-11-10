@@ -265,6 +265,11 @@
           "type": "boolean",
           "default": false,
           "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
+        },
+        "replace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly allow a replacement that omits the saved draft's recipients (to/cc/bcc) or reply threading (threadId/inReplyTo/references). Without it such an update is refused with DraftReplaceWouldDropThreading; use draft.patch to change only some fields."
         }
       },
       "required": [
@@ -275,7 +280,8 @@
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
         "Read the complete draft first and submit the full desired source. This is replacement, not a partial patch: omitted recipients/body/subject/attachments become empty. Only omitted bodyFormat and original preserve their old values; original:null removes the original.",
-        "A normal update with recoveryFields omitted/null clears unfinished recovery state. Changed drafts cancel a queued countdown with DraftChanged. Editing drafts protected by an unknown/submitting outcome is refused."
+        "A normal update with recoveryFields omitted/null clears unfinished recovery state. Changed drafts cancel a queued countdown with DraftChanged. Editing drafts protected by an unknown/submitting outcome is refused.",
+        "A replacement that omits saved recipients or threading fields is refused (DraftReplaceWouldDropThreading) unless replace:true; draft.patch merges only the supplied fields."
       ],
       "examples": [
         {
@@ -291,6 +297,49 @@
             "subject": "Reviewed project update",
             "bodyText": "Updated complete body.",
             "bodyFormat": "plain"
+          }
+        }
+      ]
+    },
+    {
+      "cmd": "draft.patch",
+      "summary": "Change only the supplied fields of a saved local draft, keeping everything else.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Saved local draft ID returned by draft.create, draft.list or mail.reply/mail.forward."
+        },
+        "set": {
+          "$ref": "#/$defs/Draft",
+          "description": "Draft fields to replace; every omitted field (recipients, threading, attachments, original, format) stays exactly as saved. A supplied array replaces that whole array."
+        },
+        "expectedContentDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Optional contentDigest from draft.read or draft.measure. A mismatch fails with ReviewedDraftChanged and changes nothing."
+        },
+        "acknowledgementOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return only {id} instead of the complete saved draft."
+        }
+      },
+      "required": [
+        "draftId",
+        "set"
+      ],
+      "notes": [
+        "Sends nothing. Recovery drafts with recoveryFields must be finished with draft.update.",
+        "Use draft.patch to edit bodyText or subject of a reply without restating its recipients and threading."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.patch",
+          "account": "personal@example.com",
+          "draftId": "RETURNED_DRAFT_ID",
+          "set": {
+            "bodyText": "Thanks, Thursday works for me."
           }
         }
       ]
@@ -482,6 +531,11 @@
           "maxLength": 64,
           "pattern": "^[a-f0-9]{64}$",
           "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true validates and plans without sending: the same capability, recipient, identity, digest, replay and attachment checks as submission, from a read-only store. Returns the delivery plan (files, attachedBytes, mimeBytes, blockers, ...) plus dryRun:true, status planned|blocked, sendable, contentDigest, from/to/cc/bcc and subject; replay reports an already recorded operation. Nothing is journaled, queued, uploaded or sent."
         }
       },
       "required": [
@@ -496,7 +550,8 @@
         "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
         "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it.",
-        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried.",
+        "dryRun:true is the safe review step: it sends nothing and returns the exact plan and contentDigest; pass that digest as expectedContentDigest to the real request."
       ],
       "examples": [
         {
@@ -544,6 +599,11 @@
           "maxLength": 64,
           "pattern": "^[a-f0-9]{64}$",
           "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true validates and plans without sending: the same capability, recipient, identity, digest, replay and attachment checks as submission, from a read-only store. Returns the delivery plan (files, attachedBytes, mimeBytes, blockers, ...) plus dryRun:true, status planned|blocked, sendable, contentDigest, from/to/cc/bcc and subject; replay reports an already recorded operation. Nothing is journaled, queued, uploaded or sent."
         }
       },
       "required": [
@@ -557,7 +617,8 @@
         "At most 32 active queued/submitting/unknown intents and 128 retained queue entries. Only terminal history can be evicted; uncertain entries stay protected.",
         "No countdown is automatically processed after a process restart. Use queue.list/read, then explicitly resume/process/cancel after review.",
         "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it.",
-        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried.",
+        "dryRun:true is the safe review step: it sends nothing and returns the exact plan and contentDigest; pass that digest as expectedContentDigest to the real request."
       ],
       "examples": [
         {
@@ -775,6 +836,15 @@
           "type": "boolean",
           "description": "Capture the original HTML and related resources as an opaque Original snapshot, with a separately editable empty note.",
           "default": false
+        },
+        "replyAll": {
+          "type": "boolean",
+          "description": "Accepted alias of all. Supplying both with different values is rejected (ConflictingReplyAll)."
+        },
+        "bodyText": {
+          "type": "string",
+          "maxLength": 36700160,
+          "description": "Optional note placed above the generated quote (or as the editable note beside a preserved/attached original), interpreted per bodyFormat. Creates the complete draft in one call; nothing is sent."
         }
       },
       "required": [
@@ -793,6 +863,13 @@
           "messageId": "RETURNED_MESSAGE_ID",
           "all": true,
           "bodyFormat": "plain"
+        },
+        {
+          "cmd": "mail.reply",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "all": true,
+          "bodyText": "Thanks, Thursday works for me."
         }
       ]
     },
@@ -830,6 +907,11 @@
           "type": "boolean",
           "description": "Explicitly create a text quote without source files. The draft and send review retain the omitted-file count. Conflicts with original:true and preserveFormatting:true.",
           "default": false
+        },
+        "bodyText": {
+          "type": "string",
+          "maxLength": 36700160,
+          "description": "Optional note placed above the generated quote (or as the editable note beside a preserved/attached original), interpreted per bodyFormat. Creates the complete draft in one call; nothing is sent."
         }
       },
       "required": [
@@ -885,6 +967,11 @@
           "maxLength": 64,
           "pattern": "^[a-f0-9]{64}$",
           "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true validates and plans without sending: the same capability, recipient, identity, digest, replay and attachment checks as submission, from a read-only store. Returns the delivery plan (files, attachedBytes, mimeBytes, blockers, ...) plus dryRun:true, status planned|blocked, sendable, contentDigest, from/to/cc/bcc and subject; replay reports an already recorded operation. Nothing is journaled, queued, uploaded or sent."
         }
       },
       "required": [
@@ -898,7 +985,8 @@
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
         "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
-        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried."
+        "Native Drive delivery requires optional drive-upload capability (Google drive.file only). At most 16 Drive files; recipient-only reader permissions, no public links or notification emails. Files upload privately before sharing; Gmail is submitted only after verified content/access and exact MIME admission. Before Gmail, preparationStopped receipts can be explicitly retried using the same operationId. Unknown Gmail outcomes are never automatically retried.",
+        "dryRun:true is the safe review step: it sends nothing and returns the exact plan and contentDigest; pass that digest as expectedContentDigest to the real request."
       ],
       "examples": [
         {
@@ -952,6 +1040,20 @@
             "$ref": "#/$defs/WriteLabelInput"
           },
           "description": "Existing system label names, custom label IDs or exact custom names to remove."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true resolves the label change without applying it: addLabels/removeLabels as label IDs, and per message currentLabels/resultLabels/addedLabels/removedLabels when its labels are known locally (known:false otherwise). Live names missing from the downloaded label list are reported in unresolvedLabels. No provider or cache write."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "receipt",
+            "message"
+          ],
+          "default": "receipt",
+          "description": "receipt (default) returns {messageId, threadId, labels, unread, addedLabels, removedLabels}; added/removed are the actual membership change and are omitted when the previous labels were not retained locally. message returns the complete updated message (the pre-receipt behavior)."
         }
       },
       "required": [
@@ -982,6 +1084,20 @@
         "messageId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true resolves the label change without applying it: addLabels/removeLabels as label IDs, and per message currentLabels/resultLabels/addedLabels/removedLabels when its labels are known locally (known:false otherwise). Live names missing from the downloaded label list are reported in unresolvedLabels. No provider or cache write."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "receipt",
+            "message"
+          ],
+          "default": "receipt",
+          "description": "receipt (default) returns {messageId, threadId, labels, unread, addedLabels, removedLabels}; added/removed are the actual membership change and are omitted when the previous labels were not retained locally. message returns the complete updated message (the pre-receipt behavior)."
         }
       },
       "required": [
@@ -1012,6 +1128,20 @@
         "messageId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true resolves the label change without applying it: addLabels/removeLabels as label IDs, and per message currentLabels/resultLabels/addedLabels/removedLabels when its labels are known locally (known:false otherwise). Live names missing from the downloaded label list are reported in unresolvedLabels. No provider or cache write."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "receipt",
+            "message"
+          ],
+          "default": "receipt",
+          "description": "receipt (default) returns {messageId, threadId, labels, unread, addedLabels, removedLabels}; added/removed are the actual membership change and are omitted when the previous labels were not retained locally. message returns the complete updated message (the pre-receipt behavior)."
         }
       },
       "required": [
@@ -1066,6 +1196,20 @@
             "$ref": "#/$defs/WriteLabelInput"
           },
           "description": "Existing system label names, custom label IDs or exact custom names to remove."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true resolves the label change without applying it: addLabels/removeLabels as label IDs, and per message currentLabels/resultLabels/addedLabels/removedLabels when its labels are known locally (known:false otherwise). Live names missing from the downloaded label list are reported in unresolvedLabels. No provider or cache write."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "receipt",
+            "message"
+          ],
+          "default": "receipt",
+          "description": "receipt (default) returns {messageId, threadId, labels, unread, addedLabels, removedLabels}; added/removed are the actual membership change and are omitted when the previous labels were not retained locally. message returns the complete updated message (the pre-receipt behavior)."
         }
       },
       "required": [
@@ -1141,6 +1285,11 @@
           ],
           "default": "message",
           "description": "Validated descriptive scope only. It never expands explicit target IDs; resolve a conversation with mail.triage-scope before constructing this request."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true resolves the label change without applying it: addLabels/removeLabels as label IDs, and per message currentLabels/resultLabels/addedLabels/removedLabels when its labels are known locally (known:false otherwise). Live names missing from the downloaded label list are reported in unresolvedLabels. No provider or cache write."
         }
       },
       "required": [
@@ -1782,7 +1931,13 @@
       "cmd": "operation.list",
       "summary": "List this account's durable send and label-definition mutation records.",
       "capabilities": [],
-      "properties": {},
+      "properties": {
+        "draftId": {
+          "type": "string",
+          "x-internal": true,
+          "description": "Internal TUI correlation; ignored. operation.list always returns this account's active operations."
+        }
+      },
       "required": [],
       "notes": [
         "Local account-cache lookup; no provider request or mutation. Returns data.operations with stable IDs, content hashes, kind, outcomes, error codes and any recovery-draft/message/label references.",
@@ -1841,7 +1996,7 @@
         },
         "dueDate": {
           "type": "string",
-          "description": "Strict civil date YYYY-MM-DD; no time of day or timezone conversion."
+          "description": "Civil date YYYY-MM-DD, or today, tomorrow, +Nd/-Nd or a weekday name resolved in the local zone (echoed as resolvedDate); no time of day or timezone conversion."
         }
       },
       "required": [
@@ -2677,6 +2832,33 @@
           "type": "boolean",
           "default": true,
           "description": "Include the separately retained Original in outgoing MIME and previews. False keeps the complete original and its embedded-resource pins in this local draft for restoration; it does not remove arbitrary quoted text from bodyText. Legacy drafts default to true. Omitted updates preserve the saved policy."
+        },
+        "omittedAttachments": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Informational count of original files a text-only forward intentionally left out (mail.forward omitAttachments). Returned drafts carry it; pass it back unchanged. It never adds files."
+        },
+        "summaryCounts": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-internal": true,
+          "description": "Internal list-navigation counts that serialized local drafts may carry; ignored on input. Omit it."
+        },
+        "contentDigest": {
+          "type": "string",
+          "readOnly": true,
+          "description": "Returned by draft.read; accepted unchanged when a read draft is passed back and ignored. Use expectedContentDigest to bind a change to a reviewed source."
+        },
+        "gmailLink": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "readOnly": true,
+          "description": "Returned by draft.read for a draft handed to Gmail; accepted unchanged when passed back and ignored. Gmail handoff state changes only through draft.gmail-* commands."
         }
       },
       "required": []
@@ -2879,6 +3061,14 @@
           ],
           "readOnly": true,
           "description": "Opaque returned People metadata (names, emailAddresses, metadata), at most 64 KiB when received. It may be passed back unchanged, but it is ignored as write authority: create discards it and update uses freshly fetched provider data. Do not construct or edit nested provider fields."
+        },
+        "readWarnings": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "readOnly": true,
+          "description": "Returned read diagnostics; accepted unchanged when a returned contact is passed back and ignored."
         }
       },
       "required": [],

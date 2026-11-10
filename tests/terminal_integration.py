@@ -1041,12 +1041,12 @@ def draft_attachment_bounds(client):
 def labels_and_trash(client):
     message_id = "shared-msg-001"
     other = client.request("mail.read", ACCOUNTS[1], messageId=message_id)
-    client.request("mail.mark", messageId=message_id, unread=False, operationId="fixture-mark")
+    client.request("mail.mark", messageId=message_id, unread=False)
     require(client.request("mail.read", messageId=message_id)["unread"] is False, "mark unread mutation not reflected")
-    client.request("mail.trash", messageId=message_id, operationId="fixture-trash")
+    client.request("mail.trash", messageId=message_id)
     trashed = client.request("mail.read", messageId=message_id)
     require("TRASH" in trashed["labels"], "trash did not preserve readable message in trash")
-    client.request("mail.restore", messageId=message_id, operationId="fixture-restore")
+    client.request("mail.restore", messageId=message_id)
     require("TRASH" not in client.request("mail.read", messageId=message_id)["labels"], "restore left trash label")
     require(client.request("mail.read", ACCOUNTS[1], messageId=message_id) == other, "mutation affected another account")
     client.request("mail.delete", messageId=message_id, operationId="fixture-delete", ok=False)
@@ -1059,10 +1059,11 @@ def contacts_and_conflicts(client):
     original = next(c for c in contacts if c["resourceName"] == "people/shared-contact-001")
     other = client.request("contacts.list", ACCOUNTS[1])
     changed = client.request("contacts.upsert", contact={**original, "name": "Changed Fixture"},
-                             expectedEtag=original["etag"], operationId="fixture-contact-change")
+                             expectedEtag=original["etag"])
     require(changed["name"] == "Changed Fixture" and changed["etag"] != original["etag"], "contact update did not advance version")
-    client.request("contacts.upsert", contact={**original, "name": "Stale Fixture"},
-                   expectedEtag=original["etag"], operationId="fixture-contact-stale", ok=False)
+    stale = client.request("contacts.upsert", contact={**original, "name": "Stale Fixture"},
+                           expectedEtag=original["etag"], ok=False)
+    require(stale["code"] != "UnknownField", "stale contact update failed for a request-shape reason")
     require(client.request("contacts.list", ACCOUNTS[1]) == other, "contact update crossed accounts")
     found = client.request("contacts.search", query="Changed")
     require(any(c["name"] == "Changed Fixture" for c in found["contacts"]), "updated contact not searchable")
@@ -1106,7 +1107,7 @@ def rsvp_semantics(client):
 def cache_clear_isolation(client):
     list_all(client, ACCOUNTS[1])
     other = cache_limits(client, ACCOUNTS[1])
-    client.request("cache.clear", operationId="fixture-clear")
+    client.request("cache.clear")
     require(cache_limits(client, ACCOUNTS[0])["metadataEntries"] == 0, "clear retained target metadata")
     require(cache_limits(client, ACCOUNTS[1])["metadataEntries"] == other["metadataEntries"], "cache clear affected other account")
 
@@ -1187,8 +1188,8 @@ def mutation_survives_body_eviction(client):
     client.extra = ("--metadata-limit", "48", "--disk-limit-bytes", "131072")
     client.restart()
     list_all(client, ACCOUNTS[0])
-    client.request("mail.mark", messageId="shared-msg-013", unread=False, operationId="fixture-pressure-mark")
-    client.request("mail.trash", messageId="shared-msg-013", operationId="fixture-pressure-trash")
+    client.request("mail.mark", messageId="shared-msg-013", unread=False)
+    client.request("mail.trash", messageId="shared-msg-013")
     for suffix in [14, 15]:
         client.request("mail.read", messageId=f"shared-msg-{suffix:03}")
     recovered = client.request("mail.read", messageId="shared-msg-013")
@@ -1463,13 +1464,14 @@ def restart_persistence(client):
 
 def denied_mutations(client):
     before = cache_limits(client, ACCOUNTS[0])
-    client.request("mail.trash", messageId="shared-msg-001", operationId="fixture-denied-trash", ok=False)
-    client.request("mail.send", draft={"to": ["recipient@example.org"], "subject": "Denied", "bodyText": "Body"},
-                   operationId="fixture-denied-send", ok=False)
-    client.request("contacts.upsert", contact={"name": "Denied Fixture", "emails": ["denied@example.org"]},
-                   operationId="fixture-denied-contact", ok=False)
-    client.request("invitation.reply", messageId="shared-msg-009", status="accepted",
-                   operationId="fixture-denied-rsvp", rsvpOnly=True, ok=False)
+    # Each request is otherwise valid, so the refusal is the capability check.
+    denied = [client.request("mail.trash", messageId="shared-msg-001", ok=False),
+              client.request("mail.send", draft={"to": ["recipient@example.org"], "subject": "Denied", "bodyText": "Body"},
+                             operationId="fixture-denied-send", ok=False),
+              client.request("contacts.upsert", contact={"name": "Denied Fixture", "emails": ["denied@example.org"]}, ok=False),
+              client.request("invitation.reply", messageId="shared-msg-009", status="accepted",
+                             operationId="fixture-denied-rsvp", rsvpOnly=True, ok=False)]
+    require(all(error["code"] == "PermissionDenied" for error in denied), "denied mutation failed for another reason")
     after = cache_limits(client, ACCOUNTS[0])
     require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == before["fixtureSends"],
             "permission rejection reached provider")
@@ -1477,8 +1479,8 @@ def denied_mutations(client):
 
 def rejected_mutation_rollback(client):
     before = client.request("mail.read", messageId="shared-msg-001")
-    client.request("mail.trash", messageId="shared-msg-001", operationId="fixture-rejected-trash", ok=False)
-    client.request("mail.mark", messageId="shared-msg-001", unread=False, operationId="fixture-rejected-mark", ok=False)
+    client.request("mail.trash", messageId="shared-msg-001", ok=False)
+    client.request("mail.mark", messageId="shared-msg-001", unread=False, ok=False)
     require(client.request("mail.read", messageId="shared-msg-001") == before, "rejected mutation changed local state")
 
 

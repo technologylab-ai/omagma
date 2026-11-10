@@ -7,6 +7,7 @@ test {
     _ = @import("terminal_mail_acceptance_tests.zig");
     _ = @import("terminal_ux_backend_tests.zig");
     _ = @import("terminal_ux_helper_tests.zig");
+    _ = @import("terminal_cli_contract_tests.zig");
     _ = @import("platform_tests.zig");
     _ = @import("updates_tests.zig");
     _ = @import("calendar_tests.zig");

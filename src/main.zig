@@ -33,13 +33,23 @@ comptime {
 var unassigned_reserve: [l.app_reservation - assigned_bytes]u8 = undefined;
 pub fn main(init: std.process.Init.Minimal) void {
     app(init) catch |err| {
+        const cli = @import("terminal/cli.zig");
+        // The JSON reply already explains a failed request; stderr stays quiet.
+        if (err == error.CommandFailed) std.process.exit(cli.exitStatus());
         std.debug.print("omagma: {s}\n", .{@errorName(err)});
         if (err == error.BackendProtocolMismatch) std.debug.print("{s}\n", .{@import("terminal/vault_transport.zig").mismatch_message});
+        if (err == error.UnknownOption and cli.unknown_option_len != 0) {
+            const option = cli.unknown_option[0..cli.unknown_option_len];
+            if (cli.nearestOption(option)) |suggestion| std.debug.print("Unknown option {s}; did you mean {s}?\n", .{ option, suggestion }) else std.debug.print("Unknown option {s}.\n", .{option});
+        }
         if (usageError(err)) {
             std.debug.print("Try omagma --help for available commands and options.\n", .{});
             contextHelpHint(init.args);
+            std.process.exit(2);
         }
-        std.process.exit(1);
+        // Exit statuses: 0 ok, 2 usage, 3 rejected request, 4 authorization,
+        // 5 not found, 6 unknown outcome, 1 any other failure.
+        std.process.exit(if (err == error.UnknownOutcome) 6 else 1);
     };
 }
 fn contextHelpHint(arguments: std.process.Args) void {
@@ -49,6 +59,7 @@ fn contextHelpHint(arguments: std.process.Args) void {
     const info = @import("terminal/cli_help.zig");
     const verb = args.next();
     if (info.knownFamily(mode)) {
+        if (verb != null and !info.knownVerb(mode, verb.?)) if (info.nearestVerb(mode, verb.?)) |suggestion| std.debug.print("Did you mean: omagma {s} {s}?\n", .{ mode, suggestion });
         if (verb != null and info.knownVerb(mode, verb.?)) std.debug.print("Details: omagma {s} {s} --help.\n", .{ mode, verb.? }) else std.debug.print("Details: omagma {s} --help.\n", .{mode});
     } else if (std.mem.eql(u8, mode, "credentials") and verb != null and (std.mem.eql(u8, verb.?, "status") or std.mem.eql(u8, verb.?, "migrate") or std.mem.eql(u8, verb.?, "export"))) {
         std.debug.print("Details: omagma credentials {s} --help.\n", .{verb.?});
@@ -435,6 +446,12 @@ test {
     std.testing.refAllDecls(@import("terminal/capped_allocator.zig"));
     std.testing.refAllDecls(@import("terminal/core.zig"));
     std.testing.refAllDecls(@import("terminal/cli_plan.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_api.zig"));
+    std.testing.refAllDecls(@import("terminal/cli.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_contract.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_dates.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_view.zig"));
+    std.testing.refAllDecls(@import("terminal/error_text.zig"));
     std.testing.refAllDecls(@import("terminal/mime.zig"));
     std.testing.refAllDecls(@import("terminal/recipients.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));

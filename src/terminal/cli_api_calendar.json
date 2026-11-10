@@ -52,9 +52,7 @@
         },
         "date": {
           "type": "string",
-          "format": "date",
-          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
-          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days."
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in timeZone or the local zone; the reply echoes resolvedDate."
         },
         "view": {
           "type": "string",
@@ -78,6 +76,15 @@
           "type": "boolean",
           "default": false,
           "description": "Read retained local Calendar data without credentials or provider traffic. Results are marked cached and stale. An uncached calendar, window or event returns a cache miss."
+        },
+        "detail": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns {calendarId, summary, timeZone, events:[{id, summary, start, end, allDay, location, joinUrl, organizer, response, recurringEventId, cancelled, attendeeCount}]} with ISO-8601 start/end and empty values omitted. Named detail because view already selects day|week."
         }
       },
       "required": [
@@ -158,9 +165,7 @@
         },
         "date": {
           "type": "string",
-          "format": "date",
-          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
-          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days."
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in timeZone or the local zone; the reply echoes resolvedDate."
         },
         "view": {
           "type": "string",
@@ -1027,7 +1032,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 1024,
-      "description": "Exact target.calendar_id returned by calendar.list for this explicit account. Runtime bound: 1,024 UTF-8 bytes, no controls. Display names and implicit primary aliases are not accepted."
+      "description": "Exact target.calendar_id returned by calendar.list for this explicit account, or \"primary\" for the account's primary calendar; replies report the actual calendar_id. Runtime bound: 1,024 UTF-8 bytes, no controls. Display names are not accepted."
     },
     "CalendarMessageId": {
       "type": "string",

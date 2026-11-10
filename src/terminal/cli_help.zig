@@ -25,6 +25,11 @@ pub fn knownVerb(mode: []const u8, verb: []const u8) bool {
     };
     return false;
 }
+/// The closest valid operation of a known family, for a usage hint.
+pub fn nearestVerb(mode: []const u8, verb: []const u8) ?[]const u8 {
+    for (families) |f| if (eq(mode, f.name)) return @import("cli_contract.zig").nearest(verb, f.verbs);
+    return null;
+}
 pub fn knownFamily(mode: []const u8) bool {
     for (families) |f| if (eq(mode, f.name)) return true;
     return false;
@@ -103,7 +108,8 @@ pub fn options(io: std.Io) !void {
         \\  --fixture-root DIR      Fixture data root; requires --fixtures
         \\  --fixture-scenario NAME Fixture scenario; requires --fixtures
         \\
-        \\JSONL requests still carry their own account; --account is not a request default.
+        \\In omagma cli, --account fills in account for request lines that omit it, and
+        \\--strict exits with status 3 at EOF if any reply had ok:false.
         \\Command-specific data flags appear in COMMAND --help. For complete JSON objects,
         \\use omagma cli --help COMMAND or omagma cli --schema COMMAND.
         \\
@@ -218,8 +224,8 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
         if (eq(verb, "attachment-save")) return .{ .summary = "Stream a received attachment to a new private file", .flags = "--message-id ID --attachment-id ID --path NEW_FILE", .fields = "messageId, attachmentId, path. Saving refuses overwrite and symlink traversal." };
         if (eq(verb, "reply") or eq(verb, "forward")) return .{ .summary = "Create a local reply, reply-all or unaddressed forward draft", .flags = "--message-id ID [--reply-all (alias --all; reply)] [--format plain|markdown]\n  --preserve-formatting keeps original HTML/images inline\n  --original forwards as .eml (forward only; conflicts with --preserve-formatting)", .fields = "messageId, all? (reply-all), bodyFormat? (plain|markdown), preserveFormatting?; forward also accepts original? and JSON omitAttachments? (explicit text quote without files; conflicts with original/preserveFormatting). Result is a local draft; this does not send mail." };
         if (eq(verb, "send")) return .{ .summary = "Submit a reviewed message with a stable operation identity", .flags = "--to ADDRESSES --subject TEXT (--body-file FILE | --body-stdin | --body TEXT)\n  --format plain|markdown --from ADDRESS --cc ADDRESSES --bcc ADDRESSES\n  --operation-id ID [--send-delay 0..30]\n  --draft-file FILE is an alternative to individual recipient/body/file flags; --format may accompany it" ++ file_flags, .fields = "draft (subject, bodyText, optional bodyFormat/from/attachments), operationId. Recipients: address-list strings or arrays of {address,name}. " ++ delivery_fields ++ " Direct send has no delay unless --send-delay is supplied; delayed one-shot send stages and waits. Result is a durable receipt: check data.outcome (applied, rejected, unknown or preparationStopped)." };
-        if (eq(verb, "spam") or eq(verb, "unspam")) return .{ .summary = "Move a message or reviewed conversation into/out of Spam", .flags = "--message-id ID (alias --id) [--scope message|conversation]\n  OR --message-ids ID,ID for an explicit batch", .json_cmd = "mail.batch", .fields = "messageIds (array), action (spam|unspam). For a conversation, first resolve mail.triage-scope and pass its exact IDs to mail.batch." };
-        if (eq(verb, "archive") or eq(verb, "trash") or eq(verb, "restore")) return .{ .summary = "Change reversible mailbox labels", .flags = "--message-id ID (alias --id) [--scope message|conversation]\n  OR --message-ids ID,ID for an explicit batch", .fields = "messageId. JSONL conversation actions require mail.triage-scope followed by mail.batch with the resolved messageIds; direct scope does not expand targets." };
+        if (eq(verb, "spam") or eq(verb, "unspam")) return .{ .summary = if (eq(verb, "spam")) "Move a message or reviewed conversation into Spam" else "Move a message or reviewed conversation out of Spam into Inbox", .flags = "--message-id ID (alias --id) [--scope message|conversation]\n  OR --message-ids ID,ID for an explicit batch", .json_cmd = "mail.batch", .fields = "messageIds (array), action (spam|unspam). For a conversation, first resolve mail.triage-scope and pass its exact IDs to mail.batch." };
+        if (eq(verb, "archive") or eq(verb, "trash") or eq(verb, "restore")) return .{ .summary = if (eq(verb, "archive")) "Remove a message or reviewed conversation from Inbox" else if (eq(verb, "trash")) "Move a message or reviewed conversation to Trash" else "Return a message or reviewed conversation from Trash to Inbox", .flags = "--message-id ID (alias --id) [--scope message|conversation]\n  OR --message-ids ID,ID for an explicit batch", .fields = "messageId. JSONL conversation actions require mail.triage-scope followed by mail.batch with the resolved messageIds; direct scope does not expand targets." };
         if (eq(verb, "mark")) return .{ .summary = "Set read/star state or add/remove labels", .flags = "--message-id ID [--unread | --read] [--starred | --unstarred]\n  --add-label LABEL --remove-label LABEL (repeatable) [--scope message|conversation]\n  --message-ids ID,ID is an explicit-target alternative", .fields = "messageId, unread?, starred? (booleans), addLabels?, removeLabels? (arrays). For a conversation, resolve mail.triage-scope then use mail.batch with action:mark." };
         if (eq(verb, "batch")) return .{ .summary = "Apply an action to explicit targets and receive per-message outcomes", .flags = "--message-ids ID,ID --action archive|trash|restore|spam|unspam|mark\n  --unread|--read --starred|--unstarred --add-label LABEL --remove-label LABEL (repeatable)\n  OR --message-id ID --scope message|conversation as a single anchor", .fields = "messageIds (1..100 distinct IDs), action, optional unread/starred/addLabels/removeLabels. Result includes per-ID outcomes and undoToken." };
         if (eq(verb, "undo")) return .{ .summary = "Undo confirmed label changes from a batch", .flags = "--undo-token TOKEN [--message-ids ID,ID]", .fields = "undoToken, messageIds?. Only confirmed successful items are restored." };
@@ -253,7 +259,7 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
         if (eq(verb, "list")) return .{ .summary = "List live or downloaded contacts", .flags = "--limit 1..100 (live default 100) --cursor CURSOR [--cached] [--query TEXT]", .fields = "query filters cached contacts; live list paginates through nextCursor." };
         return .{ .summary = "Search live or downloaded contacts", .flags = "--query TEXT [--cached]", .fields = "Live search requests 30 results and has no cursor/limit paging. Cached search filters the downloaded snapshot." };
     } else if (eq(mode, "labels")) {
-        if (eq(verb, "list") or eq(verb, "palette")) return .{ .summary = "Read label definitions or Gmail's supported color palette", .flags = "[--cached (list)] [--message-ids ID,ID OR --message-id ID --scope message|conversation (list membership)]", .fields = "cacheOnly? (list); selected message targets invoke mail.label-state instead. palette needs no command-specific fields." };
+        if (eq(verb, "list") or eq(verb, "palette")) return .{ .summary = if (eq(verb, "list")) "Read label definitions, or membership for selected messages" else "List Gmail's supported label colors", .flags = "[--cached (list)] [--message-ids ID,ID OR --message-id ID --scope message|conversation (list membership)]", .fields = "cacheOnly? (list); selected message targets invoke mail.label-state instead. palette needs no command-specific fields." };
         if (eq(verb, "create")) return .{ .summary = "Create a custom label definition", .flags = "--name NAME --operation-id ID [--background-color HEX --text-color HEX]", .fields = "name, operationId, color? {backgroundColor,textColor}." };
         if (eq(verb, "rename")) return .{ .summary = "Rename a custom label while preserving its ID and memberships", .flags = "--label-id ID --name NAME --operation-id ID [--background-color HEX --text-color HEX]", .fields = "labelId, name, operationId; paired color flags also change its colors." };
         if (eq(verb, "color")) return .{ .summary = "Set a custom label's Gmail-compatible colors", .flags = "--label-id ID --background-color HEX --text-color HEX --operation-id ID", .fields = "labelId, operationId, color {backgroundColor,textColor}. Use labels.palette for supported values." };
@@ -262,7 +268,7 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
         if (eq(verb, "reply")) return .{ .summary = "Reply to an invitation and update Calendar", .flags = "--message-id ID --status accepted|tentative|declined --operation-id ID [--rsvp-only]", .fields = "messageId, status (accepted|tentative|declined), operationId. Accept/Tentative checks Calendar before sending; a known blocker returns outcome:blocked without sending. rsvpOnly:true explicitly sends just the RSVP. Decline is email-only. Inspect first; reconcile partial results without resending." };
         return .{ .summary = "Read invitation details or check an uncertain RSVP in Sent", .flags = "--message-id ID [--cached | --reconcile]", .fields = "messageId; cacheOnly? reads retained source without network; reconcile? checks positive Sent evidence without resending. Result includes organizer/attendee, startDisplay/endDisplay/durationDisplay, joinUrl, attendeeStatus, confirmedResponse and responseOutcome." };
     } else if (eq(mode, "operation")) {
-        return .{ .summary = "Inspect durable outcomes and recovery-draft references", .flags = if (eq(verb, "read")) "--operation-id ID" else "", .fields = if (eq(verb, "read")) "operationId." else "No command-specific fields." };
+        return .{ .summary = if (eq(verb, "read")) "Read one durable outcome and its recovery-draft reference" else "List durable outcomes of active operations", .flags = if (eq(verb, "read")) "--operation-id ID" else "", .fields = if (eq(verb, "read")) "operationId." else "No command-specific fields." };
     } else if (eq(mode, "calendar")) {
         if (eq(verb, "list")) return .{ .summary = "List calendars and effective read/write permissions", .fields = "Optional Calendar consent is required; see docs/CALENDAR-PERMISSIONS.md." };
         if (eq(verb, "agenda") or eq(verb, "freebusy")) return .{ .summary = if (eq(verb, "agenda")) "Read a bounded day or week with server-expanded recurring events" else "Read busy periods with the separate FreeBusy capability", .flags = "--calendar-id ID --date YYYY-MM-DD [--view day|week] [--time-zone IANA_ZONE]", .fields = "date is a civil date in timeZone or the selected calendar's timezone. Agenda snapshots remain explicitly stale after a failed refresh." };
@@ -282,7 +288,7 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
         if (eq(verb, "invitation-plan") or eq(verb, "review")) return .{ .summary = if (eq(verb, "review")) "Freeze the exact Calendar change for a received invitation or .ics event and return its review hash. Writes nothing." else "Preview what a received invitation or .ics event would do in a calendar. Read-only: shows the decision, resolved times and reminders.", .flags = "--calendar-id ID --message-id ID\n  review also requires --operation-id UNIQUE_ID\n  Timezone review: --start-time-zone IANA_ZONE --end-time-zone IANA_ZONE\n  --accept-floating-time | --reinterpret-embedded-timezones (explicit choice only)", .fields = "An .ics event without attendees (METHOD:PUBLISH or no METHOD) becomes your own event on the account's primary calendar: no guests are added and no RSVP is sent. Run `calendar review` first, then `calendar import` with the exact hash it returned. Source comes from the account's received message. Review returns an operationId and reviewHash; no calendar write occurs. Ambiguous local times require resolution." };
         return .{ .summary = if (eq(verb, "reconcile")) "Check a previously uncertain calendar action without replaying it" else if (eq(verb, "cancel")) "Apply a reviewed invitation cancellation" else if (eq(verb, "update")) "Apply a reviewed invitation update" else if (eq(verb, "import")) "Add a reviewed invitation or .ics event to Google Calendar. Requires the exact review hash; sends no email." else "Apply the exact previously reviewed invitation action once", .flags = "--calendar-id ID --operation-id ID --review-hash HASH", .fields = "Use the ID and hash returned by calendar review. Outcomes survive restart; unknown outcomes must be reconciled, never blindly resent. Import/update/cancel must match the stored action." };
     } else if (eq(mode, "cache")) {
-        return .{ .summary = if (eq(verb, "clear")) "Clear retained mail while keeping drafts, contacts and operations" else "Inspect local cache limits, arrival activity or refresh state", .fields = "No command-specific fields. These operations do not fetch mail." };
+        return .{ .summary = if (eq(verb, "clear")) "Clear retained mail while keeping drafts, contacts and operations" else if (eq(verb, "stats")) "Inspect local cache limits, residency and counters" else if (eq(verb, "activity")) "Read the local Inbox arrival serial and last sync time" else "Check whether another client is refreshing this account", .fields = "No command-specific fields. These operations do not fetch mail." };
     } else if (eq(mode, "terminal-auth")) {
         if (eq(verb, "authorize")) return .{ .summary = "Authorize explicitly requested terminal capabilities through Google consent", .flags = "--capabilities CSV (complete capability set; mail-read is required) [--client-file FILE]\n  Mail: mail-read,mail-drafts,mail-send,mail-modify\n  Contacts: contacts-read,contacts-write\n  Invitations: calendar-rsvp (response email)\n  Calendar: calendar-read,calendar-write-owned,calendar-write-shared,calendar-freebusy\n  Drive: drive-upload (only files Omagma uploads)\n  Meet: meet-settings (optional settings permission for automatic AI notes)", .fields = "clientFile: an explicit --client-file wins; otherwise the client of this account's current terminal grant, else the configured oauthClientFile. Request the complete desired set, retaining every capability the account already has (for Drive, add drive-upload to the current list). Opens Google consent in this account's Chrome profile. Calendar is optional; see docs/CALENDAR-PERMISSIONS.md. See setup instructions for credential-store selection." };
         return .{ .summary = if (eq(verb, "status")) "Inspect locally configured grants and credential-store selection" else "Revoke this account's local terminal grant and selected-store credential", .fields = "No command-specific fields. Local revoke is not Google's account-wide revocation." };
@@ -336,15 +342,20 @@ pub fn protocol(io: std.Io, a: std.mem.Allocator, target: ?[]const u8) !void {
         \\Replies: {"version":1,"id":...,"ok":true,"account":...,"data":...}
         \\Errors:  {"version":1,"id":...,"ok":false,"account":...,"error":{"code":...,"message":...}}
         \\Check ok on every reply; CLI exit status alone does not establish request success.
-        \\Except accounts.list, every request requires account. id is optional and echoed.
+        \\Except accounts.list, every request requires account (omagma cli --account A fills
+        \\it in for lines without one). id is optional and echoed. Unknown fields are rejected
+        \\(UnknownField with didYouMean) and nothing runs.
         \\Use cacheOnly:true to forbid fetching. Default reads allow provider access and may reuse cached bodies.
-        \\Sending requires a stable operationId; never automatically retry UnknownOutcome.
+        \\Lean reads: view:"summary" on lists, body:"text" on mail.read, fields:[...] projection.
+        \\Sending requires a stable operationId; review with dryRun:true first and never
+        \\automatically retry UnknownOutcome.
         \\
         \\3. Discover only the details you need:
         \\   omagma cli --help commands         Every supported JSONL cmd
         \\   omagma cli --help mail             Commands in one namespace
-        \\   omagma cli --help mail.read        Complete fields, examples and constraints
-        \\   omagma cli --schema mail.read      Machine-readable request schema
+        \\   omagma cli --help mail.read        Compact card: fields, types, defaults, example
+        \\   omagma cli --schema mail.read      Machine-readable request schema (--compact)
+        \\   omagma cli --manifest              Compact JSON index of every command
         \\   omagma cli --help-options          Shared process paths, fixtures and resource limits
         \\   omagma cli --help-all              Complete offline JSONL reference
         \\Use --fixtures with a private --cache-dir for a disconnected demonstration.
