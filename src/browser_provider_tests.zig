@@ -269,6 +269,27 @@ test "browser provider: cached mutations cannot change drafts cache or a success
     try verifyHost();
 }
 
+test "browser provider: a dry-run request in any spelling never executes as the real change" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, true);
+    try provider.cache.restore(0, fixture_snapshot, true);
+    const draft_id = try create(&provider, a, "Plan only");
+    resetHost(&.{});
+    host.provider = &provider;
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.archive", .account = account, .messageId = "old-inbox", .dryRun = true }, false), "DryRunUnsupported");
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.batch", .account = account, .messageIds = [_][]const u8{"old-inbox"}, .action = "trash", .dry_run = true }, false), "DryRunUnsupported");
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.send", .account = account, .draftId = draft_id, .operationId = "dry-guard", .DryRun = true }, false), "DryRunUnsupported");
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.send", .account = account, .operationId = "dry-nested", .draft = .{ .to = "peer@example.test", .subject = "x", .bodyText = "y", .dryRun = true } }, false), "DryRunUnsupported");
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.send", .account = account, .draftId = draft_id, .operationId = "dry-false", .dryRun = false }, false), "DryRunUnsupported");
+    try equal(@as(usize, 0), (try operations(&provider, a)).len);
+    try verifyHost();
+    try equal(@as(usize, 0), host.requests);
+}
+
 test "browser provider: verified profile precedes snapshot restore and actor bindings cannot be crossed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

@@ -86,10 +86,14 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
         return eventReviewValue(service.a, review);
     }
     if (std.mem.eql(u8, command, "calendar.agenda") or std.mem.eql(u8, command, "calendar.freebusy")) {
-        const window = try requestWindow(service.a, request, host, calendar);
-        if (std.mem.eql(u8, command, "calendar.freebusy")) return j.value(service.a, try service.freeBusy(calendar, window));
-        const result = try service.agenda(calendar, window);
-        return j.value(service.a, .{ .calendar = calendar, .snapshot = result.snapshot, .refreshError = result.refresh_error, .cacheError = result.cache_error });
+        const dated = try requestDatedWindow(service.a, request, host, calendar);
+        var value = if (std.mem.eql(u8, command, "calendar.freebusy")) try j.value(service.a, try service.freeBusy(calendar, dated.window)) else agenda: {
+            const result = try service.agenda(calendar, dated.window);
+            break :agenda try j.value(service.a, .{ .calendar = calendar, .snapshot = result.snapshot, .refreshError = result.refresh_error, .cacheError = result.cache_error });
+        };
+        // The civil date a relative form used, in the window's own zone.
+        if (dated.resolved_date) |date| if (value == .object) try value.object.put(service.a, "resolvedDate", .{ .string = date });
+        return value;
     }
 
     const planned = try requestPlan(service, request, host, calendar);
@@ -158,7 +162,9 @@ fn validateFields(request: j.Value, command: []const u8) !void {
         if (attempt <= 0 or attempt > 1000000) return error.InvalidCalendarRetry;
     } else if (j.get(request, "nextAttempt") != null) return error.InvalidCalendarConfirmation;
     if (std.mem.eql(u8, command, "calendar.agenda") or std.mem.eql(u8, command, "calendar.freebusy")) {
-        _ = try timezone.parseDate(try j.required(request, "date"));
+        // Relative forms resolve later, in the zone that builds the window.
+        const date = try j.required(request, "date");
+        if (!@import("cli_dates.zig").relative(date)) _ = try timezone.parseDate(date);
         if (j.get(request, "view")) |value| {
             const view = try j.string(value);
             if (!std.mem.eql(u8, view, "day") and !std.mem.eql(u8, view, "week")) return error.InvalidCalendarView;
@@ -235,12 +241,27 @@ pub fn parseReviewHash(raw: []const u8) ![32]u8 {
 }
 
 pub fn requestWindow(a: std.mem.Allocator, request: j.Value, host: HostInputs, calendar: t.Calendar) !t.Window {
+    return (try requestDatedWindow(a, request, host, calendar)).window;
+}
+pub const DatedWindow = struct { window: t.Window, resolved_date: ?[]const u8 };
+/// The request window plus the civil date a relative form (today, +3d,
+/// friday) resolved to, in the same zone: request timeZone, else the
+/// selected calendar's zone, else the local zone.
+pub fn requestDatedWindow(a: std.mem.Allocator, request: j.Value, host: HostInputs, calendar: t.Calendar) !DatedWindow {
     const zone_name = if (j.get(request, "timeZone")) |value| try j.string(value) else calendar.time_zone;
     var zone = try loadZone(a, host, zone_name);
     defer zone.deinit(a);
     const view = if (j.get(request, "view")) |value| try j.string(value) else "day";
     if (!std.mem.eql(u8, view, "day") and !std.mem.eql(u8, view, "week")) return error.InvalidCalendarView;
-    return svc.windowForDays(a, try j.required(request, "date"), if (std.mem.eql(u8, view, "day")) .day else .week, .{ .id = zone_name, .zone = &zone });
+    const raw = try j.required(request, "date");
+    const dates = @import("cli_dates.zig");
+    var resolved: ?[]const u8 = null;
+    if (dates.relative(raw)) {
+        const now_ms = std.Io.Timestamp.now(host.io, .real).toMilliseconds();
+        const today = zone.localDay(now_ms) catch @divFloor(now_ms, 86400000);
+        resolved = (try dates.resolveWith(a, raw, today, dates.weekdayRule(j.text(request, "cmd")))) orelse return error.InvalidCalendarDate;
+    }
+    return .{ .window = try svc.windowForDays(a, resolved orelse raw, if (std.mem.eql(u8, view, "day")) .day else .week, .{ .id = zone_name, .zone = &zone }), .resolved_date = resolved };
 }
 
 pub fn requestPlan(service: svc.Service, request: j.Value, host: HostInputs, calendar: t.Calendar) !svc.InvitationPlan {

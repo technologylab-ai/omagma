@@ -38,7 +38,11 @@ printf '%s\n' '{"id":"accounts","cmd":"accounts.list"}' | omagma cli
 ```
 
 Every account-scoped JSONL request needs an `account`; `omagma cli --account A`
-fills it in for lines that omit it (`--strict` exits 3 if any reply failed).
+fills it in for lines that omit it (`--strict` exits 6 if any reply had an
+unknown outcome, else 3 if any reply failed or a send was not applied).
+One-shot exit statuses: 0 ok/applied, 2 usage, 3 rejected or not applied, 4
+authorization, 5 not found, 6 unknown outcome (never resend), 7 transient
+(`retryable:true`).
 Follow returned message, thread, draft, contact, calendar and operation IDs
 within that account. A message's `id` is what request `messageId` means; its
 own `messageId`/`rfcMessageId` is the RFC header, used only for `rfc822msgid:`.
@@ -63,19 +67,25 @@ plain-text reading source, not the absence of an HTML alternative.
 JSONL requests are strict: an unknown or misspelled field (also inside `draft`,
 `event`, `contact`) fails with `UnknownField`, `field` and `didYouMean`, and
 nothing runs. Errors carry a `message` and often `field`, `hint` and
-`retryable`. Lean defaults for agents: `view:"summary"` on mail.list/search/
-thread and contacts, `body:"text"` with `maxBodyBytes`/`stripQuoted:true` on
-mail.read, and `fields:[...]` to project replies. Dates accept `today`,
-`tomorrow`, `+3d` or weekday names (echoed as `resolvedDate`);
+`retryable`; a write interrupted without an operation ID omits `retryable`:
+verify with the read its hint names before repeating. Lean defaults for
+agents: `view:"summary"` on mail.list/search/thread and contacts,
+`body:"text"` with `maxBodyBytes`/`stripQuoted:true` on mail.read, and
+`fields:[...]` to project **read** replies (truncation/warning markers stay;
+writes and dry runs refuse `fields` and always return their full result).
+Dates accept `today`, `tomorrow`, `+3d` or weekday names (echoed as
+`resolvedDate`); a reminder on today's weekday name is next week's.
 `calendarId:"primary"` works.
 
 Keep drafts local when sending was not requested. `draft.create` saves.
 `mail.reply`/`mail.forward` accept `bodyText`, creating the complete reply in one
-call. `draft.patch` changes only the supplied fields; `draft.update` replaces
-editable fields and refuses to drop saved recipients or threading unless
-`replace:true`. Before any send, run the same request with `dryRun:true` (also
-on mail.batch/archive/trash/mark): it sends nothing and returns the plan and
-`contentDigest`; pass that as `expectedContentDigest` to the real send.
+call (one-shot: `omagma mail reply … --body-file note.md`). `draft.patch`
+(one-shot `omagma draft patch`) changes only the supplied fields;
+`draft.update` replaces editable fields and refuses to drop saved recipients
+or threading unless `replace:true` (`--replace`). Before any send, run the same
+request with `dryRun:true` (one-shot `--dry-run`; also on mail.batch/archive/
+trash/mark): it sends nothing and returns the plan and `contentDigest`; pass
+that as `expectedContentDigest` to the real send.
 Single-message archive/trash/restore/mark reply with a compact label receipt.
 `draft.preview`, `draft.measure` and `draft.delivery-plan` help inspect content
 and encoded size without sending. Use command help to distinguish a bare Draft
@@ -131,7 +141,8 @@ for them. Unsupported recurrence/multiple events remain blocked.
    guests, then the AI notes setting is sent.
 7. Inspect `state`, `meetAiNotes.state` and `current` even when `ok` is true.
    `partial` means the event is saved but AI notes are not confirmed. For any
-   `unknown`, run read-only `meet-event-reconcile`; never create the event again
+   `unknown`, run `meet-event-reconcile` (Google reads only; it records the
+   settled result in the local journal); never create the event again
    or use a new operation ID. An unknown AI notes outcome is never resent. For
    `waiting_for_link`, reconcile; once it reports `meetAiNotes.phase: ready`,
    rerun apply with the same ID and hash, which sends only the first Meet

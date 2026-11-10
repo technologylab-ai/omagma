@@ -312,7 +312,7 @@
         },
         "set": {
           "$ref": "#/$defs/Draft",
-          "description": "Draft fields to replace; every omitted field (recipients, threading, attachments, original, format) stays exactly as saved. A supplied array replaces that whole array."
+          "description": "Draft fields to replace; every omitted field (recipients, threading, attachments, original, format) stays exactly as saved. A supplied array replaces that whole array. Read-only contentDigest, gmailLink and summaryCounts, a different id, and recoveryFields are refused (ReadOnlyField); bind the patch to a reviewed version with expectedContentDigest instead."
         },
         "expectedContentDigest": {
           "type": "string",
@@ -330,8 +330,9 @@
         "set"
       ],
       "notes": [
-        "Sends nothing. Recovery drafts with recoveryFields must be finished with draft.update.",
-        "Use draft.patch to edit bodyText or subject of a reply without restating its recipients and threading."
+        "Sends nothing. Recovery drafts with recoveryFields must be finished with draft.update; set.recoveryFields is refused.",
+        "Use draft.patch to edit bodyText or subject of a reply without restating its recipients and threading.",
+        "One-shot: omagma draft patch --draft-id ID with --subject/--body/--to/... or --draft-file holding only the fields to set."
       ],
       "examples": [
         {
@@ -411,6 +412,10 @@
         "draftId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId",
+          "description": "Optional operationId of an earlier send of this draft. Its recorded Drive receipts let attachmentPlan show files as reuse or newCopy; it does not authorize, start or retry a send."
         }
       },
       "required": [],
@@ -1934,13 +1939,14 @@
       "properties": {
         "draftId": {
           "type": "string",
-          "x-internal": true,
-          "description": "Internal TUI correlation; ignored. operation.list always returns this account's active operations."
+          "minLength": 1,
+          "description": "Optional local draft ID: return only the active operations recorded for that draft (echoed as data.draftId). Omitted returns every active operation of this account."
         }
       },
       "required": [],
       "notes": [
         "Local account-cache lookup; no provider request or mutation. Returns data.operations with stable IDs, content hashes, kind, outcomes, error codes and any recovery-draft/message/label references.",
+        "draftId narrows the list to one draft's sends, for example to find its unknown receipt before deciding how to proceed.",
         "Up to 1000 active operation records are kept in the hot index; settled records move to paged history.operations and operation.read resolves either location. These cover sending/RSVP/label definitions, not every direct mailbox or contact write; mail.batch returns a separate undo receipt.",
         "An outer ok:true only means the lookup succeeded. The operation outcome can be unknown; do not infer that mail was or was not sent.",
         "Lists active work. Use history.operations for paginated settled receipts; old replay fences are retained independently of source content."
@@ -1996,7 +2002,7 @@
         },
         "dueDate": {
           "type": "string",
-          "description": "Civil date YYYY-MM-DD, or today, tomorrow, +Nd/-Nd or a weekday name resolved in the local zone (echoed as resolvedDate); no time of day or timezone conversion."
+          "description": "Civil date YYYY-MM-DD, or today, tomorrow, yesterday, +Nd/-Nd or a weekday name, resolved in the local zone (echoed as resolvedDate); no time of day or timezone conversion. A weekday name means its NEXT occurrence: on a Friday, friday is one week ahead (use today for today)."
         }
       },
       "required": [
@@ -2277,10 +2283,8 @@
           "$ref": "#/$defs/Draft"
         },
         "draftId": {
-          "$ref": "#/$defs/WriteIdentifier"
-        },
-        "operationId": {
-          "$ref": "#/$defs/WriteOperationId"
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Optional saved draft ID of the composer that supplied draft; echoed as data.draftId for correlation. The plan always describes the supplied draft source."
         },
         "paths": {
           "type": "array",
@@ -2845,12 +2849,12 @@
             "null"
           ],
           "x-internal": true,
-          "description": "Internal list-navigation counts that serialized local drafts may carry; ignored on input. Omit it."
+          "description": "Internal list-navigation counts that serialized local drafts may carry. Omit it. draft.update refuses a non-null value that differs from the saved draft (ReadOnlyFieldChanged); draft.patch refuses it in set."
         },
         "contentDigest": {
           "type": "string",
           "readOnly": true,
-          "description": "Returned by draft.read; accepted unchanged when a read draft is passed back and ignored. Use expectedContentDigest to bind a change to a reviewed source."
+          "description": "Returned by draft.read; a read draft can be passed back unchanged. draft.update refuses a value that no longer matches the saved draft (ReviewedDraftChanged: the draft changed since that read); draft.patch refuses it in set. Use expectedContentDigest to bind a change to a reviewed source."
         },
         "gmailLink": {
           "type": [
@@ -2858,7 +2862,7 @@
             "null"
           ],
           "readOnly": true,
-          "description": "Returned by draft.read for a draft handed to Gmail; accepted unchanged when passed back and ignored. Gmail handoff state changes only through draft.gmail-* commands."
+          "description": "Returned by draft.read for a draft handed to Gmail; it can be passed back unchanged. draft.update refuses a different non-null value (ReadOnlyFieldChanged); draft.patch refuses it in set. Gmail handoff state changes only through draft.gmail-* commands."
         }
       },
       "required": []

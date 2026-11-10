@@ -40,13 +40,22 @@ pub fn load(a: std.mem.Allocator) !Catalogue {
     }
     return .{ .commands = commands.items, .definitions = definitions };
 }
+/// Truncation, paging and warning markers that a fields projection always
+/// keeps, so a lean read can never hide that it is incomplete.
+pub const kept_markers = [_][]const u8{ "bodyTruncated", "bodyBytes", "bodyHtmlBytes", "quotedStripped", "partial", "hasMore", "nextCursor", "decodeWarning", "bodyCacheError", "metadataPartial", "complete", "stale", "readWarnings" };
+const fields_description = "Optional output projection, accepted only on read commands: keep only these keys in each item of data.messages, data.events, data.contacts, data.drafts, data.items, data.queue, data.operations or data.entries, or in a single-object result. Truncation, paging and warning markers (bodyTruncated, bodyBytes, bodyHtmlBytes, quotedStripped, partial, hasMore, nextCursor, decodeWarning, bodyCacheError, metadataPartial, complete, stale, readWarnings) are always kept. Unknown names are ignored; the envelope is unchanged. Commands that change state refuse fields (UnknownField) and always return their complete result.";
+/// Whether a command accepts the fields projection: reads only (the same
+/// classification as client_contract), never a write or a dry run of one.
+pub fn projectable(name: []const u8) bool {
+    return @import("client_contract.zig").readOnlyEnvelope(name, false);
+}
 fn commonProperties(a: std.mem.Allocator, name: []const u8) !Value {
     var properties = try j.value(a, .{
         .id = .{ .type = .{ "string", "integer", "null" }, .maxLength = @as(usize, 256), .description = "Optional request correlation ID, echoed in its reply. A missing ID returns null." },
         .account = .{ .type = "string", .format = "email", .description = "Explicit configured, enabled account address from accounts.list. IDs, cursors and handles remain account-specific." },
         .grantFile = .{ .type = "string", .minLength = @as(usize, 1), .description = "Optional private terminal grant-registry path; defaults to --grant-file or the configured XDG/HOME grant registry." },
-        .fields = .{ .type = "array", .items = .{ .type = "string", .minLength = @as(usize, 1), .maxLength = @as(usize, 64) }, .maxItems = @as(usize, 64), .description = "Optional output projection: keep only these keys in each item of data.messages, data.events, data.contacts, data.drafts or data.items, or in a single-object result. Unknown names are ignored; the envelope is unchanged." },
     });
+    if (projectable(name)) try properties.object.put(a, "fields", try j.value(a, .{ .type = "array", .items = .{ .type = "string", .minLength = @as(usize, 1), .maxLength = @as(usize, 64) }, .minItems = @as(usize, 1), .maxItems = @as(usize, 64), .description = if (@import("client_contract.zig").conditionalMutation(name) != null) fields_description ++ " Not accepted together with reconcile:true." else fields_description }));
     try properties.object.put(a, "cmd", try j.value(a, .{ .type = "string", .@"const" = name }));
     return properties;
 }
@@ -118,23 +127,44 @@ fn writeSchema(writer: anytype, value: Value) !void {
     try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, writer);
     try writer.writeByte('\n');
 }
-/// Minified request schema without the shared id/grantFile/fields block and
-/// build metadata; account keeps only its type.
+/// Minified request schema without the shared id/grantFile block and build
+/// metadata; account keeps only its type. Reads keep their fields projection.
 fn compactSchema(a: std.mem.Allocator, catalogue: Catalogue, entry: Value) !Value {
     var schema = try requestSchema(a, catalogue, entry, true);
     for ([_][]const u8{ "$schema", "x-omagma-version", "x-max-request-bytes", "x-max-nesting" }) |key| _ = schema.object.orderedRemove(key);
     var properties = try j.copyObject(a, j.get(schema, "properties").?);
-    for ([_][]const u8{ "id", "grantFile", "fields" }) |key| _ = properties.object.orderedRemove(key);
+    for ([_][]const u8{ "id", "grantFile" }) |key| _ = properties.object.orderedRemove(key);
+    if (j.get(properties, "fields")) |_| try properties.object.put(a, "fields", try j.value(a, .{ .type = "array", .items = .{ .type = "string" }, .description = "Read-only projection; markers are always kept." }));
     try properties.object.put(a, "account", try j.value(a, .{ .type = "string", .format = "email" }));
     try schema.object.put(a, "properties", properties);
     return schema;
+}
+/// Names the nearest command or namespace on stderr before a usage error.
+/// The typed target is echoed only when it is a plain command-like word.
+fn unknownTarget(a: std.mem.Allocator, catalogue: Catalogue, target: []const u8, flag: []const u8) error{UnknownCommand} {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (catalogue.commands) |entry| {
+        const name = j.text(entry, "cmd");
+        names.append(a, name) catch break;
+        const prefix = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
+        var seen = false;
+        for (names.items) |old| seen = seen or std.mem.eql(u8, old, prefix);
+        if (!seen) names.append(a, prefix) catch break;
+    }
+    var plain = target.len != 0 and target.len <= 64;
+    for (target) |byte| plain = plain and (std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '-' or byte == '_');
+    const shown = if (plain) target else "this name";
+    if (@import("cli_contract.zig").nearest(target, names.items)) |suggestion| {
+        std.debug.print("Unknown JSONL command {s}; did you mean: omagma cli {s} {s}?\n", .{ shown, flag, suggestion });
+    } else std.debug.print("Unknown JSONL command {s}; list them with omagma cli --help commands.\n", .{shown});
+    return error.UnknownCommand;
 }
 pub fn schemas(io: std.Io, a: std.mem.Allocator, target: ?[]const u8, compact: bool) !void {
     const catalogue = try load(a);
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     if (target) |name| {
-        const entry = catalogue.find(name) orelse return error.UnknownCommand;
+        const entry = catalogue.find(name) orelse return unknownTarget(a, catalogue, name, "--schema");
         if (compact) {
             try std.json.Stringify.value(try compactSchema(a, catalogue, entry), .{}, &writer.interface);
             try writer.interface.writeByte('\n');
@@ -213,13 +243,13 @@ pub fn help(io: std.Io, a: std.mem.Allocator, target: []const u8) !void {
                     break;
                 }
             }
-            if (!found) return error.UnknownCommand;
+            if (!found) return unknownTarget(a, catalogue, target, "--help");
         }
         try writer.interface.writeAll("Omagma JSONL command catalogue\n\n");
         try list(&writer.interface, a, if (std.mem.eql(u8, target, "commands")) null else target, false);
         try writer.interface.writeAll("\nUse omagma cli --help COMMAND for a compact field card and example.\nUse omagma cli --schema COMMAND for every field, nested object and constraint.\n");
     } else {
-        const entry = catalogue.find(target) orelse return error.UnknownCommand;
+        const entry = catalogue.find(target) orelse return unknownTarget(a, catalogue, target, "--help");
         try card(&writer.interface, a, catalogue, entry);
     }
     try writer.interface.flush();
@@ -273,8 +303,15 @@ fn returnsNote(entry: Value) ?[]const u8 {
 fn idempotency(entry: Value) []const u8 {
     const command = j.text(entry, "cmd");
     if (j.get(j.get(entry, "properties") orelse .null, "operationId") != null) return "operationId";
-    if (@import("client_contract.zig").readOnlyEnvelope(command, false)) return "read-only";
+    if (j.get(j.get(entry, "properties") orelse .null, "undoToken") != null) return "undoToken";
+    if (!@import("client_contract.zig").mayMutate(command)) return "read-only";
     return "none";
+}
+/// "no", "yes" or "only with reconcile:true", from client_contract alone.
+fn mutatesText(command: []const u8) []const u8 {
+    const contract = @import("client_contract.zig");
+    if (contract.conditionalMutation(command) != null) return "only with reconcile:true";
+    return if (contract.mayMutate(command)) "yes" else "no";
 }
 /// Compact discovery card (well under 1 KiB): what the command does, its
 /// required and optional fields with types, defaults and enums, one example.
@@ -283,7 +320,7 @@ fn card(writer: anytype, a: std.mem.Allocator, catalogue: Catalogue, entry: Valu
     try writer.print("{s}: {s}\n", .{ command, j.text(entry, "summary") });
     var caps: std.ArrayList([]const u8) = .empty;
     if (j.get(entry, "capabilities")) |values| for (values.array.items) |value| try caps.append(a, try j.string(value));
-    try writer.print("capabilities: {s} · mutates: {s} · idempotency: {s}\n", .{ if (caps.items.len == 0) "none" else try std.mem.join(a, ",", caps.items), if (@import("client_contract.zig").readOnlyEnvelope(command, false)) "no" else "yes", idempotency(entry) });
+    try writer.print("capabilities: {s} · mutates: {s} · idempotency: {s}\n", .{ if (caps.items.len == 0) "none" else try std.mem.join(a, ",", caps.items), mutatesText(command), idempotency(entry) });
     const properties = j.get(entry, "properties") orelse j.object(a);
     var required: std.ArrayList([]const u8) = .empty;
     if (!std.mem.eql(u8, command, "accounts.list")) try required.append(a, "account:email");
@@ -313,10 +350,18 @@ fn card(writer: anytype, a: std.mem.Allocator, catalogue: Catalogue, entry: Valu
         }
         try writer.print("example: {s}\n", .{try std.json.Stringify.valueAlloc(a, shortest, .{})});
     };
-    try writer.print("Complete request fields: omagma cli --schema {s} [--compact] (all commands: id, fields:[...]; unknown fields fail)\n", .{command});
+    try writer.print("Complete request fields: omagma cli --schema {s} [--compact] (id{s}; unknown fields fail)\n", .{ command, if (projectable(command)) ", fields:[...]" else "; no fields: full result" });
 }
 /// One compact JSON index of every public command for agents.
 pub fn manifest(io: std.Io, a: std.mem.Allocator) !void {
+    const root = try manifestValue(a);
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try std.json.Stringify.value(root, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
+    try writer.interface.flush();
+}
+fn manifestValue(a: std.mem.Allocator) !Value {
     const catalogue = try load(a);
     var commands: Value = .{ .array = .init(a) };
     for (catalogue.commands) |entry| {
@@ -336,21 +381,20 @@ pub fn manifest(io: std.Io, a: std.mem.Allocator) !void {
                 try (if (needed) &required else &optional).array.append(.{ .string = field.key_ptr.* });
             }
         }
+        if (projectable(command)) try optional.array.append(.{ .string = "fields" });
         var row = try j.value(a, .{ .cmd = command, .summary = j.text(entry, "summary") });
         try row.object.put(a, "caps", j.get(entry, "capabilities") orelse Value{ .array = .init(a) });
         try row.object.put(a, "required", required);
         try row.object.put(a, "optional", optional);
-        try row.object.put(a, "mutates", .{ .bool = !@import("client_contract.zig").readOnlyEnvelope(command, false) });
+        // Conditional commands count as mutating and name their trigger.
+        try row.object.put(a, "mutates", .{ .bool = @import("client_contract.zig").mayMutate(command) });
+        if (@import("client_contract.zig").conditionalMutation(command)) |trigger| try row.object.put(a, "mutatesWhen", .{ .string = trigger });
         try row.object.put(a, "idempotency", .{ .string = idempotency(entry) });
         try commands.array.append(row);
     }
-    var root = try j.value(a, .{ .version = @import("build_options").version, .common = [_][]const u8{ "id", "account", "grantFile", "fields" }, .strict = true, .schema = "omagma cli --schema CMD [--compact]" });
+    var root = try j.value(a, .{ .version = @import("build_options").version, .common = [_][]const u8{ "id", "account", "grantFile" }, .readFields = "fields:[...] projects read replies only; markers are always kept", .strict = true, .schema = "omagma cli --schema CMD [--compact]" });
     try root.object.put(a, "commands", commands);
-    var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
-    try std.json.Stringify.value(root, .{}, &writer.interface);
-    try writer.interface.writeByte('\n');
-    try writer.interface.flush();
+    return root;
 }
 pub fn full(io: std.Io, a: std.mem.Allocator) !void {
     const catalogue = try load(a);
@@ -400,6 +444,38 @@ test "cli discovery: command cards stay compact and name required fields, types 
     const compact = try compactSchema(a, catalogue, catalogue.find("mail.send").?);
     try std.testing.expect(j.get(j.get(compact, "properties").?, "grantFile") == null);
     try std.testing.expect(j.get(j.get(compact, "properties").?, "dryRun") != null);
+}
+
+test "cli discovery: manifest, cards and schemas derive mutates and fields from client_contract" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const contract = @import("client_contract.zig");
+    const catalogue = try load(a);
+    const root = try manifestValue(a);
+    for (j.get(root, "common").?.array.items) |name| try std.testing.expect(!std.mem.eql(u8, name.string, "fields"));
+    const rows = j.get(root, "commands").?.array.items;
+    try std.testing.expectEqual(catalogue.commands.len, rows.len);
+    for (rows, catalogue.commands) |row, entry| {
+        const command = j.text(row, "cmd");
+        try std.testing.expectEqualStrings(j.text(entry, "cmd"), command);
+        try std.testing.expectEqual(contract.mayMutate(command), j.get(row, "mutates").?.bool);
+        try std.testing.expectEqual(contract.conditionalMutation(command) != null, j.get(row, "mutatesWhen") != null);
+        var lists_fields = false;
+        for (j.get(row, "optional").?.array.items) |name| lists_fields = lists_fields or std.mem.eql(u8, name.string, "fields");
+        try std.testing.expectEqual(projectable(command), lists_fields);
+        const schema = try requestSchema(a, catalogue, entry, false);
+        try std.testing.expectEqual(projectable(command), j.get(j.get(schema, "properties").?, "fields") != null);
+        // A command that can dry-run or write never offers a projection.
+        if (j.get(j.get(entry, "properties") orelse .null, "dryRun") != null) try std.testing.expect(contract.mayMutate(command) and !projectable(command));
+        var out: std.Io.Writer.Allocating = .init(a);
+        try card(&out.writer, a, catalogue, entry);
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "mutates: {s} ", .{mutatesText(command)})) != null);
+    }
+    // The reviewed misclassifications stay fixed.
+    for ([_][]const u8{ "draft.gmail-info", "calendar.freebusy", "calendar.invitation-plan" }) |command| try std.testing.expect(!contract.mayMutate(command));
+    try std.testing.expect(contract.mayMutate("calendar.meet-event-reconcile"));
+    try std.testing.expectEqualStrings("only with reconcile:true", mutatesText("invitation.inspect"));
 }
 
 test "meet notes: public authorization capabilities match the runtime grant set" {

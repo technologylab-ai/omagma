@@ -193,6 +193,159 @@ test "CLI contract: one-call reply, patching and guarded replacement keep thread
     _ = try h.data(try std.json.Stringify.valueAlloc(a, request, .{}));
 }
 
+test "CLI contract: fields never hides a write's outcome and reads keep their incompleteness markers" {
+    var h: Harness = undefined;
+    try h.init("fields-safety");
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const draft = try h.data("{\"cmd\":\"draft.create\",\"account\":\"personal@example.com\",\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"Fields\",\"bodyText\":\"Never projected\"}}");
+    const id = j.text(draft, "id");
+    const drafts_before = try h.drafts();
+    // Every write, and every dry run of one, refuses the projection before
+    // anything runs: nothing is sent, journaled, saved or relabeled.
+    for ([_][]const u8{
+        "{\"cmd\":\"mail.send\",\"account\":\"personal@example.com\",\"operationId\":\"op-f1\",\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"Q\",\"bodyText\":\"x\"},\"fields\":[\"messageId\"]}",
+        "{\"cmd\":\"mail.send\",\"account\":\"personal@example.com\",\"operationId\":\"op-f2\",\"dryRun\":true,\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"Q\",\"bodyText\":\"x\"},\"fields\":[\"sendable\"]}",
+        try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.send\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"operationId\":\"op-f3\",\"fields\":[\"status\",\"sendable\"]}}", .{id}),
+        try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.queue\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"operationId\":\"op-f4\",\"fields\":[\"queueId\"]}}", .{id}),
+        "{\"cmd\":\"mail.archive\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\",\"fields\":[\"messageId\"]}",
+        "{\"cmd\":\"mail.batch\",\"account\":\"personal@example.com\",\"messageIds\":[\"shared-msg-010\"],\"action\":\"archive\",\"fields\":[\"x\"]}",
+        "{\"cmd\":\"draft.create\",\"account\":\"personal@example.com\",\"draft\":{\"subject\":\"S\"},\"fields\":[\"subject\"]}",
+        "{\"cmd\":\"invitation.inspect\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\",\"reconcile\":true,\"fields\":[\"summary\"]}",
+        "{\"cmd\":\"calendar.meet-event-reconcile\",\"account\":\"personal@example.com\",\"calendarId\":\"primary\",\"operationId\":\"op\",\"reviewHash\":\"00\",\"fields\":[\"state\"]}",
+    }) |raw| {
+        const refused = try h.failure(raw);
+        try std.testing.expectEqualStrings("UnknownField", j.text(refused, "code"));
+        try std.testing.expectEqualStrings("fields", j.text(refused, "field"));
+        try std.testing.expect(std.mem.indexOf(u8, j.text(refused, "message"), "only available on read commands") != null);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try h.sends());
+    try std.testing.expectEqual(drafts_before, try h.drafts());
+    try std.testing.expectEqual(@as(usize, 0), (try h.data("{\"cmd\":\"operation.list\",\"account\":\"personal@example.com\"}")).object.get("operations").?.array.items.len);
+    var inbox = false;
+    for (j.get(try h.data("{\"cmd\":\"mail.read\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\"}"), "labels").?.array.items) |label| inbox = inbox or std.mem.eql(u8, label.string, "INBOX");
+    try std.testing.expect(inbox);
+    // Reads project, and a truncated body still says so.
+    const read = try h.data("{\"cmd\":\"mail.read\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-003\",\"body\":\"text\",\"maxBodyBytes\":10,\"fields\":[\"id\"]}");
+    try std.testing.expect(j.get(read, "bodyTruncated").?.bool);
+    try std.testing.expect(j.get(read, "bodyBytes").?.integer > 10);
+    try std.testing.expect(j.get(read, "bodyText") == null and j.get(read, "bodyHtmlBytes") == null);
+    const page = try h.data("{\"cmd\":\"mail.list\",\"account\":\"personal@example.com\",\"label\":\"INBOX\",\"limit\":2,\"fields\":[\"id\"]}");
+    try std.testing.expect(j.get(page, "hasMore") != null);
+    // Read-only invitation inspection keeps its projection.
+    const inspected = try h.frame("{\"cmd\":\"invitation.inspect\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\",\"fields\":[\"summary\"]}");
+    if (!try j.boolean(inspected, "ok", false)) try std.testing.expect(!std.mem.eql(u8, j.text(j.get(inspected, "error").?, "code"), "UnknownField"));
+}
+
+test "CLI contract: dry runs and real label changes agree on refusals" {
+    var h: Harness = undefined;
+    try h.init("dry-parity");
+    defer h.deinit();
+    for ([_][]const u8{ "", ",\"dryRun\":true" }) |dry| {
+        const a = h.arena.allocator();
+        try std.testing.expectEqualStrings("MessageNotFound", j.text(try h.failure(try std.fmt.allocPrint(a, "{{\"cmd\":\"mail.archive\",\"account\":\"personal@example.com\",\"messageId\":\"no-such-message\"{s}}}", .{dry})), "code"));
+        try std.testing.expectEqualStrings("EmptyMutation", j.text(try h.failure(try std.fmt.allocPrint(a, "{{\"cmd\":\"mail.mark\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\"{s}}}", .{dry})), "code"));
+        try std.testing.expectEqualStrings("InvalidTriageScope", j.text(try h.failure(try std.fmt.allocPrint(a, "{{\"cmd\":\"mail.batch\",\"account\":\"personal@example.com\",\"messageIds\":[\"shared-msg-010\"],\"action\":\"archive\",\"scope\":\"everything\"{s}}}", .{dry})), "code"));
+        try std.testing.expectEqualStrings("ConflictingLabels", j.text(try h.failure(try std.fmt.allocPrint(a, "{{\"cmd\":\"mail.mark\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\",\"addLabels\":[\"STARRED\"],\"removeLabels\":[\"STARRED\"]{s}}}", .{dry})), "code"));
+    }
+    // Neither side changed anything.
+    var inbox = false;
+    for (j.get(try h.data("{\"cmd\":\"mail.read\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\"}"), "labels").?.array.items) |label| inbox = inbox or std.mem.eql(u8, label.string, "INBOX");
+    try std.testing.expect(inbox);
+}
+
+test "CLI contract: draft patch and update refuse read-only and recovery fields instead of ignoring them" {
+    var h: Harness = undefined;
+    try h.init("read-only-fields");
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const created = try h.data("{\"cmd\":\"draft.create\",\"account\":\"personal@example.com\",\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"Hi\",\"bodyText\":\"Hello\"}}");
+    const id = j.text(created, "id");
+    for ([_][]const u8{ "\"recoveryFields\":[\"x@example.org\",\"\",\"\",\"S\",\"B\"]", "\"contentDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\"", "\"gmailLink\":{\"paused\":false}", "\"summaryCounts\":{\"to\":9}", "\"id\":\"other\"" }) |field| {
+        const refused = try h.failure(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.patch\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"set\":{{{s}}}}}", .{ id, field }));
+        try std.testing.expectEqualStrings("ReadOnlyField", j.text(refused, "code"));
+        try std.testing.expect(std.mem.startsWith(u8, j.text(refused, "field"), "set."));
+    }
+    // The saved draft is unchanged and still a normal draft.
+    const read = try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.read\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\"}}", .{id}));
+    try std.testing.expect(j.get(read, "recoveryFields") == null or j.get(read, "recoveryFields").? == .null);
+    try std.testing.expectEqualStrings("Hi", j.text(read, "subject"));
+    // A read draft passes back unchanged; a stale digest or edited link does not.
+    var request = try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = id });
+    try request.object.put(a, "draft", read);
+    _ = try h.data(try std.json.Stringify.valueAlloc(a, request, .{}));
+    _ = try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.patch\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"set\":{{\"subject\":\"Changed elsewhere\"}}}}", .{id}));
+    try std.testing.expectEqualStrings("ReviewedDraftChanged", j.text(try h.failure(try std.json.Stringify.valueAlloc(a, request, .{})), "code"));
+    var edited = try j.copyObject(a, try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.read\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\"}}", .{id})));
+    try edited.object.put(a, "gmailLink", try j.value(a, .{ .paused = true }));
+    try request.object.put(a, "draft", edited);
+    try std.testing.expectEqualStrings("ReadOnlyFieldChanged", j.text(try h.failure(try std.json.Stringify.valueAlloc(a, request, .{})), "code"));
+}
+
+test "CLI contract: declared fields are honoured: preview operationId, operation.list draft filter" {
+    var h: Harness = undefined;
+    try h.init("declared-fields");
+    defer h.deinit();
+    const a = h.arena.allocator();
+    const one = j.text(try h.data("{\"cmd\":\"draft.create\",\"account\":\"personal@example.com\",\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"One\",\"bodyText\":\"1\"}}"), "id");
+    const two = j.text(try h.data("{\"cmd\":\"draft.create\",\"account\":\"personal@example.com\",\"draft\":{\"to\":\"alex@example.org\",\"subject\":\"Two\",\"bodyText\":\"2\"}}"), "id");
+    _ = try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.send\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"operationId\":\"op-one\"}}", .{one}));
+    _ = try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"draft.send\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\",\"operationId\":\"op-two\"}}", .{two}));
+    // A label-definition receipt has no draft and must be filtered out.
+    _ = try h.data("{\"cmd\":\"labels.create\",\"account\":\"personal@example.com\",\"name\":\"Filtered\",\"operationId\":\"op-label\"}");
+    const all = (try h.data("{\"cmd\":\"operation.list\",\"account\":\"personal@example.com\"}")).object.get("operations").?.array.items;
+    var expected: usize = 0;
+    var label_listed = false;
+    for (all) |operation| {
+        if (std.mem.eql(u8, j.text(operation, "draftId"), two)) expected += 1;
+        label_listed = label_listed or std.mem.eql(u8, j.text(operation, "id"), "op-label");
+    }
+    try std.testing.expect(label_listed);
+    const filtered = try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"operation.list\",\"account\":\"personal@example.com\",\"draftId\":\"{s}\"}}", .{two}));
+    const items = filtered.object.get("operations").?.array.items;
+    try std.testing.expectEqual(expected, items.len);
+    try std.testing.expect(items.len < all.len);
+    for (items) |operation| try std.testing.expectEqualStrings(two, j.text(operation, "draftId"));
+    try std.testing.expectEqualStrings(two, j.text(filtered, "draftId"));
+    _ = try h.data("{\"cmd\":\"draft.preview\",\"account\":\"personal@example.com\",\"operationId\":\"op-one\",\"draft\":{\"bodyText\":\"Preview\"}}");
+    try std.testing.expectEqualStrings("UnknownField", j.text(try h.failure("{\"cmd\":\"draft.selection-plan\",\"account\":\"personal@example.com\",\"operationId\":\"op\",\"draft\":{},\"paths\":[\"/tmp/x\"],\"delivery\":\"attach\"}"), "code"));
+}
+
+test "CLI contract: relative dates resolve in the command's own zone and reminders skip to next week" {
+    var h: Harness = undefined;
+    try h.init("relative-zones");
+    defer h.deinit();
+    const a = h.arena.allocator();
+    // The calendar window zone decides "today": UTC+14 is always ahead of UTC-12.
+    const east = j.text(try h.data("{\"cmd\":\"calendar.agenda\",\"account\":\"personal@example.com\",\"calendarId\":\"primary\",\"date\":\"today\",\"timeZone\":\"Etc/GMT-14\"}"), "resolvedDate");
+    const west = j.text(try h.data("{\"cmd\":\"calendar.agenda\",\"account\":\"personal@example.com\",\"calendarId\":\"primary\",\"date\":\"today\",\"timeZone\":\"Etc/GMT+12\"}"), "resolvedDate");
+    const timezone = @import("terminal/timezone.zig");
+    const east_day = try timezone.dateDay(east);
+    const west_day = try timezone.dateDay(west);
+    try std.testing.expect(east_day - west_day >= 1 and east_day - west_day <= 2);
+    // Without timeZone the selected calendar's zone is used and still echoed.
+    try std.testing.expectEqual(@as(usize, 10), j.text(try h.data("{\"cmd\":\"calendar.agenda\",\"account\":\"personal@example.com\",\"calendarId\":\"primary\",\"date\":\"friday\",\"detail\":\"summary\"}"), "resolvedDate").len);
+    // A reminder on today's weekday is next week's; "today" stays today.
+    const today = j.text(try h.data("{\"cmd\":\"reminder.set\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-010\",\"expectedVersion\":0,\"dueDate\":\"today\"}"), "resolvedDate");
+    const day = try timezone.dateDay(today);
+    const names = [_][]const u8{ "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday" };
+    const weekday = names[@intCast(@mod(day + 4, 7))];
+    const next = j.text(try h.data(try std.fmt.allocPrint(a, "{{\"cmd\":\"reminder.set\",\"account\":\"personal@example.com\",\"messageId\":\"shared-msg-011\",\"expectedVersion\":0,\"dueDate\":\"{s}\"}}", .{weekday})), "resolvedDate");
+    try std.testing.expectEqual(day + 7, try timezone.dateDay(next));
+}
+
+test "CLI contract: duplicate keys and abbreviated fields are named precisely" {
+    var h: Harness = undefined;
+    try h.init("nits");
+    defer h.deinit();
+    const duplicate = try h.failure("{\"cmd\":\"mail.send\",\"account\":\"personal@example.com\",\"operationId\":\"op\",\"dryRun\":true,\"dryRun\":false,\"draft\":{\"to\":\"a@example.org\"}}");
+    try std.testing.expectEqualStrings("InvalidRequest", j.text(duplicate, "code"));
+    try std.testing.expect(std.mem.indexOf(u8, j.text(duplicate, "message"), "duplicate key") != null);
+    try std.testing.expectEqual(@as(i64, 0), try h.sends());
+    const short = try h.failure("{\"cmd\":\"mail.search\",\"account\":\"personal@example.com\",\"q\":\"invoice\"}");
+    try std.testing.expectEqualStrings("query", j.text(short, "didYouMean"));
+}
+
 test "CLI contract: lean views, receipts and relative dates reshape replies only" {
     var h: Harness = undefined;
     try h.init("views");

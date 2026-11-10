@@ -31,7 +31,7 @@ FAMILIES = {
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
-    "draft": ("list", "read", "create", "update", "preview", "open-preview", "recovery-save", "send", "queue", "discard"),
+    "draft": ("list", "read", "create", "update", "patch", "preview", "open-preview", "recovery-save", "send", "queue", "discard"),
     "queue": ("list", "read", "cancel", "resume", "process", "send-now"),
     "attachment": ("import", "discard", "open"),
     "labels": ("list", "create", "rename", "delete", "color", "palette"),
@@ -142,7 +142,9 @@ def file_option_guidance(runner):
             value = "auto" if flag == "--attachment-mode" else missing
             for context in ([], ["--config", str(runner.invalid_config)]):
                 runner.usage([*prefix, *context, flag, value], "AttachmentsRequireDraftSource", without_home=True)
-        runner.usage([*prefix, "--dry-run"], "DryRunRequiresDraftSource", without_home=True)
+        # draft send has the executor's dryRun plan (checked in agent_contract).
+        if prefix != ["draft", "send"]:
+            runner.usage([*prefix, "--dry-run"], "DryRunRequiresDraftSource", without_home=True)
     for flag in ("--attach-file", "--upload-file", "--file", "--attachment-mode"):
         runner.usage(["mail", "read", flag], "ValueRequired", without_home=True)
         result = runner.run(["mail", "read", flag, missing, "--help"], without_configuration=True)
@@ -640,6 +642,85 @@ def agent_contract(runner):
         require(b"CommandFailed" not in result.stderr, "a JSON error reply also printed a redundant stderr line")
     require(b"Unknown option --limt; did you mean --limit?" in runner.run(["mail", "list", "--limt", "1"]).stderr,
             "unknown option was not named with its nearest valid option")
+    send_outcomes(runner, session, sends)
+
+
+def send_outcomes(runner, session, sends):
+    """fields never hides a write; one-shot and --strict exits follow outcomes."""
+    account = ACCOUNTS[0]
+    draft = {"to": [{"address": "alex@example.org"}], "subject": "Outcome", "bodyText": "Body"}
+    _, replies = session("projection", [
+        {"cmd": "mail.send", "account": account, "operationId": "op-p1", "draft": draft, "fields": ["messageId"]},
+        {"cmd": "mail.send", "account": account, "operationId": "op-p2", "dryRun": True, "draft": draft, "fields": ["sendable"]},
+        {"cmd": "mail.archive", "account": account, "messageId": "shared-msg-010", "fields": ["messageId"]},
+        {"cmd": "mail.read", "account": account, "messageId": "shared-msg-003", "body": "text", "maxBodyBytes": 8, "fields": ["id"]}])
+    require(all(reply["error"]["code"] == "UnknownField" and reply["error"]["field"] == "fields" for reply in replies[:3]),
+            "a write or dry run accepted the fields projection")
+    require(replies[3]["ok"] and replies[3]["data"]["bodyTruncated"] and "bodyText" not in replies[3]["data"],
+            "a read projection dropped its truncation marker")
+    require(sends("projection") == 0, "a refused projection still sent mail")
+
+    def one_shot(name, scenario, *arguments):
+        common = ["--fixtures", "--fixture-root", str(FIXTURES), "--cache-dir", str(runner.directory / name), "--account", account]
+        if scenario:
+            common += ["--fixture-scenario", scenario]
+        return runner.run([*arguments, *common])
+
+    send = ["mail", "send", "--to", "alex@example.org", "--subject", "Outcome", "--body", "Body"]
+    for scenario, status, outcome in ((None, 0, "applied"), ("rejected-mutation", 3, "rejected"), ("unknown-send", 6, "unknown")):
+        result = one_shot(f"outcome-{status}", scenario, *send, "--operation-id", f"op-{status}")
+        reply = json.loads(result.stdout)
+        require(reply["ok"] and reply["data"]["outcome"] == outcome and result.returncode == status,
+                f"send outcome {outcome} exited {result.returncode}, expected {status}")
+        require(b"CommandFailed" not in result.stderr, "an outcome exit printed a redundant stderr line")
+    # A saved-draft --dry-run is the JSONL plan: nothing is sent.
+    created = json.loads(one_shot("saved-dry", None, "draft", "create", "--to", "alex@example.org", "--subject", "S", "--body", "B").stdout)
+    draft_id = created["data"]["id"]
+    planned = one_shot("saved-dry", None, "draft", "send", "--draft-id", draft_id, "--operation-id", "op-plan", "--dry-run")
+    plan = json.loads(planned.stdout)
+    require(planned.returncode == 0 and plan["data"]["dryRun"] and plan["data"]["status"] == "planned" and len(plan["data"]["contentDigest"]) == 64,
+            "draft send --dry-run did not return the JSONL plan")
+    require(json.loads(one_shot("saved-dry", None, "cache", "stats").stdout)["data"]["fixtureSends"] == 0, "a dry run sent mail")
+    sent = one_shot("saved-dry", None, "draft", "send", "--draft-id", draft_id, "--operation-id", "op-plan",
+                    "--expected-content-digest", plan["data"]["contentDigest"])
+    require(sent.returncode == 0 and json.loads(sent.stdout)["data"]["outcome"] == "applied", "reviewed digest send failed")
+    archived = one_shot("label-dry", None, "mail", "archive", "--message-id", "shared-msg-010", "--dry-run")
+    require(archived.returncode == 0 and json.loads(archived.stdout)["data"]["dryRun"], "mail archive --dry-run did not plan")
+    # Reply notes, patches and the replacement guard in one-shot form.
+    reply = one_shot("reply-body", None, "mail", "reply", "--message-id", "shared-msg-005", "--all", "--body", "Thursday works.")
+    data = json.loads(reply.stdout)["data"]
+    require(reply.returncode == 0 and data["bodyText"].startswith("Thursday works."), "mail reply --body was not the note")
+    patched = one_shot("reply-body", None, "draft", "patch", "--draft-id", data["id"], "--subject", "Patched subject")
+    patch = json.loads(patched.stdout)["data"]
+    require(patched.returncode == 0 and patch["subject"] == "Patched subject" and patch["threadId"] == data["threadId"],
+            "draft patch did not keep threading")
+    guarded = one_shot("reply-body", None, "draft", "update", "--draft-id", data["id"], "--body", "Only text")
+    require(guarded.returncode == 3 and json.loads(guarded.stdout)["error"]["code"] == "DraftReplaceWouldDropThreading",
+            "draft update dropped threading without --replace")
+    replaced = one_shot("reply-body", None, "draft", "update", "--draft-id", data["id"], "--body", "Only text", "--replace")
+    require(replaced.returncode == 0 and json.loads(replaced.stdout)["data"]["threadId"] == "", "draft update --replace failed")
+    for arguments, error in ((["mail", "forward", "--message-id", "shared-msg-005", "--reply-all"], "ReplyAllRequiresReply"),
+                             (["mail", "reply", "--message-id", "shared-msg-005", "--to", "x@example.org"], "ReplyAcceptsOnlyBody"),
+                             (["cli", "--account", "not an address"], "InvalidAccountOption"),
+                             (["mail", "list", "--limit", "many"], "InvalidOptionValue")):
+        result = runner.run([*arguments, "--fixtures", "--cache-dir", str(runner.directory / "usage-exits")])
+        require(result.returncode == 2 and error.encode() in result.stderr and result.stdout == b"", f"{arguments} was not a usage error")
+    # --strict: unknown beats failure beats success.
+    result, _ = session("strict-unknown", [{"cmd": "mail.send", "account": account, "operationId": "op-s", "draft": draft}],
+                        "--strict", "--fixture-scenario", "unknown-send")
+    require(result.returncode == 6, f"--strict with an unknown send exited {result.returncode}")
+    result, _ = session("strict-rejected", [{"cmd": "mail.send", "account": account, "operationId": "op-r", "draft": draft},
+                                             {"cmd": "mail.list", "account": account, "limit": 1}],
+                        "--strict", "--fixture-scenario", "rejected-mutation")
+    require(result.returncode == 3, f"--strict with a rejected send exited {result.returncode}")
+    # Discovery nits: nearest command, offline schema with process options.
+    suggestion = runner.run(["cli", "--help", "mail.reed"], without_home=True)
+    require(suggestion.returncode == 2 and b"did you mean: omagma cli --help mail.read" in suggestion.stderr,
+            "unknown command help did not name the nearest command")
+    schema = runner.run(["cli", "--schema", "mail.read", "--fixtures", "--compact"], without_home=True)
+    require(schema.returncode == 0 and json.loads(schema.stdout)["title"] == "mail.read", "--schema rejected a process option")
+    reply_help = runner.run(["mail", "reply", "--help"], without_home=True)
+    require(b"--body TEXT" in reply_help.stdout, "mail reply help omitted --body")
 
 
 def protocol(runner):
@@ -682,10 +763,12 @@ def rsvp_contract(runner):
               "--account", ACCOUNTS[0]]
     invitation = ["--message-id", "shared-msg-009"]
 
-    def request(family, verb, *arguments):
+    def request(family, verb, *arguments, status=0):
         result = runner.run([family, verb, *common, *arguments])
         reply = json.loads(result.stdout)
-        require(result.returncode == 0 and not result.stderr and reply.get("ok") is True,
+        # ok:true carries the receipt; the exit status follows its outcome
+        # (a blocked RSVP was not sent: 3).
+        require(result.returncode == status and not result.stderr and reply.get("ok") is True,
                 "one-shot RSVP command lost its successful JSON result contract")
         return reply["data"]
 
@@ -698,7 +781,7 @@ def rsvp_contract(runner):
     for status in ("accepted", "tentative"):
         blocked = request("invitations", "reply", *invitation, "--status", status,
                           "--operation-id", "one-shot-" + status,
-                          "--fixture-scenario", "calendar-no-grant")
+                          "--fixture-scenario", "calendar-no-grant", status=3)
         require(blocked["outcome"] == "blocked"
                 and blocked["calendarSync"]["errorCode"] == "CalendarPermissionRequired",
                 "one-shot RSVP did not return its known Calendar blocker before submission")

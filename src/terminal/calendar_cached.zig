@@ -60,8 +60,10 @@ pub fn dispatch(a: std.mem.Allocator, grants: service.Grants, store: *persistenc
         const event = try store.cachedEvent(a, target, try j.required(request, "eventId")) orelse return error.CalendarEventNotCached;
         return j.value(a, .{ .calendar = calendar, .event = event, .cached = true, .stale = true, .refreshError = reason });
     }
-    const window = try commands.requestWindow(a, request, inputs, calendar);
-    var snapshot = try cache.loadFn(cache.context, a, target, window) orelse return error.CalendarNotCached;
+    const dated = try commands.requestDatedWindow(a, request, inputs, calendar);
+    var snapshot = try cache.loadFn(cache.context, a, target, dated.window) orelse return error.CalendarNotCached;
     snapshot.stale = true;
-    return j.value(a, .{ .calendar = calendar, .snapshot = snapshot, .cached = true, .refreshError = reason });
+    var value = try j.value(a, .{ .calendar = calendar, .snapshot = snapshot, .cached = true, .refreshError = reason });
+    if (dated.resolved_date) |date| try value.object.put(a, "resolvedDate", .{ .string = date });
+    return value;
 }
