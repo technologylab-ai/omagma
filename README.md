@@ -42,10 +42,12 @@ to your agent.
 
 ### Calendar, meetings and invitations
 
-Calendar has Agenda, Day and Week views. Combine selected calendars across all
+Calendar has Agenda, Day and Week views; Day and Week are a time grid of
+coloured event blocks sized by their duration, with overlapping events side by
+side and all-day events in a band above. Combine selected calendars across all
 three accounts, including read-only subscriptions such as holidays. Colours,
-visibility and your Priority calendar persist. Week exposes overlapping events
-through a chooser with full times, calendar and account names.
+visibility and your Priority calendar persist. A chooser lists overlapping
+events with full times, calendar and account names.
 [See the combined Week capture](docs/images/omagma-calendar-week.png).
 
 **Create a meeting, then review it.** Choose a destination calendar, timed or
