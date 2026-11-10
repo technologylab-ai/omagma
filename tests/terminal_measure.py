@@ -133,7 +133,7 @@ def cli_cycle(client, index):
 def tui_action(terminal, key, predicate):
     before = terminal.output_total
     terminal.send(key)
-    terminal.until(lambda: terminal.output_total > before and "Ready" in terminal.text() and predicate())
+    terminal.until(lambda: terminal.output_total > before and terminal.ready() and predicate())
 
 
 def tui_cycle(terminal, index):
@@ -221,7 +221,7 @@ def measure_workload(args, report, directory):
     else:
         terminal = Terminal(args.binary, directory / "tui", extra=extra, history_limit=65536)
         try:
-            terminal.until(lambda: "Ready" in terminal.text() and "Synthetic personal thread 031" in terminal.text())
+            terminal.until(lambda: terminal.ready() and "Synthetic personal thread 031" in terminal.text())
             baseline = process_sample(terminal.process.pid)
             report["processInitial"] = baseline
             with Sampler(terminal.process.pid) as sampler:

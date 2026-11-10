@@ -25,13 +25,70 @@ pub const Palette = struct {
     magenta: Color = .{ 199, 149, 230 },
     orange: Color = .{ 255, 158, 97 },
     red: Color = .{ 255, 112, 112 },
-    /// Derived roles: an unfocused pane's selected row, quiet unfocused pane
-    /// borders (below muted text) and a raised surface for dialogs.
-    selection_inactive: Color = .{ 32, 38, 47 },
+    /// Derived roles: the bulk-selection tint, quiet unfocused pane borders
+    /// (below muted text), muted text on the selection and bulk tints, the
+    /// star flag and neutral label chips (foreground text on `chip`).
+    /// deriveRoles keeps them at the contrast floors below.
+    selection_inactive: Color = .{ 43, 48, 57 },
     border: Color = .{ 72, 79, 95 },
-    surface: Color = .{ 26, 31, 41 },
+    selected_muted: Color = .{ 141, 151, 172 },
+    star: Color = .{ 255, 198, 98 },
+    chip: Color = .{ 72, 79, 95 },
     from_omarchy: bool = false,
 };
+
+/// WCAG floors for derived roles: text against the surface it sits on, the
+/// star glyph, and tints that must stay visible against the background.
+pub const text_floor = 4.5;
+pub const star_floor = 3.0;
+pub const tint_floor = 1.35;
+
+/// WCAG relative luminance of an sRGB colour.
+pub fn luminance(value: Color) f64 {
+    var result: f64 = 0;
+    for (value, [_]f64{ 0.2126, 0.7152, 0.0722 }) |channel, weight| {
+        const scaled = @as(f64, @floatFromInt(channel)) / 255;
+        result += (if (scaled <= 0.04045) scaled / 12.92 else std.math.pow(f64, (scaled + 0.055) / 1.055, 2.4)) * weight;
+    }
+    return result;
+}
+/// WCAG contrast ratio, 1 to 21.
+pub fn contrast(left: Color, right: Color) f64 {
+    const l = luminance(left);
+    const r = luminance(right);
+    return (@max(l, r) + 0.05) / (@min(l, r) + 0.05);
+}
+fn worst(value: Color, surfaces: []const Color) f64 {
+    var result: f64 = 21;
+    for (surfaces) |surface| result = @min(result, contrast(value, surface));
+    return result;
+}
+/// The smallest mix of `toward` over `base`, from `start` percent, that
+/// reaches `floor` against every surface; `toward` itself when none does.
+fn mixUntil(base: Color, toward: Color, start: u8, surfaces: []const Color, floor: f64) Color {
+    var percent = start;
+    while (true) : (percent += 1) {
+        const candidate = mix(base, toward, percent);
+        if (percent >= 100 or worst(candidate, surfaces) >= floor) return candidate;
+    }
+}
+/// Theme-authored colours stay as written; only derived roles move, and only
+/// as far as their floor requires.
+fn deriveRoles(palette: *Palette, has_selection: bool, border: ?Color) void {
+    const background = palette.background;
+    const foreground = palette.foreground;
+    // A theme without its own selection gets a clearly visible accent tint.
+    if (!has_selection) palette.selection = mixUntil(background, palette.accent, 18, &.{background}, tint_floor);
+    palette.selection_inactive = mixUntil(background, foreground, 7, &.{background}, tint_floor);
+    palette.border = border orelse mix(background, palette.muted, 45);
+    palette.muted = mixUntil(palette.muted, foreground, 0, &.{background}, text_floor);
+    palette.selected_muted = mixUntil(palette.muted, foreground, 0, &.{ palette.selection, palette.selection_inactive }, text_floor);
+    const rows = [_]Color{ background, palette.selection, palette.selection_inactive };
+    palette.star = for ([_]Color{ palette.yellow, palette.accent }) |candidate| {
+        if (worst(candidate, &rows) >= star_floor) break candidate;
+    } else foreground;
+    palette.chip = mixUntil(palette.border, background, 0, &.{foreground}, text_floor);
+}
 
 /// Linear sRGB-channel mix: percent of `toward` over `base`.
 pub fn mix(base: Color, toward: Color, percent: u8) Color {
@@ -93,7 +150,6 @@ pub fn parse(bytes: []const u8) !Palette {
     var has_muted = false;
     var has_selection = false;
     var border: ?Color = null;
-    var surface: ?Color = null;
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -101,10 +157,9 @@ pub fn parse(bytes: []const u8) !Palette {
         const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..separator], " \t");
         // Omarchy's own "muted" is a border tone, distinct from dimmed text.
-        if (std.mem.eql(u8, key, "muted") or std.mem.eql(u8, key, "lighter_background")) {
+        if (std.mem.eql(u8, key, "muted")) {
             // Optional derived roles never invalidate an otherwise usable theme.
-            const value = color(line[separator + 1 ..]) catch continue;
-            if (std.mem.eql(u8, key, "muted")) border = value else surface = value;
+            border = color(line[separator + 1 ..]) catch continue;
             continue;
         }
         const target: ?*Color = if (std.mem.eql(u8, key, "foreground")) &palette.foreground else if (std.mem.eql(u8, key, "background")) &palette.background else if (std.mem.eql(u8, key, "dark_foreground")) &palette.muted else if (std.mem.eql(u8, key, "accent")) &palette.accent else if (std.mem.eql(u8, key, "selection")) &palette.selection else if (std.mem.eql(u8, key, "cyan")) &palette.cyan else if (std.mem.eql(u8, key, "green")) &palette.green else if (std.mem.eql(u8, key, "yellow")) &palette.yellow else if (std.mem.eql(u8, key, "red")) &palette.red else if (std.mem.eql(u8, key, "blue")) &palette.blue else if (std.mem.eql(u8, key, "magenta")) &palette.magenta else if (std.mem.eql(u8, key, "orange")) &palette.orange else null;
@@ -120,13 +175,7 @@ pub fn parse(bytes: []const u8) !Palette {
     if (has_muted) for (&palette.muted, palette.foreground) |*channel, foreground| {
         channel.* = @intCast((@as(u16, channel.*) + foreground) / 2);
     };
-    if (palette.from_omarchy) {
-        // A theme without its own selection gets a clearly visible accent tint.
-        if (!has_selection) palette.selection = mix(palette.background, palette.accent, 18);
-        palette.selection_inactive = mix(palette.background, palette.foreground, 7);
-        palette.border = border orelse mix(palette.background, palette.muted, 45);
-        palette.surface = surface orelse mix(palette.background, palette.foreground, 4);
-    }
+    if (palette.from_omarchy) deriveRoles(&palette, has_selection, border);
     return palette;
 }
 
@@ -158,17 +207,20 @@ test "theme color roles parse independently and preserve bounded fallback" {
     try std.testing.expectError(error.InvalidCharacter, parse("accent=\"#zz2233\"\n"));
 }
 
-test "local UI: theme roles derive focus, border and surface tones from Omarchy colors" {
+test "local UI: theme roles derive focus and border tones from Omarchy colors" {
     const tokyo = try parse("background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\naccent = \"#7aa2f7\"\nselection = \"#292e42\"\nmuted = \"#414868\"\nlighter_background = \"#24283b\"\n");
     // An explicit theme selection is kept; derived roles never replace it.
     try std.testing.expectEqualSlices(u8, &.{ 41, 46, 66 }, &tokyo.selection);
     try std.testing.expectEqualSlices(u8, &.{ 65, 72, 104 }, &tokyo.border);
-    try std.testing.expectEqualSlices(u8, &.{ 36, 40, 59 }, &tokyo.surface);
-    try std.testing.expectEqualSlices(u8, &mix(.{ 26, 27, 38 }, .{ 169, 177, 214 }, 7), &tokyo.selection_inactive);
-    // Without a selection key, the focused row uses an 18% accent tint.
+    // The bulk tint starts at 7% foreground and grows until it is visible.
+    try std.testing.expectEqualSlices(u8, &mixUntil(.{ 26, 27, 38 }, .{ 169, 177, 214 }, 7, &.{.{ 26, 27, 38 }}, tint_floor), &tokyo.selection_inactive);
+    try std.testing.expect(contrast(tokyo.selection_inactive, tokyo.background) >= tint_floor);
+    // Without a selection key, the focused row uses an accent tint of at
+    // least 18%, enough to stand out from the background.
     const plain = try parse("background = \"#000000\"\nforeground = \"#ffffff\"\naccent = \"#ff0000\"\nmuted = \"bad\"\n");
-    try std.testing.expectEqualSlices(u8, &.{ 46, 0, 0 }, &plain.selection);
-    try std.testing.expectEqualSlices(u8, &.{ 18, 18, 18 }, &plain.selection_inactive);
+    try std.testing.expect(plain.selection[0] >= 46 and plain.selection[1] == 0 and plain.selection[2] == 0);
+    try std.testing.expect(contrast(plain.selection, plain.background) >= tint_floor);
+    try std.testing.expect(plain.selection_inactive[0] >= 18 and plain.selection_inactive[0] == plain.selection_inactive[2]);
     try std.testing.expect(plain.border[0] > plain.background[0] and plain.border[0] < plain.muted[0]);
     // The built-in palette keeps its exact published values.
     const builtin: Palette = .{};
@@ -206,4 +258,48 @@ test "local UI: theme watcher bounds metadata checks and detects removal and rep
     try temporary.dir.deleteFile(io, "colors.toml");
     try std.testing.expect(try watcher.changed(io, 6000));
     try std.testing.expect(!try watcher.changed(io, 8000));
+}
+
+fn expectFloors(palette: Palette) !void {
+    const foreground = palette.foreground;
+    // A role that falls back to foreground can be no better than foreground.
+    try std.testing.expect(contrast(palette.selection_inactive, palette.background) >= tint_floor);
+    try std.testing.expect(contrast(palette.muted, palette.background) >= @min(text_floor, contrast(foreground, palette.background)));
+    for ([_]Color{ palette.selection, palette.selection_inactive }) |surface| try std.testing.expect(contrast(palette.selected_muted, surface) >= @min(text_floor, contrast(foreground, surface)));
+    try std.testing.expect(contrast(foreground, palette.chip) >= @min(text_floor, contrast(foreground, palette.background)));
+    for ([_]Color{ palette.background, palette.selection, palette.selection_inactive }) |surface| try std.testing.expect(contrast(palette.star, surface) >= @min(star_floor, contrast(foreground, surface)));
+}
+
+test "local UI: derived theme roles keep contrast floors in built-in and installed Omarchy themes" {
+    try expectFloors(.{});
+    try expectFloors(try parse("background = \"#000000\"\nforeground = \"#ffffff\"\naccent = \"#ff0000\"\n"));
+    // A light theme whose yellow is unreadable as a star uses its accent, or
+    // foreground when the accent is too light as well.
+    const light = try parse("background = \"#faf4ed\"\nforeground = \"#575279\"\naccent = \"#7a3a52\"\nyellow = \"#ea9d34\"\nselection = \"#dfdad9\"\nmuted = \"#9893a5\"\ndark_foreground = \"#9893a5\"\n");
+    try expectFloors(light);
+    try std.testing.expectEqualSlices(u8, &light.accent, &light.star);
+    const pale = try parse("background = \"#faf4ed\"\nforeground = \"#575279\"\naccent = \"#b4637a\"\nyellow = \"#ea9d34\"\nselection = \"#dfdad9\"\n");
+    try expectFloors(pale);
+    try std.testing.expectEqualSlices(u8, &pale.foreground, &pale.star);
+    // Theme-authored colours are never rewritten.
+    try std.testing.expectEqualSlices(u8, &.{ 0xea, 0x9d, 0x34 }, &light.yellow);
+    try std.testing.expectEqualSlices(u8, &.{ 0xdf, 0xda, 0xd9 }, &light.selection);
+    const io = std.testing.io;
+    var themes = std.Io.Dir.cwd().openDir(io, "/usr/share/omarchy/themes", .{ .iterate = true }) catch return;
+    defer themes.close(io);
+    var iterator = themes.iterate();
+    var checked: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        var path_buffer: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buffer, "{s}/colors.toml", .{entry.name}) catch continue;
+        const bytes = files.readBounded(io, std.testing.allocator, themes, path, 16 * 1024) catch continue;
+        defer std.testing.allocator.free(bytes);
+        // Unparseable themes fall back to the built-in palette at runtime.
+        expectFloors(parse(bytes) catch continue) catch |err| {
+            std.debug.print("theme {s} misses a contrast floor\n", .{entry.name});
+            return err;
+        };
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
 }

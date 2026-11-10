@@ -178,9 +178,9 @@ def quit_key(terminal):
         "q Quit" in terminal.screen.lines()[-2] or reader_focused(terminal)))
     if reader_focused(terminal):
         terminal.send(b"q")
-        terminal.until(lambda: "q Quit" in terminal.text().splitlines()[-2])
+        terminal.until(lambda: "q Quit" in terminal.screen.lines()[-2])
         require(terminal.process.poll() is None, "reader q skipped the restored list")
-    require("q Quit" in terminal.text().splitlines()[-2], "quit oracle is not in default list focus")
+    require("q Quit" in terminal.screen.lines()[-2], "quit oracle is not in default list focus")
     terminal.send(b"q")
     deadline = time.monotonic() + 5
     while terminal.process.poll() is None and time.monotonic() < deadline:
@@ -199,16 +199,16 @@ def search(terminal, source, query):
     # readable. Drain that render boundary, then wait for this query's worker
     # to commit before testing navigation of its result window.
     terminal.gap(.08)
-    terminal.until(lambda: title in terminal.screen.lines()[0] and terminal.screen.lines()[-1].strip() == "Ready")
+    terminal.until(lambda: title in terminal.screen.lines()[0] and terminal.ready())
     return title
 
 
 def search_back(terminal):
     if reader_focused(terminal):
         terminal.send(b"q")
-        terminal.until(lambda: "q Clear" in terminal.text().splitlines()[-2])
+        terminal.until(lambda: "q Clear" in terminal.screen.lines()[-2])
         require(terminal.process.poll() is None, "reader Back exited instead of returning to the search list")
-    require("q Clear" in terminal.text().splitlines()[-2], "query Back oracle is not in its search list")
+    require("q Clear" in terminal.screen.lines()[-2], "query Back oracle is not in its search list")
     terminal.send(b"q")
 
 
@@ -555,7 +555,7 @@ def run_case(binary, directory, name):
             terminal.until(lambda: mailbox_visible(terminal) and contains_body(terminal, 96))
             terminal.ui_stage = "server-paging"
             search(terminal, "server", "subject:Synthetic personal")
-            terminal.until(lambda: contains_body(terminal, 96) and "Ready" in terminal.text())
+            terminal.until(lambda: contains_body(terminal, 96) and terminal.ready())
             terminal.gap(.2)  # Separate observed render/input boundaries.
             terminal.ui_stage = "next-window"
             terminal.send(b"]")

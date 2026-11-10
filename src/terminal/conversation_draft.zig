@@ -95,15 +95,19 @@ fn oneLine(text: []const u8, limit: usize) []const u8 {
     while (end > 0 and !std.unicode.utf8ValidateSlice(text[0..end])) end -= 1;
     return std.mem.trim(u8, text[0..end], " \t");
 }
+pub const forward_header = "---------- Forwarded message ----------";
 /// Where the quoted original starts in a draft body: before its attribution
-/// line, or before the first "> " line of an older draft without one.
+/// line, or before the first "> " line of an older draft without one. Only
+/// text above a plain forward's own header counts: the forwarded message may
+/// itself contain an "On … wrote:" line and quote, which belong to it.
 pub fn quoteStart(body: []const u8) ?usize {
+    const own = body[0 .. std.mem.indexOf(u8, body, "\n\n" ++ forward_header) orelse body.len];
     var search: usize = 0;
-    while (std.mem.indexOfPos(u8, body, search, "\n\nOn ")) |at| : (search = at + 2) {
-        const line_end = std.mem.indexOfScalarPos(u8, body, at + 2, '\n') orelse break;
-        if (std.mem.endsWith(u8, std.mem.trimEnd(u8, body[at + 2 .. line_end], "\r"), "wrote:") and std.mem.startsWith(u8, body[line_end + 1 ..], "> ")) return at;
+    while (std.mem.indexOfPos(u8, own, search, "\n\nOn ")) |at| : (search = at + 2) {
+        const line_end = std.mem.indexOfScalarPos(u8, own, at + 2, '\n') orelse break;
+        if (std.mem.endsWith(u8, std.mem.trimEnd(u8, own[at + 2 .. line_end], "\r"), "wrote:") and std.mem.startsWith(u8, own[line_end + 1 ..], "> ")) return at;
     }
-    return std.mem.indexOf(u8, body, "\n\n> ");
+    return std.mem.indexOf(u8, own, "\n\n> ");
 }
 fn attributedQuote(a: std.mem.Allocator, line: []const u8, body: []const u8) ![]const u8 {
     const quoted = try quote(a, body);
@@ -121,7 +125,7 @@ pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t
         .to = envelope.to,
         .cc = envelope.cc,
         .subject = try prefixedSubject(a, message.subject, "Re:"),
-        .bodyText = if (options.original != null) "" else try attributedQuote(a, try attribution(a, message, options.format), if (options.format == .markdown) try markdown.escapeSource(a, message.bodyText) else message.bodyText),
+        .bodyText = if (options.original != null) "" else try attributedQuote(a, try attribution(a, message, options.format), if (options.format == .markdown) try markdown.escapeQuoted(a, message.bodyText) else message.bodyText),
         .bodyFormat = options.format,
         .threadId = message.threadId,
         .inReplyTo = threading.in_reply_to,
@@ -139,8 +143,8 @@ pub fn forward(a: std.mem.Allocator, message: t.Message, options: ForwardOptions
         .omittedAttachments = options.omitted_attachments,
     };
     if (options.original == null) {
-        const original = try std.fmt.allocPrint(a, "---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, options.body_text orelse message.bodyText });
-        draft.bodyText = if (options.format == .markdown) try quote(a, try markdown.escapeSource(a, original)) else try std.fmt.allocPrint(a, "\n\n{s}", .{original});
+        const original = try std.fmt.allocPrint(a, forward_header ++ "\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, options.body_text orelse message.bodyText });
+        draft.bodyText = if (options.format == .markdown) try quote(a, try markdown.escapeQuoted(a, original)) else try std.fmt.allocPrint(a, "\n\n{s}", .{original});
     }
     // A forward deliberately has no original recipients or reply threading.
     return draft;
@@ -212,9 +216,10 @@ test "conversation draft: reply quote names its sender and date above readable q
     const plain = try reply(a, message, .{ .account = "self@example.test" });
     try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:\n> See you at 5. Bring (fictional) snacks!\n> # not a heading\n> - not a list\n", plain.bodyText);
     const markdown_draft = try reply(a, message, .{ .account = "self@example.test", .format = .markdown });
-    // Quoted source is escaped in full: nothing a sender wrote, including a
-    // display name, can become markup in the outgoing reply.
-    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 \\+0000, Alex \\*Fixture\\* \\<alex@example\\.test\\> wrote:\n> See you at 5\\. Bring \\(fictional\\) snacks\\!\n> \\# not a heading\n> \\- not a list\n", markdown_draft.bodyText);
+    // Nothing a sender wrote can become markup in the outgoing reply. The
+    // attribution (with its display name) is escaped in full; the quote only
+    // where the renderer would otherwise give a character meaning.
+    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 \\+0000, Alex \\*Fixture\\* \\<alex@example\\.test\\> wrote:\n> See you at 5. Bring (fictional) snacks!\n> \\# not a heading\n> \\- not a list\n", markdown_draft.bodyText);
     const rendered = try markdown.render(a, markdown_draft.bodyText);
     try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "On Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "> # not a heading") != null);
@@ -225,6 +230,18 @@ test "conversation draft: reply quote names its sender and date above readable q
     try std.testing.expectEqual(@as(?usize, 0), quoteStart(plain.bodyText));
     try std.testing.expectEqual(@as(?usize, 4), quoteStart("Note\n\n> Older draft quote\n"));
     try std.testing.expectEqual(@as(?usize, null), quoteStart("On Monday we met.\nNo quote here"));
+    // A plain forward of a reply: the forwarded body's own attribution and
+    // quote belong to the forwarded message, so a signature goes above the
+    // forward header instead.
+    const replied: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "sam@example.test", .name = "Sam" }, .subject = "Re: Plans", .bodyText = "Sounds good.\n\nOn Fri, 6 Nov 2026, Alex <alex@example.test> wrote:\n> See you at 5.\n", .messageId = "<reply@example.test>" };
+    for ([_]t.BodyFormat{ .plain, .markdown }) |format| {
+        const forwarded = try forward(a, replied, .{ .format = format });
+        const note = try std.fmt.allocPrint(a, "FYI below{s}", .{forwarded.bodyText});
+        const at = quoteStart(note) orelse std.mem.indexOf(u8, note, "\n\n" ++ forward_header).?;
+        try std.testing.expectEqual(@as(usize, "FYI below".len), at);
+    }
+    // A reply's own attribution still wins over a quote in the author's note.
+    try std.testing.expectEqual(@as(?usize, 12), quoteStart("Note\n\n> mine\n\nOn Mon, A <a@x.test> wrote:\n> theirs\n"));
     // Without a Date header the received instant is shown in UTC; header
     // text never adds lines to the body.
     const received: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "line@example.test", .name = "Two\nLines" }, .bodyText = "Body", .receivedAt = 1794047760000 };
@@ -301,4 +318,128 @@ test "parser leniency: an incomplete readable source is never quoted or forwarde
     // Replacement characters are visible in the quote the author reviews.
     message.decodeWarning = "UnsupportedCharset";
     _ = try reply(a, message, .{ .account = "self@example.test" });
+}
+
+/// Minimal quote escaping must render byte-for-byte like full escaping.
+fn expectQuoteEquivalent(a: std.mem.Allocator, source: []const u8) !void {
+    const expected = markdown.render(a, try quote(a, try markdown.escapeSource(a, source)));
+    const minimal = try markdown.escapeQuoted(a, source);
+    const actual = markdown.render(a, try quote(a, minimal));
+    if (expected) |full| {
+        const got = actual catch |err| {
+            std.debug.print("minimal quote escaping failed with {t} for {f}\n", .{ err, std.zig.fmtString(source) });
+            return err;
+        };
+        if (!std.mem.eql(u8, full.html, got.html) or !std.mem.eql(u8, full.plain, got.plain)) {
+            std.debug.print("quote escaping mismatch for {f}\nminimal: {f}\nfull plain: {f}\nminimal plain: {f}\n", .{ std.zig.fmtString(source), std.zig.fmtString(minimal), std.zig.fmtString(full.plain), std.zig.fmtString(got.plain) });
+            return error.TestExpectedEqual;
+        }
+    } else |err| try std.testing.expectError(err, actual);
+}
+
+test "quote escaping: minimal escaping renders exactly like full escaping for random and exhaustive hostile text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const symbols = [_][]const u8{ "\\", "`", "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", "-", ".", "!", "~", "|", "<", ">", "=", " ", " ", " ", "\t", "\r", "\n", "\n", "\r\n", "&", "http://", "https://", "www.", "@", ":", "/", "'", "\"", "a", "b", "Z", "word", "5", "1", "12", "é", "€", "😀", "mailto:", "(http://", "x.y", "cid:", "![", "](", "==", "---", "***", "```", "~~~", "~~", "__", "**", "1.", "2)", "\\\\", "| ", "|---|", ":---", " | x |" };
+    var prng = std.Random.DefaultPrng.init(0x6f6d61676d61);
+    const random = prng.random();
+    var buffer: [80]u8 = undefined;
+    var cases: usize = 0;
+    while (cases < 200_000) : (cases += 1) {
+        _ = arena.reset(.retain_capacity);
+        const target = random.intRangeAtMost(usize, 1, buffer.len);
+        var len: usize = 0;
+        while (true) {
+            const symbol = symbols[random.uintLessThan(usize, symbols.len)];
+            if (len + symbol.len > target) break;
+            @memcpy(buffer[len..][0..symbol.len], symbol);
+            len += symbol.len;
+        }
+        if (len == 0) {
+            buffer[0] = '_';
+            len = 1;
+        }
+        try expectQuoteEquivalent(arena.allocator(), buffer[0..len]);
+    }
+    // Every string of up to four symbols over three 12-symbol hostile alphabets.
+    const alphabets = [_][12][]const u8{
+        .{ "_", "*", "\\", "#", "-", "1", ".", " ", "\n", "a", "~", "=" },
+        .{ "<", ">", "[", "]", "(", ")", "!", "|", "`", "+", "\t", "\r" },
+        .{ "http://", "x", "(", ")", ".", "\\", "_", " ", "<", ">", "!", "\n" },
+    };
+    for (alphabets) |alphabet| {
+        for (1..5) |length| {
+            var digits: [4]usize = @splat(0);
+            while (true) {
+                _ = arena.reset(.retain_capacity);
+                var text: std.ArrayList(u8) = .empty;
+                for (digits[0..length]) |digit| try text.appendSlice(arena.allocator(), alphabet[digit]);
+                try expectQuoteEquivalent(arena.allocator(), text.items);
+                cases += 1;
+                var position: usize = 0;
+                while (position < length) : (position += 1) {
+                    digits[position] += 1;
+                    if (digits[position] < alphabet.len) break;
+                    digits[position] = 0;
+                }
+                if (position == length) break;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 200_000 + 3 * (12 + 144 + 1728 + 20736)), cases);
+}
+
+test "quote escaping: review cases stay literal, readable and linear" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][]const u8{
+        "Set APP__DB_HOST and FOO__BAR_BAZ before deploy",
+        "a___b___c",
+        "a__b _foo",
+        "snake__case_x",
+        "Receipt\n\n==========\nTotal 5",
+        "Title\n=====",
+        "x\n=",
+        "Saved to C:\\Users\\Alex\\\nnext line",
+        "Saved to C:\\Users\\Alex\\   \nnext line",
+        "Saved to C:\\Users\\Alex\\\r\nnext line\r\n",
+        "path C:\\dir\\ \nnext",
+        "\rLine after a bare CR\r\n# heading?\r\n- list?\r\n1. ordered?\r\n> nested?",
+        "Ticket #\n===",
+        "Ticket ##  \n===",
+        "C#\n===",
+        "1) one\n2. two\n10.5 percent\n3.\n(http://example.test/a_b) and http://localhost:8080/x",
+        "See https://example.test/path_(x)! or <https://example.test> and [label](https://example.test)",
+        "~approx~ and ~~struck~~ and ~~~ fence",
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        "*emph* _emph_ **strong** `code` ```",
+    };
+    for (cases) |source| try expectQuoteEquivalent(a, source);
+    try std.testing.expectEqualStrings("Set APP_\\_DB_HOST and FOO_\\_BAR_BAZ before deploy", try markdown.escapeQuoted(a, cases[0]));
+    try std.testing.expectEqualStrings("Saved to C:\\Users\\Alex\\\\\nnext line", try markdown.escapeQuoted(a, cases[7]));
+    try std.testing.expectEqualStrings("See you at 5. Bring (fictional) snacks!", try markdown.escapeQuoted(a, "See you at 5. Bring (fictional) snacks!"));
+    // `=` underlines are left exactly as full escaping leaves them, so they
+    // never gain a visible backslash.
+    try std.testing.expectEqualStrings("Receipt\n\n==========\nTotal 5", try markdown.escapeQuoted(a, cases[4]));
+
+    // Large lines: `<` is always escaped, so rendering never searches for an
+    // autolink end (the renderer's search budget is linear in the source and
+    // would fail otherwise), and the escaper examines a bounded number of
+    // bytes per input byte.
+    var spaced: std.ArrayList(u8) = .empty;
+    while (spaced.items.len < 100 * 1024) try spaced.appendSlice(a, "<aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const only_angles = try a.alloc(u8, 1024 * 1024);
+    @memset(only_angles, '<');
+    var mixed: std.ArrayList(u8) = .empty;
+    while (mixed.items.len < 512 * 1024) try mixed.appendSlice(a, "a_b __ # \\ http://x.test/_ ~ 1. > |\r\n");
+    for ([_][]const u8{ spaced.items, only_angles, mixed.items }) |source| {
+        var work: usize = 0;
+        const minimal = try markdown.escapeQuotedCounted(a, source, &work);
+        try std.testing.expect(work <= 6 * source.len + 16);
+        const rendered = try markdown.render(a, try quote(a, minimal));
+        const full = try markdown.render(a, try quote(a, try markdown.escapeSource(a, source)));
+        try std.testing.expectEqualStrings(full.html, rendered.html);
+        try std.testing.expectEqualStrings(full.plain, rendered.plain);
+    }
 }

@@ -37,13 +37,13 @@ def exercise(binary, root, captures):
     terminal = MouseTerminal(binary, root, screen_type=ReaderScreen, columns=120, rows=40,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         terminal.send(b"h")
         terminal.until(lambda: terminal.screen.locate("MAILBOXES") is not None)
         x, y = point(terminal, "MAILBOXES")
         click(terminal, x + 2, y + 3)
         terminal.until(lambda: rows[0]["subject"] in terminal.text() and "1/100" in terminal.text())
-        require("📎" in terminal.text(), "compact draft summary lost its attachment indicator")
+        require("⊕" in terminal.text(), "compact draft summary lost its attachment indicator")
         capture(terminal, captures, "drafts-first-page")
         terminal.send(b"Gj")
         terminal.until(lambda: rows[100]["subject"] in terminal.text() and "1/28" in terminal.text())

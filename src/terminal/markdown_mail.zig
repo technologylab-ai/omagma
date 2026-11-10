@@ -837,6 +837,89 @@ pub fn escapeSource(a: std.mem.Allocator, source: []const u8) ![]const u8 {
     try out.append(source[start..]);
     return out.bytes.toOwnedSlice(a);
 }
+/// Quoted reply/forward text keeps ordinary punctuation readable in the
+/// editable source. Inside a `> ` quote this renders exactly like
+/// escapeSource: a metacharacter stays bare only where this renderer can never
+/// give it meaning, and any word containing "://" is escaped in full so bare
+/// URLs link exactly when they would after full escaping. Sender-controlled
+/// header lines (the attribution) still use escapeSource. Linear time.
+pub fn escapeQuoted(a: std.mem.Allocator, source: []const u8) ![]const u8 {
+    var work: usize = 0;
+    return escapeQuotedCounted(a, source, &work);
+}
+const markdown_meta = "\\`*_{}[]()#+-.!~|<>";
+fn quoteSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r';
+}
+/// `work` counts bytes examined, so tests can bound the cost without timing.
+pub fn escapeQuotedCounted(a: std.mem.Allocator, source: []const u8, work: *usize) ![]const u8 {
+    var out: Buffer = .{ .allocator = a };
+    errdefer out.bytes.deinit(a);
+    var line_start: usize = 0;
+    while (true) {
+        const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
+        work.* += line_end - line_start + 1;
+        try escapeQuotedLine(&out, source[line_start..line_end], work);
+        if (line_end == source.len) break;
+        try out.append("\n");
+        line_start = line_end + 1;
+    }
+    return out.bytes.toOwnedSlice(a);
+}
+fn escapeQuotedLine(out: *Buffer, line: []const u8, work: *usize) !void {
+    // Block syntax only starts at the first non-blank byte (trim also removes
+    // CR); a final backslash would become a hard break.
+    var lead: usize = 0;
+    while (lead < line.len and quoteSpace(line[lead])) lead += 1;
+    var last = line.len;
+    while (last > lead and quoteSpace(line[last - 1])) last -= 1;
+    work.* += lead + (line.len - last);
+    // A line above an `===` underline becomes heading text, which drops a
+    // final #-run that follows blank space.
+    var closing_hash: ?usize = null;
+    if (last > lead and line[last - 1] == '#') {
+        var run = last - 1;
+        while (run > lead and line[run - 1] == '#') run -= 1;
+        work.* += last - run;
+        if (run > lead and quoteSpace(line[run - 1])) closing_hash = last - 1;
+    }
+    // Ordered-list marker: leading digits, then `.` or `)` and a blank.
+    var list_marker: ?usize = null;
+    var digits = lead;
+    while (digits < line.len and std.ascii.isDigit(line[digits])) digits += 1;
+    work.* += digits - lead;
+    if (digits > lead and digits + 1 < line.len and (line[digits] == '.' or line[digits] == ')') and spaceOrTab(line[digits + 1])) list_marker = digits;
+    var literal: usize = 0;
+    var url_word = false;
+    for (line, 0..) |c, i| {
+        work.* += 1;
+        if (!std.ascii.isWhitespace(c) and (i == 0 or std.ascii.isWhitespace(line[i - 1]))) {
+            var word_end = i;
+            while (word_end < line.len and !std.ascii.isWhitespace(line[word_end])) word_end += 1;
+            work.* += word_end - i;
+            url_word = std.mem.indexOf(u8, line[i..word_end], "://") != null;
+        }
+        if (std.mem.indexOfScalar(u8, markdown_meta, c) == null) continue;
+        const escape = url_word or switch (c) {
+            '\\' => i + 1 == last or (i + 1 < line.len and std.mem.indexOfScalar(u8, markdown_meta, line[i + 1]) != null),
+            '`', '*', '[', '<', '|' => true,
+            // `_` after a word byte can neither open nor (without openers) close emphasis.
+            '_' => i == 0 or !wordByte(line[i - 1]),
+            // A lone `~` is neither strikethrough nor a fence.
+            '~' => (i > 0 and line[i - 1] == '~') or (i + 1 < line.len and line[i + 1] == '~'),
+            '#' => i == lead or i == (closing_hash orelse line.len),
+            '-', '+', '>' => i == lead,
+            '.', ')' => i == (list_marker orelse line.len),
+            // `(`, `]`, `{`, `}` and `!` mean nothing without an unescaped `[`.
+            else => false,
+        };
+        if (!escape) continue;
+        try out.append(line[literal..i]);
+        try out.append("\\");
+        literal = i;
+    }
+    try out.append(line[literal..]);
+}
 fn trim(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\r");
 }

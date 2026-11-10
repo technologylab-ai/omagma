@@ -131,7 +131,7 @@ def start(binary, directory, scenario="png", captures=None):
                              screen_type=ComposerScreen, columns=180, rows=46,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         open_composer(terminal)
         wait_saved_compose(terminal, 0)
         require(body(saved(binary, directory)) == "", "fresh clipboard fixture composer has unexpected body text")

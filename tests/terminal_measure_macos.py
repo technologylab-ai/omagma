@@ -118,7 +118,7 @@ def measure(args, root, report):
     else:
         terminal = DarwinTerminal(args.binary, root / 'tui', extra=extra, history_limit=65536)
         try:
-            terminal.until(lambda: 'Ready' in terminal.text() and 'Synthetic personal thread 031' in terminal.text())
+            terminal.until(lambda: terminal.ready() and 'Synthetic personal thread 031' in terminal.text())
             with Sampler(terminal.process.pid) as sampler:
                 for index in range(args.warmup):
                     tui_cycle(terminal, index + 1)

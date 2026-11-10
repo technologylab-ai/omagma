@@ -42,7 +42,7 @@ def wait_label_picker(terminal, *content):
     # Definitions may render before mail.label-state returns. This footer is
     # shown only after the pinned messages' memberships are ready to stage.
     terminal.until(lambda: all(value in terminal.text() for value in
-                               ("Labels · staged changes", "[Apply 0]", "[Cancel]",
+                               ("Labels · staged changes", "[Apply 0", "[Cancel]",
                                 "Space Toggle · +/- Stage · Ctrl+S Apply · Esc Cancel", *content)))
 
 
@@ -91,10 +91,10 @@ def labels_and_files(binary, directory):
         reach(terminal, "[- Remove]")
         reach(terminal, "[+ Add]", backwards=True)
         activate(terminal)
-        terminal.until(lambda: "[Apply 1]" in terminal.text())
+        terminal.until(lambda: "[Apply 1 Ctrl+S]" in terminal.text())
         require("Label_demo" not in message(binary, directory, source)["labels"],
                 "focused Add mutated the provider before Apply")
-        reach(terminal, "[Apply 1]")
+        reach(terminal, "[Apply 1 Ctrl+S]")
         activate(terminal)
         terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Labels updated on 1" in terminal.text())
         require("Label_demo" in message(binary, directory, source)["labels"], "focused Add did not apply the chosen label")
@@ -102,10 +102,10 @@ def labels_and_files(binary, directory):
         wait_label_picker(terminal)
         reach(terminal, "[- Remove]")
         activate(terminal)
-        terminal.until(lambda: "[Apply 1]" in terminal.text())
+        terminal.until(lambda: "[Apply 1 Ctrl+S]" in terminal.text())
         require("Label_demo" in message(binary, directory, source)["labels"],
                 "focused Remove mutated the provider before Apply")
-        reach(terminal, "[Apply 1]")
+        reach(terminal, "[Apply 1 Ctrl+S]")
         activate(terminal)
         terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Labels updated on 1" in terminal.text())
         require("Label_demo" not in message(binary, directory, source)["labels"], "focused Remove did not remove the chosen label")

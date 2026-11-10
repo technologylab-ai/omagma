@@ -110,7 +110,7 @@ def palette(binary, directory, capture_dir=None):
         terminal.send(ENTER)
         terminal.until(lambda: "Theme" in terminal.text() and "[Cancel]" in terminal.text())
         activate_button(terminal, "[Cancel]")
-        terminal.until(lambda: "[Apply]" not in terminal.text())
+        terminal.until(lambda: "[Apply" not in terminal.text())
         no_writes(binary, directory, source.options())
         terminal.finish()
     except Exception:

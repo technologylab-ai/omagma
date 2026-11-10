@@ -35,7 +35,7 @@ def exercise(binary, root, captures, with_warning=False):
                              extra=direct_send_settings(root),
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
-        terminal.until(lambda: "Ready" in terminal.text())
+        terminal.until(lambda: terminal.ready())
         terminal.send(b"h")
         terminal.until(lambda: terminal.screen.locate("MAILBOXES") is not None)
         x, y = point(terminal, "MAILBOXES")
