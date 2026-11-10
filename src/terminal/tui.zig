@@ -12689,7 +12689,11 @@ const App = struct {
                     // Command names ignore case (arguments keep theirs); an
                     // empty prompt cancels silently.
                     var command_buffer: [4096]u8 = undefined;
-                    const typed = std.mem.trim(u8, self.input.value(), " \t");
+                    // A paste may exceed the command workspace; refuse it
+                    // whole rather than run a truncated command.
+                    const entered = std.mem.trim(u8, self.input.value(), " \t");
+                    if (entered.len > command_buffer.len) self.say(true, "Command too long · nothing was run", .{});
+                    const typed = if (entered.len > command_buffer.len) "" else entered;
                     const name_end = std.mem.indexOfAny(u8, typed, " \t") orelse typed.len;
                     @memcpy(command_buffer[0..typed.len], typed);
                     _ = std.ascii.lowerString(command_buffer[0..name_end], typed[0..name_end]);
@@ -13287,11 +13291,13 @@ const App = struct {
         self.mail_page_size = self.mailRows(win.height);
         self.mouseArea(win, .mail_scroll, 0);
         self.mail_now = Io.Timestamp.now(self.io, .real).toMilliseconds();
-        self.mail_date_width = try self.mailDateWidth(win, self.mail_now);
-        if (!self.follow_ups_list and try self.drawIncomingWindow(win)) return;
         const count = self.mail_page_size;
+        // Settle the viewport first: the date and flag columns are measured
+        // on the rows that will actually be drawn.
         if (self.selected < self.top) self.top = self.selected;
         if (self.selected >= self.top + count) self.top = self.selected + 1 - count;
+        self.mail_date_width = try self.mailDateWidth(win, self.mail_now);
+        if (!self.follow_ups_list and try self.drawIncomingWindow(win)) return;
         if (self.messages.len == 0) {
             if (self.follow_ups_list) {
                 try self.line(win, 1, "No follow-ups · press b on a message to add one", .muted);

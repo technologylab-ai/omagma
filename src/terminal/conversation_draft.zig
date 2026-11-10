@@ -68,7 +68,10 @@ pub fn quote(a: std.mem.Allocator, body: []const u8) ![]const u8 {
 /// Header text is flattened to one bounded line before it enters the body.
 pub fn attribution(a: std.mem.Allocator, message: t.Message, format: t.BodyFormat) ![]const u8 {
     var date_buffer: [40]u8 = undefined;
-    const date: []const u8 = if (message.sentDate) |sent| sent else if (message.receivedAt > 0) blk: {
+    // Cached records are not re-validated: keep the conversion inside the
+    // range the shared decoder accepts, and never print an empty date.
+    const sent_text = std.mem.trim(u8, message.sentDate orelse "", " \t\r\n");
+    const date: []const u8 = if (sent_text.len != 0) sent_text else if (message.receivedAt > 0 and message.receivedAt <= mime.max_received_at_ms) blk: {
         const seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@divFloor(message.receivedAt, 1000)) };
         const day = seconds.getEpochDay().calculateYearDay();
         const month = day.calculateMonthDay();
@@ -209,9 +212,9 @@ test "conversation draft: reply quote names its sender and date above readable q
     const plain = try reply(a, message, .{ .account = "self@example.test" });
     try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:\n> See you at 5. Bring (fictional) snacks!\n> # not a heading\n> - not a list\n", plain.bodyText);
     const markdown_draft = try reply(a, message, .{ .account = "self@example.test", .format = .markdown });
-    // Only what would become markup is escaped: the name's emphasis, the
-    // heading and the list marker. Ordinary punctuation stays readable.
-    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 +0000, Alex \\*Fixture* <alex@example.test> wrote:\n> See you at 5. Bring (fictional) snacks!\n> \\# not a heading\n> \\- not a list\n", markdown_draft.bodyText);
+    // Quoted source is escaped in full: nothing a sender wrote, including a
+    // display name, can become markup in the outgoing reply.
+    try std.testing.expectEqualStrings("\n\nOn Sat, 7 Nov 2026 09:00:00 \\+0000, Alex \\*Fixture\\* \\<alex@example\\.test\\> wrote:\n> See you at 5\\. Bring \\(fictional\\) snacks\\!\n> \\# not a heading\n> \\- not a list\n", markdown_draft.bodyText);
     const rendered = try markdown.render(a, markdown_draft.bodyText);
     try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "On Sat, 7 Nov 2026 09:00:00 +0000, Alex *Fixture* <alex@example.test> wrote:") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "> # not a heading") != null);

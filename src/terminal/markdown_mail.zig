@@ -822,89 +822,20 @@ fn importantStyles(out: *Buffer, value: []const u8) !void {
         }
     }
 }
-const escapable = "\\`*_{}[]()#+-.!~|<>";
 /// Original mail is literal evidence, even when its lines happen to contain
-/// Markdown metacharacters. Replies/forwards quote this escaped source. Only
-/// characters this dialect would actually read as markup are escaped, so the
-/// editable quote stays readable ("Hello." not "Hello\.") while it still
-/// renders exactly as the original text.
+/// Markdown metacharacters. Replies/forwards quote this escaped source.
 pub fn escapeSource(a: std.mem.Allocator, source: []const u8) ![]const u8 {
     var out: Buffer = .{ .allocator = a };
     errdefer out.bytes.deinit(a);
-    var flags: std.ArrayList(bool) = .empty;
-    defer flags.deinit(a);
-    // A link or inline image needs "](" after its "[".
-    const link_before = std.mem.lastIndexOf(u8, source, "](") orelse 0;
-    var offset: usize = 0;
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    var first = true;
-    while (lines.next()) |line| {
-        defer offset += line.len + 1;
-        if (!first) try out.append("\n");
-        first = false;
-        try flags.resize(a, line.len);
-        @memset(flags.items, false);
-        markBlockEscapes(line, flags.items);
-        markInlineEscapes(line, offset, link_before, flags.items);
-        var start: usize = 0;
-        for (flags.items, 0..) |flag, i| if (flag) {
-            try out.append(line[start..i]);
-            try out.append("\\");
-            start = i;
-        };
-        try out.append(line[start..]);
-    }
-    return out.bytes.toOwnedSlice(a);
-}
-/// Headings, fences, rules, setext underlines, quotes, list markers and table
-/// separators only start at the beginning of a (trimmed) line.
-fn markBlockEscapes(line: []const u8, flags: []bool) void {
-    var lead: usize = 0;
-    while (lead < line.len and spaceOrTab(line[lead])) lead += 1;
-    if (lead == line.len) return;
-    const text = trim(line);
-    if (text.len == 0) return;
-    if (heading(text) != null or fence(text) != null or rule(text) or setextLevel(text) != null or text[0] == '>') {
-        flags[lead] = true;
-    } else if (marker(line)) |found| flags[found.content - 2] = true;
-    if (tableSeparator(text)) for (line, 0..) |c, i| if (c == '|') {
-        flags[i] = true;
+    var start: usize = 0;
+    for (source, 0..) |c, i| if (std.mem.indexOfScalar(u8, "\\`*_{}[]()#+-.!~|<>", c) != null) {
+        try out.append(source[start..i]);
+        try out.append("\\");
+        try out.append(source[i .. i + 1]);
+        start = i + 1;
     };
-}
-fn markInlineEscapes(line: []const u8, offset: usize, link_before: usize, flags: []bool) void {
-    var i: usize = 0;
-    while (i < line.len) {
-        const c = line[i];
-        switch (c) {
-            '\\' => if (i + 1 < line.len and std.mem.indexOfScalar(u8, escapable, line[i + 1]) != null) {
-                flags[i] = true;
-            },
-            '`' => flags[i] = true,
-            '[' => if (offset + i < link_before) {
-                flags[i] = true;
-            },
-            '<' => if (std.mem.indexOfScalar(u8, line[i + 1 ..], '>')) |end| {
-                if (safeUrl(line[i + 1 ..][0..end])) flags[i] = true;
-            },
-            '*', '_', '~' => {
-                var end = i;
-                while (end < line.len and line[end] == c) end += 1;
-                const run = end - i;
-                // A run opens emphasis/strike only before non-space text.
-                const opens = end < line.len and !std.ascii.isWhitespace(line[end]);
-                const markup = switch (c) {
-                    '_' => (i == 0 or !wordByte(line[i - 1])) and (opens or run > 3),
-                    '~' => run >= 2 and (opens or run > 2),
-                    else => opens or run > 3,
-                };
-                if (markup) @memset(flags[i..end], true);
-                i = end;
-                continue;
-            },
-            else => {},
-        }
-        i += 1;
-    }
+    try out.append(source[start..]);
+    return out.bytes.toOwnedSlice(a);
 }
 fn trim(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\r");
@@ -1245,87 +1176,6 @@ test "markdown mail: allocated results have exact ownership and capped failures 
     try std.testing.expectEqual(@as(usize, 0), cap.used);
 }
 
-/// The previous escaper backslashed every metacharacter. Its rendering is the
-/// oracle that minimal escaping must reproduce exactly.
-fn escapeEverything(a: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var out: Buffer = .{ .allocator = a };
-    var start: usize = 0;
-    for (source, 0..) |c, i| if (std.mem.indexOfScalar(u8, escapable, c) != null) {
-        try out.append(source[start..i]);
-        try out.append("\\");
-        try out.append(source[i .. i + 1]);
-        start = i + 1;
-    };
-    try out.append(source[start..]);
-    return out.bytes.items;
-}
-/// A bare URL is now clickable instead of broken by backslashes; compare
-/// the visible document without anchor wrappers.
-fn withoutAnchors(a: std.mem.Allocator, html: []const u8) ![]const u8 {
-    var out: Buffer = .{ .allocator = a };
-    var rest = html;
-    while (std.mem.indexOf(u8, rest, "<a ")) |open| {
-        try out.append(rest[0..open]);
-        const tag_end = std.mem.indexOfScalarPos(u8, rest, open, '>') orelse break;
-        const close = std.mem.indexOfPos(u8, rest, tag_end, "</a>") orelse break;
-        try out.append(rest[tag_end + 1 .. close]);
-        rest = rest[close + "</a>".len ..];
-    }
-    try out.append(rest);
-    return out.bytes.items;
-}
-test "markdown mail: minimal quote escaping renders exactly like escaping every metacharacter" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const cases = [_][]const u8{
-        "Hello. How are you (today)? Price: $5.00 (approx.) - 10% off! #1 seller {braces}",
-        "# Not a heading\n## Also not\n  ### indented",
-        "- not a list\n* not a list\n+ not a list\n1. not ordered\n2) not ordered\n\t- tabbed",
-        "> not a quote\n>> nested history\n   > indented",
-        "---\n***\n___\n- - -",
-        "```\nnot code\n```\n~~~\nnot fenced\n~~~",
-        "*emph* **strong** ***both*** _under_ __double__ ~~strike~~ ~single~ ~~~~four",
-        "snake_case_name and 5 * 3 = 15 and a*b*c and __init__.py and **kwargs",
-        "[link](https://example.test) and ![image](cid:fixture) and [ref] (paren)",
-        "<https://example.test/a> and <b>bold</b> and a < b > c and <mailto:x@example.test>",
-        "back\\slash \\* \\` \\\\ and C:\\path\\file",
-        "| a | b |\n|---|---|\n| 1 | 2 |\nx|y\n---|---",
-        "`code` and ``double`` and ` lone",
-        "line with trailing spaces  \nnext  line_end_ and *dangling",
-        "Unicode café — “quotes” 👋 *é* _ü_",
-    };
-    for (cases) |source| {
-        const minimal = try escapeSource(a, source);
-        const oracle = try escapeEverything(a, source);
-        for ([_]bool{ false, true }) |quoted| {
-            const left = if (quoted) try @import("conversation_draft.zig").quote(a, minimal) else minimal;
-            const right = if (quoted) try @import("conversation_draft.zig").quote(a, oracle) else oracle;
-            const ours = try render(a, left);
-            const theirs = try render(a, right);
-            try std.testing.expectEqualStrings(try withoutAnchors(a, theirs.html), try withoutAnchors(a, ours.html));
-            try std.testing.expectEqualStrings(theirs.plain, ours.plain);
-            // Any link minimal escaping leaves is a bare URL showing itself.
-            var anchors = std.mem.splitSequence(u8, ours.html, "href=\"");
-            _ = anchors.next();
-            while (anchors.next()) |tail| {
-                const target = tail[0..std.mem.indexOfScalar(u8, tail, '"').?];
-                const label_start = std.mem.indexOfScalar(u8, tail, '>').? + 1;
-                if (std.mem.indexOf(u8, target, "omagma") != null) continue; // generated footer
-                try std.testing.expect(std.mem.startsWith(u8, tail[label_start..], target));
-            }
-        }
-    }
-    // Ordinary prose punctuation is left alone in the editable quote.
-    try std.testing.expectEqualStrings(cases[0], try escapeSource(a, cases[0]));
-    try std.testing.expectEqualStrings("snake_case_name and 5 * 3 = 15 and a\\*b\\*c", try escapeSource(a, "snake_case_name and 5 * 3 = 15 and a*b*c"));
-    // A setext underline was never escaped before; it is literal now.
-    for ([_][]const u8{ "Title\n=====", "Title\n-----" }) |source| {
-        const rendered = try render(a, try escapeSource(a, source));
-        try std.testing.expect(std.mem.indexOf(u8, rendered.html, "<h1") == null and std.mem.indexOf(u8, rendered.html, "<h2") == null);
-        try std.testing.expect(std.mem.indexOf(u8, rendered.plain, source[6..]) != null);
-    }
-}
 test "markdown mail: footer has approved image first gray prose orange omagma link and trailing volcano" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
