@@ -955,7 +955,7 @@ pub const Session = struct {
                 if (reconcile) try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), reconcileInvitation, .{ s, a, &store, ics, req });
                 if (reconcile) try s.resumeInvitationCalendar(a, &store, ics, req);
                 const response_status = try confirmedInvitationResponse(a, &store, ics, address, aliases);
-                return j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable });
+                return j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable, .organizerName = invite.organizer_name.slice(), .defects = try invitation.Defect.list(a, invite.defects) });
             }
             if (std.mem.eql(u8, (try confirmedInvitationResponse(a, &store, ics, address, aliases)).outcome, "unknown")) return error.UnknownOutcome;
             const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
@@ -5966,6 +5966,45 @@ test "invitation offline: cached identity and exact confirmed source survive ins
     store.state.operations[0].outcome = "unknown";
     try std.testing.expectEqualStrings("unknown", (try Session.confirmedInvitationResponse(a, &store, ics, account, &.{"alias@example.test"})).outcome);
     try std.testing.expectEqualStrings("unknown", j.text((try Session.invitationReceipt(a, &store, ics, repeated)).?, "outcome"));
+}
+
+test "invitation offline: damaged inspection lists stable defects and the organizer's name" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("TZ", "UTC");
+    const session = try a.create(Session);
+    session.* = try Session.init(io, a, &env, .{ .fixtures = true, .cache_dir = try std.fmt.allocPrint(a, "{s}/cache", .{root}) });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const damaged = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:damaged@example.test\r\nDTSTAMP:20261013T100000Z\r\nSUMMARY:Planning\r\nSEQUENCE:1\r\nSEQUENCE:2\r\nORGANIZER;CN=Fixture Host:invalid:nomail\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const clean = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:clean@example.test\r\nDTSTAMP:20261013T100000Z\r\nORGANIZER;CN=Fixture Host:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try store.put(.{ .id = "damaged-invitation", .threadId = "damaged-thread", .bodyText = "Planning", .invitation = damaged }, true);
+        try store.put(.{ .id = "clean-invitation", .threadId = "clean-thread", .bodyText = "Planning", .invitation = clean }, true);
+        try store.save();
+    }
+    const result = try session.dispatch(a, try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "damaged-invitation", .cacheOnly = true }));
+    try std.testing.expect(!try j.boolean(result, "canReply", true));
+    try std.testing.expectEqualStrings("", j.text(result, "organizer"));
+    try std.testing.expectEqualStrings("Fixture Host", j.text(result, "organizerName"));
+    const defects = try array(result, "defects");
+    try std.testing.expectEqual(@as(usize, 2), defects.len);
+    try std.testing.expectEqualStrings("organizer", defects[0].string);
+    try std.testing.expectEqualStrings("duplicate", defects[1].string);
+    const fine = try session.dispatch(a, try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "clean-invitation", .cacheOnly = true }));
+    try std.testing.expect(try j.boolean(fine, "canReply", false));
+    try std.testing.expectEqual(@as(usize, 0), (try array(fine, "defects")).len);
+    try std.testing.expectEqualStrings("Fixture Host", j.text(fine, "organizerName"));
 }
 
 test "calendar RSVP: mail receipt survives calendar failures and reply replay never resends" {

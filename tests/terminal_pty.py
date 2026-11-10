@@ -843,8 +843,8 @@ def exercise(terminal, action):
 
         def identities_visible():
             current = "\n".join(invitation_card_lines())
-            for identity in ("Account: personal@example.com", "Attendee: personal@example.com",
-                             "Organizer: organizer@example.org"):
+            for identity in ("Account · personal@example.com", "Attendee · personal@example.com",
+                             "Organizer · organizer@example.org"):
                 require(identity in current, "long RSVP detail obscured a labelled reply identity or destination")
             for control in ("[a Accept]", "[t Tentative]", "[d Decline]", "[Esc Cancel]"):
                 require(control in current, "long RSVP detail clipped response/cancellation controls")

@@ -50,7 +50,7 @@ def scenario(binary, directory, applied, captures):
                 captures.mkdir(parents=True, exist_ok=True)
                 (captures / 'rsvp-unknown.json').write_text(json.dumps(screen_capture(terminal)) + '\n')
             terminal.send(b'C')
-            terminal.until(lambda: 'Your confirmed RSVP: ACCEPTED' in terminal.text())
+            terminal.until(lambda: 'Your response · Accepted' in terminal.text())
             require('[C Check Sent]' not in terminal.text(), 'confirmed receipt still has unresolved action')
             if captures:
                 (captures / 'rsvp-reconciled.json').write_text(json.dumps(screen_capture(terminal)) + '\n')

@@ -35,7 +35,7 @@ def scenario(binary, directory, mode, captures):
         reason = ('Calendar write permission is missing' if behavior == 'calendar-no-grant'
                   else 'Calendar could not be reached')
         require(reason in terminal.text(), 'Calendar preflight blocker has no visible reason')
-        require('Your confirmed RSVP:' not in terminal.text() and 'RSVP sent' not in terminal.text(),
+        require('Your response ·' not in terminal.text() and 'RSVP sent' not in terminal.text(),
                 'blocked response was presented as sent')
         counts(0, 0)
 
@@ -92,7 +92,7 @@ def scenario(binary, directory, mode, captures):
             counts(1, 0)
         capture(terminal, captures, mode + '-result')
         terminal.send(b'I')
-        terminal.until(lambda: 'Your confirmed RSVP: ' + expected_response in terminal.text()
+        terminal.until(lambda: 'Your response · ' + expected_response.title() in terminal.text()
                        and 'Working…' not in terminal.text())
         terminal.gap(.1)
         if blocked:

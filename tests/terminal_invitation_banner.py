@@ -115,7 +115,7 @@ def review(terminal, account, case):
     hero = next(line for line in text.splitlines() if "Fictional calendar meeting" in line)
     require(("" in hero) == (case == "first"),
             "review card video marker does not match the inspected invitation")
-    require(f"Account: {account}" in text and identity(case, account)["organizer"] in text,
+    require(f"Account · {account}" in text and identity(case, account)["organizer"] in text,
             "RSVP callout reviewed a different message or account")
     require("UID:" not in text, "friendly meeting summary exposed protocol-only identifiers")
     terminal.send(b"v")

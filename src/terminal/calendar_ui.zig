@@ -93,6 +93,39 @@ pub const State = struct {
     calendar_name: b.Text(1024) = .{},
     zone_name: b.Text(512) = .{},
     source_message: b.Text(1024) = .{},
+    /// A zone the user explicitly assumed for an invitation without usable
+    /// time-zone rules. Every plan/review request repeats it; nothing else
+    /// infers it. `assumed_floating` also consents to fixing floating times.
+    assumed_zone: b.Text(512) = .{},
+    assumed_floating: bool = false,
+    zone_entry: bool = false,
+    /// z/Z pressed in the Mail drawer: once the plan shows a zone problem,
+    /// assume the suggestion (`suggested`) or open zone entry (`typed`).
+    zone_intent: enum { none, suggested, typed } = .none,
+    /// Where `q` from an invitation review returns: the Mail drawer it was
+    /// opened from, or the destination picker the user chose it in.
+    return_to_invitation: bool = false,
+    picker_chosen: bool = false,
+    /// `v` reveals protocol identifiers in an invitation review.
+    review_details: bool = false,
+    /// Select this provider event ID once the next window loads (after
+    /// "Already in", a save or a duplicate), instead of the first upcoming.
+    select_event: b.Text(1024) = .{},
+    /// After Ctrl+G, select the first event on or after this civil day.
+    select_day: ?i64 = null,
+    /// The previous range stays visible (dimmed) until the next one arrives.
+    dimmed: bool = false,
+    /// Rows of the last drawn event list; Ctrl+D/U move half of it.
+    list_rows: usize = 10,
+    /// Status shown once the next window finishes loading ("Saved · …").
+    pending_notice: b.Text(256) = .{},
+    /// A single `g` opens Calendars at once; a second `g` within 750 ms
+    /// closes that untouched picker and selects the first event (`gg`).
+    g_at_ms: i64 = 0,
+    /// Selection and filter before `/`; Esc restores them exactly.
+    search_return_selected: usize = 0,
+    search_return_top: usize = 0,
+    search_return_query: b.Text(256) = .{},
     booking_copy: bool = false,
     booking_details: bool = false,
     booking_lines: usize = 0,

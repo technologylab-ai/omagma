@@ -551,10 +551,10 @@ def browsing(binary, directory, captures):
         require("Mon" in terminal.text() and "Sun" in terminal.text(), "full Week did not draw seven date columns")
         capture(terminal, captures, "calendar-week-wide")
         terminal.resize(104, 30)
-        terminal.until(lambda: "Sun" in terminal.text())
+        terminal.until(lambda: "│Sun " in terminal.text())
         capture(terminal, captures, "calendar-week-minimum-seven-days")
         terminal.resize(120, 38)
-        terminal.until(lambda: "Sun" in terminal.text())
+        terminal.until(lambda: "│Sun " in terminal.text())
         capture(terminal, captures, "calendar-week-medium")
         terminal.resize(82, 28)
         terminal.until(lambda: "Week needs 104 cols" in terminal.text())
@@ -565,7 +565,8 @@ def browsing(binary, directory, captures):
         require("more event" in terminal.text(), "narrow agenda hides later events without an indication")
         lines = terminal.screen.lines()
         marker = next(i for i, row in enumerate(lines) if "more event" in row)
-        require(not any(name + " ·" in lines[marker - 1] for name in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")), "agenda orphaned a day heading without its first event")
+        heading = re.compile(r"^((Today|Tomorrow|Yesterday) · )?(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}$")
+        require(not heading.match(lines[marker - 1].strip()), "agenda orphaned a day heading without its first event")
         capture(terminal, captures, "calendar-week-narrow")
         terminal.resize(140, 38)
         terminal.send(b"1")
@@ -574,7 +575,7 @@ def browsing(binary, directory, captures):
         terminal.until(lambda: "Filter: planning" in terminal.text() and "Loaded events /" not in terminal.text())
         require("Daily review" not in terminal.text(), "loaded search failed to filter unrelated events")
         terminal.send(b"\r")
-        terminal.until(lambda: "Calendar · Event" in terminal.text() and "Event is already in this calendar" in terminal.text())
+        terminal.until(lambda: "Calendar · Event" in terminal.text() and "Event details loaded" in terminal.text())
         require("09:00–10:00 UTC" in terminal.text() and "1h" in terminal.text(), "event card omitted exact interval, duration or zone")
         require("Event:" not in terminal.text() and "To RSVP" not in terminal.text(), "event card retained flat field dump")
         require("[o Join]" in terminal.text() and "" in terminal.text(), "event card omitted camera or Join")
@@ -591,9 +592,8 @@ def browsing(binary, directory, captures):
         terminal.send(b"\t\r")
         terminal.until(lambda: "Calendar · Event" in terminal.text() and "[o Join]" in terminal.text()
                        and "keyboard & mouse" not in terminal.text())
+        # Enter runs the card's first action, Join, in the event's profile.
         terminal.send(b"\r")
-        terminal.until(lambda: "or Tab to Join, then Enter" in terminal.text())
-        terminal.send(b"o")
         terminal.until(lambda: "Join target validated" in terminal.text())
         require("Profile 3" in terminal.text(), "Join feedback omitted the configured Chrome profile")
         capture(terminal, captures, "calendar-event-join-feedback")
@@ -602,7 +602,10 @@ def browsing(binary, directory, captures):
             terminal.until(lambda: "[q Back]" in terminal.text() and "Project planning" in terminal.text())
             capture(terminal, captures, f"calendar-event-detail-{columns}")
         terminal.resize(140, 38)
+        # Esc while typing keeps the applied filter; the next Esc clears it.
         terminal.send(b"q/\x1b")
+        terminal.gap(.1)
+        terminal.send(b"\x1b")
         terminal.gap(.1)
         terminal.send(b"g")
         terminal.until(lambda: "Show calendars" in terminal.text() and "Holidays" in terminal.text())
@@ -640,12 +643,13 @@ def browsing(binary, directory, captures):
         terminal.send(b"C")
         wait_calendar(terminal)
         terminal.send(b"\x07\x05" + b"\x7f" * 10 + b"2026-02-30\r")
-        terminal.until(lambda: "Choose a valid date" in terminal.text())
-        require("Date YYYY-MM-DD" in terminal.text(), "invalid date closed date entry")
-        target_day = (datetime.now(timezone.utc) + timedelta(days=15)).date().isoformat()
+        terminal.until(lambda: "Try fri, tomorrow" in terminal.text())
+        require("Go to date" in terminal.text(), "invalid date closed date entry")
+        target = (datetime.now(timezone.utc) + timedelta(days=15)).date()
+        target_day = target.isoformat()
         terminal.send(b"\x05" + b"\x7f" * 10 + target_day.encode() + b"\r")
         wait_calendar(terminal)
-        require(target_day in terminal.text(), "date jump did not navigate to requested civil date")
+        require(f"{target:%a} {target.day} {target:%b}" in terminal.text(), "date jump did not navigate to requested civil date")
         capture(terminal, captures, "calendar-date-jump")
         terminal.send(b"t")
         wait_calendar(terminal)
@@ -822,7 +826,9 @@ def grid_coverage(binary, directory, captures):
              if __import__("json").loads(path.read_text())["account"] == ACCOUNTS[0]]
     require(len(paths) == 1, "grid fixture account storage is ambiguous")
     paths[0].write_text(json.dumps(state) + "\n")
-    terminal = start(binary, client_dir, fixture)
+    # The compact Calendar chrome frees four rows; 34 rows keep the earlier
+    # grid height, where the 09:00 overlap still needs its +1 badge.
+    terminal = start(binary, client_dir, fixture, rows=34)
     try:
         terminal.send(b"C")
         wait_calendar(terminal)
@@ -833,12 +839,13 @@ def grid_coverage(binary, directory, captures):
         # Pin selection independently of the clock; the Late call footer ends
         # at00:00 and must never supply the midnight coverage oracle.
         terminal.send(b"k" * len(definitions))
-        terminal.until(lambda: "Early start" in terminal.screen.lines()[-4])
+        terminal.until(lambda: "Early start" in terminal.screen.lines()[-3])
         expected_hours = [f"{hour:02}:00" for hour in range(24)]
 
         # At38 rows all24 actual gutter labels fit, in chronological order.
         require(hour_gutter(terminal) == expected_hours, "wide grid wastes room while hiding hours")
-        require("09:30" in terminal.text() and "+1" in terminal.text(), "grid lost actual start minutes or overlap count")
+        # The gutter names the hour; a cell keeps only its non-zero minute.
+        require(":30" in terminal.text() and "+1" in terminal.text(), "grid lost actual start minutes or overlap count")
         lines = terminal.screen.lines()
         row_10 = next(row for row in lines if row.startswith("10:00"))
         row_11 = next(row for row in lines if row.startswith("11:00"))
@@ -847,7 +854,7 @@ def grid_coverage(binary, directory, captures):
         capture(terminal, captures, "calendar-overlaps-wide")
         for columns in (104, 110):
             before = terminal.screen.completed_frames
-            terminal.resize(columns, 38)
+            terminal.resize(columns, 34)
             terminal.until(lambda: terminal.screen.completed_frames > before and "Sun" in terminal.text())
             require(hour_gutter(terminal) == expected_hours, "seven-day resize hid an hour gutter label")
             camera_rows = [row for row in terminal.screen.lines() if row.startswith("09:00")]
@@ -862,8 +869,8 @@ def grid_coverage(binary, directory, captures):
         before = terminal.text()
         terminal.send(b"l")
         terminal.until(lambda: "Up to date" in terminal.text() and terminal.text() != before)
-        expected = (today + timedelta(days=3)).date().isoformat()
-        require(expected in terminal.text(), "compact three-day Next skipped four days")
+        moved = (today + timedelta(days=3)).date()
+        require(f"{moved:%a} {moved.day} {moved:%b}" in terminal.text(), "compact three-day Next skipped four days")
         terminal.finish()
         provider_counts(binary, client_dir, fixture, 0)
         return {"minuteStarts": True, "durations": True, "overlapCounts": True, "hiddenHours": True, "compactStepDays": 3}

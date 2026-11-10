@@ -73,7 +73,45 @@ pub const Defect = struct {
     pub const sequence: u16 = 128;
     /// A value exceeded its display field and was truncated or omitted.
     pub const truncated: u16 = 256;
+    /// Stable lowercase wire names, indexed by bit position.
+    pub const names = [_][]const u8{ "syntax", "structure", "organizer", "stamp", "duplicate", "reply", "timezone", "sequence", "truncated" };
+    /// The set bits as their stable names, in bit order.
+    pub fn list(a: std.mem.Allocator, bits: u16) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (names, 0..) |name, index| if (bits & (@as(u16, 1) << @intCast(index)) != 0) try out.append(a, name);
+        return out.toOwnedSlice(a);
+    }
+    /// Inverse of `list`; unknown names from a newer backend still mark the
+    /// invitation as damaged rather than silently enabling a reply.
+    pub fn parse(values: []const []const u8) u16 {
+        var bits: u16 = 0;
+        for (values) |value| {
+            var known = false;
+            for (names, 0..) |name, index| if (std.mem.eql(u8, value, name)) {
+                bits |= @as(u16, 1) << @intCast(index);
+                known = true;
+            };
+            if (!known) bits |= structure;
+        }
+        return bits;
+    }
 };
+
+test "invitation defects: stable names round-trip and unknown names stay damaged" {
+    const a = std.testing.allocator;
+    const listed = try Defect.list(a, Defect.organizer | Defect.duplicate | Defect.truncated);
+    defer a.free(listed);
+    try std.testing.expectEqual(@as(usize, 3), listed.len);
+    try std.testing.expectEqualStrings("organizer", listed[0]);
+    try std.testing.expectEqualStrings("duplicate", listed[1]);
+    try std.testing.expectEqualStrings("truncated", listed[2]);
+    try std.testing.expectEqual(Defect.organizer | Defect.duplicate | Defect.truncated, Defect.parse(listed));
+    try std.testing.expectEqual(Defect.structure, Defect.parse(&.{"future-defect"}));
+    try std.testing.expectEqual(@as(u16, 0), Defect.parse(&.{}));
+    const none = try Defect.list(a, 0);
+    defer a.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
 
 /// A REQUEST for exactly one event/instance. Deliberately rejects ambiguous
 /// calendars rather than choosing an event or attendee implicitly.

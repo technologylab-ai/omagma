@@ -119,7 +119,7 @@ def scenario(binary, directory, captures, updating):
             terminal.until(lambda: "Calendar action applied" in terminal.text())
             provider_counts(binary, client_dir, fixture, 2)
         else:
-            terminal.until(lambda: "Action: Already in this calendar" in terminal.text())
+            terminal.until(lambda: "Already in Personal · Enter opens it in Calendar" in terminal.text())
             assert_no_submission(binary, client_dir, fixture, 0, stale_id)
         capture(terminal, captures, "calendar-stale-update-recovered" if updating else "calendar-stale-import-existing")
         terminal.finish()

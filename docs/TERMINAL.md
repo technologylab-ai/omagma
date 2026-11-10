@@ -558,17 +558,42 @@ An explicit RSVP-only choice also remains email-only when checked later.
 
 The native Calendar view requires optional per-account Calendar access.
 Press `C`, choose Calendar in the sidebar, or use the
-action palette. `1`/`2`/`3` switch Agenda/Day/Week; `g` chooses which calendars to
+action palette. One header row holds **q Mail**, the **Agenda · Day · Week**
+tabs (the active one highlighted; all clickable and reachable with Tab), the
+date range between `‹ ›` and the source legend; the legend moves to a second row only when its names do not
+fit. `1`/`2`/`3` switch Agenda/Day/Week, and `d`/`w` also choose Day/Week.
+Week always starts on Monday; switching views keeps the selected event's day.
+`g` chooses which calendars to
 show, including read-only holiday calendars. Space toggles a source, `a` switches
 between the current account and all configured accounts, and Enter applies the
 selection. Esc cancels pending changes; `o` shows only the focused calendar and
 `c` changes its theme color. Source letters and names remain visible without
 color. The selection persists across restarts. `h`/`l` move the date range,
-`Ctrl+G` jumps to a date, and `t` returns to today. `j`/`k`
-select an event and Enter opens its details. `/` searches only the loaded date
-range. Buttons also support Tab/Shift+Tab, Enter and mouse clicks. Narrow
-terminals use a compact presentation, with all-day dates kept separate from
-timed appointments. `?` opens the same searchable help presentation as Mail:
+`t` returns to today and `Ctrl+G` jumps to a date: type `fri`, `tomorrow`,
+`+3d`, `-1w`, `12-24` or `2026-12-24`; the status shows the date reached.
+`j`/`k` select an event (at the last one, `l` continues into the next period),
+`gg`/`G` or Home/End reach the first/last event and Ctrl+D/Ctrl+U move half a
+page, as in Mail. Enter opens details. The selected event and its actions
+share the bottom row. `/` searches only the loaded date range; Esc while
+typing restores the previous filter and selection, and Esc with an applied
+filter clears it before leaving Calendar. Buttons also support Tab/Shift+Tab,
+Enter and mouse clicks. Narrow terminals use a compact presentation, with
+all-day dates kept separate from timed appointments. While the next range
+loads, the previous one stays on screen, dimmed and labelled.
+
+Agenda and Day rows read `A 09:00–10:00  1h   Title · Place`: the source letter
+(when several calendars are shown), time, duration, then title and place.
+Accounts appear on rows only when several accounts are shown. Day headers say
+`Today · Tue 10 Nov` and `Tomorrow · Wed 11 Nov`; past events are dimmed and
+`↻` marks an occurrence of a repeating event. On today a
+`── now 15:07 · next in 53 min ──` row separates past and upcoming events. An
+empty range says so and offers `n` New event, `l` Next period and `g`
+Calendars. If Google returns only part of a range, or a calendar cannot be
+loaded, a warning row stays above the events (`Incomplete: Personal returned
+only part of …`, `Ctrl+R` retries) and the status never says Up to date at the
+same time. Errors use words such as **Connection temporarily unavailable**;
+the stable code remains in Help. Time that Google shares only as busy shows as
+**Busy · details unavailable**; its card offers only `b` Google Calendar. `?` opens the same searchable help presentation as Mail:
 `/` finds keys, actions and sections; `n`/`N` visits matches. Esc clears a search
 first, then returns to the Calendar page you opened it from. The Back control
 also supports mouse, Tab and Enter.
@@ -585,7 +610,13 @@ routine cannot hide new starts in other hours.
 
 ### Create and edit meetings
 
-Press `n` to create a timed or all-day event, or `e` to edit the selected event.
+Press `n` to create a timed or all-day event on the selected event's day, `c`
+to start a new event copied from the selected one (title, place and times; it
+is a new event with its own review), or `e` to edit the selected event. Edit is
+offered only for events in a writable calendar; for read-only events `e`
+explains that `b` opens them in Google Calendar. Times accept `1430`, `2pm`
+or `14:30`, dates accept `tomorrow`, `fri`, `+2d` or `12-24`, and End time
+accepts `+45m` or `+1h30m`; leaving the field shows the exact value.
 The editor names the destination account/calendar and time zone. Its all-day
 last date is inclusive; the provider's exclusive end is handled automatically.
 Choose Google Meet to generate a video link, or paste an HTTPS link from another
@@ -600,6 +631,12 @@ have been read. Recurring edits affect the selected occurrence. Skipped DST
 times are refused; repeated times offer an explicit first/second occurrence.
 See [creating and editing events](CALENDAR-EVENTS.md) for permissions,
 supported edits and recovery after an uncertain save.
+
+After a confirmed save, Back returns to the view with the event selected and
+the status **Saved · title · time**. In an event card Enter runs the first
+action shown (Join, otherwise Edit, otherwise Google Calendar) and the footer
+lists every available key; guests and a repeating series are listed when
+Calendar provides them.
 
 `O` opens Google Calendar and `b` opens the selected event in its owning
 account's configured Chrome profile. Opening an event uses Google's returned
@@ -640,7 +677,20 @@ run only while the TUI is open and use the existing Calendar read permission.
 
 From an invitation, `A` opens a review for adding the event to the selected
 calendar, or applying a supported newer update/cancellation. Review the account,
-calendar and times before confirming. The saved review fixes the exact action;
+calendar and times before confirming. `q` returns to where you pressed `A` (the
+mail or the invitation card); `g` chooses another destination calendar, and
+after choosing one in that picker `q` returns to the picker. An event that is already saved shows one line,
+**Already in Personal · Enter opens it in Calendar**. Calendar ID, UID and the
+source time stay behind `v` Details. If the check itself fails, the review says
+why in words instead of waiting.
+
+When an invitation has no usable time zone (a floating time, or a zone name
+Omagma cannot verify), the review says so and offers **Assume Europe/Vienna? →**
+with the converted start and end: `z` uses that suggestion (the destination
+calendar's zone when the invitation suggests none) and `Z` lets you type any
+IANA zone. The review then states **Zone assumed by you**, and confirming still
+needs its own `y`. In the reply card, `z`/`Z` open that same Calendar review;
+`s` still sends the RSVP without Calendar. The saved review fixes the exact action;
 it never sends an RSVP email. If the connection fails after dispatch, the outcome
 remains unknown. **r · Check Calendar** checks the recorded action without
 applying it again, including after restart. Do not resubmit the event to resolve
@@ -658,7 +708,15 @@ original invitation timezone; ambiguous floating times require an explicit
 decision.
 
 Invitations show a themed event card below the message's labels, with a bold
-title, accent-colored time and **I · Respond** cue. A roomy reader uses a quiet
+title, accent-colored time and **I · Respond** cue. After you answer, the card
+shows **✓ Accepted · I Change** (or `~ Tentative`, `× Declined`) and the reply
+card says **Your response · Accepted**, dimming that choice. A damaged
+invitation (an unreadable organizer, repeated fields, dropped time-zone rules
+or malformed calendar data) shows `⚠` beside **I · Details**; its card explains
+**Can't answer from Omagma · this invitation is damaged: …**, confirms that
+nothing was sent and offers `r` Reply by email and `o` Open in Gmail (`g` when
+`o` is Join); it has no `A` Calendar route. An unreadable organizer address
+shows the organizer's name. A roomy reader uses a quiet
 border and three content rows; smaller panes retain a compact one-to-three-row
 summary so the message body stays readable. Invitations with a detected, usable
 meeting link show the ** video-call icon**, matching Calendar; cancelled meetings
