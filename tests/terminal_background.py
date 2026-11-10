@@ -248,12 +248,17 @@ def run_case(binary, directory, name):
         with Client(binary, directory, extra=("--fixture-root", str(fixture.root))) as client:
             before = metrics(client)
             for cmd, params in (("mail.send", {"operationId": "forbidden-bg-send", "draft": {"to": ["recipient@example.org"], "subject": "Never submit", "bodyText": "Synthetic"}}),
-                                ("contacts.list", {}), ("contacts.upsert", {"operationId": "forbidden-bg-contact", "contact": {"name": "Never write", "emails": ["recipient@example.org"]}}),
+                                ("contacts.list", {}), ("contacts.upsert", {"contact": {"name": "Never write", "emails": ["recipient@example.org"]}}),
                                 ("invitation.reply", {"messageId": "shared-msg-009", "status": "accepted", "operationId": "forbidden-bg-rsvp"})):
+                # barGrantOnly belongs to the internal refresh contract; other
+                # commands refuse it before execution instead of widening access.
                 error = client.request(cmd, barGrantOnly=True, ok=False, **params)
-                require(error["code"] == "PermissionDenied", "bar-only background request gained non-read capability")
-            for params in ({"query": "is:unread"}, {"label": "STARRED"}, {"cursor": "unrelated"}):
-                require(client.request("mail.refresh", auto=True, ok=False, **params)["code"] == "InvalidAutomaticRefresh",
+                require(error["code"] in {"PermissionDenied", "UnknownField"}, "bar-only background request gained non-read capability")
+            # mail.refresh has no cursor field: the contract refuses it before
+            # the automatic-refresh scope check runs.
+            for params, code in (({"query": "is:unread"}, "InvalidAutomaticRefresh"), ({"label": "STARRED"}, "InvalidAutomaticRefresh"),
+                                 ({"cursor": "unrelated"}, "UnknownField")):
+                require(client.request("mail.refresh", auto=True, ok=False, **params)["code"] == code,
                         "automatic refresh accepted scoped arbitrary request")
             after = metrics(client)
             require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == 0,

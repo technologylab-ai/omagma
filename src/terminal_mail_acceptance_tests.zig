@@ -169,7 +169,14 @@ fn newCachedSession(a: std.mem.Allocator, root: []const u8, env: *std.process.En
     return session;
 }
 fn cached(a: std.mem.Allocator, session: *core.Session, account: []const u8, command: []const u8) !j.Value {
-    const request = try std.json.Stringify.valueAlloc(a, .{ .id = "acceptance", .cmd = command, .account = account, .messageId = "same-message", .threadId = "same-thread" }, .{});
+    // Each command carries only its own target field; the strict JSONL
+    // contract refuses a thread ID on mail.read and a message ID on mail.thread.
+    const request = if (std.mem.eql(u8, command, "mail.thread"))
+        try std.json.Stringify.valueAlloc(a, .{ .id = "acceptance", .cmd = command, .account = account, .threadId = "same-thread" }, .{})
+    else if (std.mem.eql(u8, command, "mail.read"))
+        try std.json.Stringify.valueAlloc(a, .{ .id = "acceptance", .cmd = command, .account = account, .messageId = "same-message" }, .{})
+    else
+        try std.json.Stringify.valueAlloc(a, .{ .id = "acceptance", .cmd = command, .account = account }, .{});
     const response = try std.json.parseFromSliceLeaky(j.Value, a, try session.client().callCached(a, request), .{});
     if (!try j.boolean(response, "ok", false)) std.debug.print("mail acceptance cached action failed: {s}\n", .{j.text(j.get(response, "error").?, "code")});
     try std.testing.expect(try j.boolean(response, "ok", false));
@@ -516,6 +523,12 @@ test "mail acceptance: broken display encodings retain readable mail and a healt
     try std.testing.expect(std.mem.indexOfAny(u8, readable.subject, "\r\n") == null);
 }
 
+/// Reply-all is a mail.reply field only; the strict contract refuses it on forward.
+fn conversationRequest(a: std.mem.Allocator, account: []const u8, command: []const u8, all: bool) !j.Value {
+    var request = try j.value(a, .{ .cmd = command, .account = account, .messageId = "same-message", .preserveFormatting = true, .bodyFormat = "markdown", .all = all });
+    if (std.mem.eql(u8, command, "mail.forward")) _ = request.object.swapRemove("all");
+    return request;
+}
 fn sessionCommand(a: std.mem.Allocator, session: *core.Session, request: anytype) !j.Value {
     const raw = try std.json.Stringify.valueAlloc(a, request, .{});
     const response = try std.json.parseFromSliceLeaky(j.Value, a, try session.client().call(a, raw), .{});
@@ -673,7 +686,7 @@ test "mail acceptance: read save preserve reply reply-all and forward retain ori
         .{ .command = "mail.forward" },
     }) |action| {
         errdefer std.debug.print("mail acceptance next action: {s} all={any}\n", .{ action.command, action.all });
-        const created = try sessionCommand(a, session, .{ .cmd = action.command, .account = account, .messageId = "same-message", .preserveFormatting = true, .bodyFormat = "markdown", .all = action.all });
+        const created = try sessionCommand(a, session, try conversationRequest(a, account, action.command, action.all));
         var draft = try core.decodeDraft(a, created);
         try std.testing.expectEqualStrings(html, draft.original.?.bodyHtml);
         try std.testing.expectEqualStrings("Plain café.\n", draft.original.?.bodyText);
@@ -986,7 +999,7 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
             .{ .command = "mail.reply", .all = true },
             .{ .command = "mail.forward" },
         }) |action| {
-            const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = action.command, .account = account, .messageId = "same-message", .preserveFormatting = true, .bodyFormat = "markdown", .all = action.all }, .{});
+            const request = try std.json.Stringify.valueAlloc(a, try conversationRequest(a, account, action.command, action.all), .{});
             const refused = try std.json.parseFromSliceLeaky(j.Value, a, try session.client().call(a, request), .{});
             try std.testing.expect(!try j.boolean(refused, "ok", true));
             try std.testing.expectEqualStrings("AttachmentsTooLarge", j.text(j.get(refused, "error").?, "code"));

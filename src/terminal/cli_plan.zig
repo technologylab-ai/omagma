@@ -275,13 +275,18 @@ pub fn execute(io: std.Io, a: std.mem.Allocator, client: t.Client, input: j.Valu
         if (!try j.boolean(resolved.data, "complete", false) or pinned != .array or pinned.array.items.len == 0 or pinned.array.items.len > 100 or try j.integer(resolved.data, "count", -1) != @as(i64, @intCast(pinned.array.items.len))) return error.IncompleteTriageScope;
         try request.object.put(a, "messageIds", pinned);
     }
+    // Converted requests carry only the target command's fields: the strict
+    // JSONL contract rejects a leftover single-message anchor or scope.
     if (label_state) {
         try request.object.put(a, "messageIds", try oneId(a, request));
+        _ = request.object.swapRemove("messageId");
+        _ = request.object.swapRemove("scope");
         command = "mail.label-state";
         try request.object.put(a, "cmd", .{ .string = command });
     } else if (action(command)) |verb| {
         if (scoped or j.get(request, "messageIds") != null or eq(verb, "spam") or eq(verb, "unspam")) {
             try request.object.put(a, "messageIds", try oneId(a, request));
+            _ = request.object.swapRemove("messageId");
             try request.object.put(a, "action", .{ .string = verb });
             command = "mail.batch";
             try request.object.put(a, "cmd", .{ .string = command });

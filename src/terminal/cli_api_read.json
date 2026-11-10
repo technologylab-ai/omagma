@@ -104,6 +104,15 @@
           "type": "integer",
           "description": "Optional nonnegative receivedAt millisecond timestamp from the visible anchor message. Used with beforeMessageId/afterMessageId only when the ID cannot supply a retained boundary; recovery stays within this account/query/label view and reports boundaryFallback:true. It never fetches or imports the missing message.",
           "minimum": 0
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns compact rows (id, threadId, from, to, subject, snippet, receivedAt, receivedAtIso, unread, labels, attachmentCount) without bodies; empty strings, false flags and zero counters are omitted. Recommended for agents that only need to choose messages."
         }
       },
       "required": [],
@@ -195,6 +204,15 @@
           "type": "integer",
           "description": "Optional nonnegative receivedAt millisecond timestamp from the visible anchor message. Used with beforeMessageId/afterMessageId only when the ID cannot supply a retained boundary; recovery stays within this account/query/label view and reports boundaryFallback:true. It never fetches or imports the missing message.",
           "minimum": 0
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns compact rows (id, threadId, from, to, subject, snippet, receivedAt, receivedAtIso, unread, labels, attachmentCount) without bodies; empty strings, false flags and zero counters are omitted. Recommended for agents that only need to choose messages."
         }
       },
       "required": [],
@@ -207,7 +225,8 @@
         "Cached search returns searchMode:cache, searchScope:metadata-and-cached-bodies, matchedCachedCount, literal searchMatches/excerpts and highlightTerm, along with a partial cached page.",
         "Keep account/query/label/cache mode and live includeSpamTrash choice fixed for each cursor. Cached K cursors are scoped to metadata generation and, when bodies are searched, body residency; do not reuse live L cursors or stale snapshots.",
         "Relative cached windows exclude their before/after anchor and report cacheWindow, hasMoreCachedBefore/After and boundaryFallback. An evicted anchor without a usable retained boundary or boundaryReceivedAt fails CacheBoundaryGone.",
-        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data.",
+        "Live results include hasMore (true when nextCursor continues the page); cached results report hasMoreCachedBefore/After."
       ],
       "examples": [
         {
@@ -266,6 +285,15 @@
           "type": "boolean",
           "description": "Live mail.list/search/sync only; default false. True includes Spam/Trash in Gmail enumeration. It is also enabled for label SPAM/TRASH or query text containing in:spam, in:trash or in:anywhere. Cached operations do not apply this switch; use their label/query filters.",
           "default": false
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns compact rows (id, threadId, from, to, subject, snippet, receivedAt, receivedAtIso, unread, labels, attachmentCount) without bodies; empty strings, false flags and zero counters are omitted. Recommended for agents that only need to choose messages."
         }
       },
       "required": [],
@@ -297,6 +325,33 @@
           "type": "boolean",
           "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
           "default": false
+        },
+        "body": {
+          "type": "string",
+          "enum": [
+            "both",
+            "text",
+            "html",
+            "none"
+          ],
+          "default": "both",
+          "description": "Which body alternatives to return. Default both keeps today's behavior (bodyText plus bodyHtml when present). text is the recommended agent setting; none returns metadata, labels and attachment descriptors only."
+        },
+        "maxBodyBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864,
+          "description": "Truncate bodyText and bodyHtml to at most this many UTF-8 bytes on a character boundary. Truncated replies set bodyTruncated:true and report the original size in bodyBytes (bodyHtmlBytes for HTML)."
+        },
+        "stripQuoted": {
+          "type": "boolean",
+          "default": false,
+          "description": "Remove quoted reply history from bodyText: '>' lines, the 'On ... wrote:' line introducing them and everything after an Outlook original-message rule. Sets quotedStripped:true when text was removed. bodyHtml is unchanged."
+        },
+        "attachmentData": {
+          "type": "boolean",
+          "default": true,
+          "description": "false omits inline base64 attachment data (descriptor kept, dataOmitted:true). Use mail.attachment or mail.attachment-save for content."
         }
       },
       "required": [
@@ -364,6 +419,42 @@
         "windowEndMessageId": {
           "type": "string",
           "description": "Keep this existing last member while fetching focusMessageId; requires windowStartMessageId. Progressive mode only."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns compact rows (id, threadId, from, to, subject, snippet, receivedAt, receivedAtIso, unread, labels, attachmentCount) without bodies; empty strings, false flags and zero counters are omitted. Recommended for agents that only need to choose messages."
+        },
+        "body": {
+          "type": "string",
+          "enum": [
+            "both",
+            "text",
+            "html",
+            "none"
+          ],
+          "default": "both",
+          "description": "Which body alternatives to return. Default both keeps today's behavior (bodyText plus bodyHtml when present). text is the recommended agent setting; none returns metadata, labels and attachment descriptors only."
+        },
+        "maxBodyBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864,
+          "description": "Truncate bodyText and bodyHtml to at most this many UTF-8 bytes on a character boundary. Truncated replies set bodyTruncated:true and report the original size in bodyBytes (bodyHtmlBytes for HTML)."
+        },
+        "stripQuoted": {
+          "type": "boolean",
+          "default": false,
+          "description": "Remove quoted reply history from bodyText: '>' lines, the 'On ... wrote:' line introducing them and everything after an Outlook original-message rule. Sets quotedStripped:true when text was removed. bodyHtml is unchanged."
+        },
+        "attachmentData": {
+          "type": "boolean",
+          "default": true,
+          "description": "false omits inline base64 attachment data (descriptor kept, dataOmitted:true). Use mail.attachment or mail.attachment-save for content."
         }
       },
       "required": [
@@ -457,6 +548,29 @@
         "anchorMessageId": {
           "$ref": "#/$defs/ReadMessageId",
           "description": "Optional retained-message anchor for the current account/query/label view. After refresh, select the returned cached page containing this message and use the anchor when selecting the bounded prefetch window. If no matching retained candidate exists, selection falls back to the head. This controls local viewport selection, not the Gmail history checkpoint or a complete-thread expansion."
+        },
+        "auto": {
+          "type": "boolean",
+          "x-internal": true,
+          "description": "Internal background-refresh marker: coalesced, read-only INBOX refresh with the bar grant."
+        },
+        "intervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "x-internal": true,
+          "description": "Internal background-refresh interval used to coalesce automatic refreshes."
+        },
+        "barGrantOnly": {
+          "type": "boolean",
+          "x-internal": true,
+          "description": "Internal: restrict the refresh to the read-only bar grant. Never widens access."
+        },
+        "fixtureDelayMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000,
+          "x-internal": true,
+          "description": "Test hook for disconnected fixtures only: delay the synthetic refresh. No effect on live accounts."
         }
       },
       "required": [],
@@ -737,6 +851,15 @@
           "type": "boolean",
           "description": "Default false. True filters only previously downloaded account contacts without People API requests; returns cached/cacheReady and no pagination. Local contact results can be stale or incomplete.",
           "default": false
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns {resourceName, name, emails:[address]} rows without provider metadata, etags or read warnings. Use full before contacts.upsert."
         }
       },
       "required": [],
@@ -784,6 +907,15 @@
           "type": "boolean",
           "description": "Default false. True filters only previously downloaded account contacts without People API requests; returns cached/cacheReady and no pagination. Local contact results can be stale or incomplete.",
           "default": false
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary"
+          ],
+          "default": "full",
+          "description": "summary returns {resourceName, name, emails:[address]} rows without provider metadata, etags or read warnings. Use full before contacts.upsert."
         }
       },
       "required": [],
@@ -1015,7 +1147,13 @@
       "cmd": "reminder.list",
       "summary": "List this account’s local follow-ups, in due-date order.",
       "capabilities": [],
-      "properties": {},
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Accepted for cached clients; reminder.list always reads only the local store."
+        }
+      },
       "required": [],
       "notes": [
         "Local-only, available offline. Returns entries with messageId, threadId, dueDate (YYYY-MM-DD), subject, counterpart and version, plus cached message metadata. Missing mail does not remove its reminder. At most 100 active reminders per account."

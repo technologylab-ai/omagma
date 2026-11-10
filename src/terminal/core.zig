@@ -238,27 +238,33 @@ pub const Session = struct {
         const request = if (raw.len > request_limit or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = request_limit, .duplicate_field_behavior = .@"error" }) catch null;
         if (request == null or request.? != .object) return failure(out_allocator, .null, "", "InvalidRequest", "Expected a bounded JSON object");
         var req = request.?;
-        if (cached_only) {
-            if (!@import("client_contract.zig").cachedRequest(req)) return error.CacheUnsupported;
-            try req.object.put(a, "cacheOnly", .{ .bool = true });
-        }
+        if (cached_only and !@import("client_contract.zig").cachedRequest(req)) return error.CacheUnsupported;
         const account = j.text(req, "account");
         const id = j.get(req, "id") orelse .null;
         for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path", "labelId", "name", "confirmName", "queueId", "scope", "attachmentId", "blobId", "mimeType" }) |key| if (j.get(req, key)) |field| {
-            if (field != .string) return failure(out_allocator, id, account, "InvalidRequest", "Expected string command fields");
+            if (field != .string) return s.rejected(out_allocator, a, id, account, req, "InvalidRequest", "Expected string command fields");
         };
-        if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
-        if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
+        if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return s.rejected(out_allocator, a, id, account, req, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
         if ((id != .null and id != .string and id != .integer) or (id == .string and id.string.len > 256)) return failure(out_allocator, .null, account, "InvalidRequest", "id must be a bounded string or integer");
-        // Fail closed on a caller's stated intent not to act. No JSONL command
-        // implements a dry run; silently ignoring the flag would send, queue
-        // or change real mail and events that the caller asked only to plan.
-        for ([_]Value{ req, j.get(req, "draft") orelse .null, j.get(req, "event") orelse .null }) |scope| {
-            if (scope != .object) continue;
-            for ([_][]const u8{ "dryRun", "dry_run", "dry-run", "dryrun", "simulate", "validateOnly", "noSend" }) |key| {
-                if (scope.object.get(key) != null) return failure(out_allocator, id, account, "DryRunUnsupported", "Nothing was done: JSONL commands have no dry run. Use draft.preview, draft.measure or draft.delivery-plan, or the one-shot --dry-run flag");
+        // Unknown or misspelled fields fail closed before any vault, store or
+        // provider access: a dropped flag (dryRun, replyAll, bodyText) must
+        // never turn into a different, executed request. Commands with a real
+        // dryRun honour it; every other dry-run spelling (dry_run, simulate,
+        // validateOnly, noSend, nested in draft/event, ...) is an unknown field.
+        if (@import("cli_contract.zig").check(a, req) catch |err| return failureForError(out_allocator, id, account, err)) |detail| return failureDetail(out_allocator, id, account, detail);
+        req = @import("cli_contract.zig").normalize(a, req) catch |err| return s.failureFor(out_allocator, a, id, account, req, err);
+        @import("cli_view.zig").validate(req) catch |err| return s.failureFor(out_allocator, a, id, account, req, err);
+        var resolved_date: ?[]const u8 = null;
+        if (@import("cli_dates.zig").field(j.text(req, "cmd"))) |name| if (j.get(req, name)) |value| if (value == .string and @import("cli_dates.zig").relative(value.string)) {
+            const dates = @import("cli_dates.zig");
+            if (try dates.resolve(a, value.string, dates.today(s.io, a, s.env, req, std.Io.Timestamp.now(s.io, .real).toMilliseconds()))) |date| {
+                req = try j.copyObject(a, req);
+                try req.object.put(a, name, .{ .string = date });
+                resolved_date = date;
             }
-        }
+        };
+        if (cached_only) try req.object.put(a, "cacheOnly", .{ .bool = true });
+        if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
         // A plaintext CLI/TUI may predate explicit vault activation. Check
         // its next operation too, before any source/cache/provider access.
         // Malformed or unsafe markers fail closed with correlated errors.
@@ -270,9 +276,33 @@ pub const Session = struct {
             // Internal cached callers own a cancelable lifetime. Keep the
             // cancellation signal out of protocol normalization for that path.
             if (cached_only and err == error.Canceled) return err;
-            return failureForError(out_allocator, id, account, reconciliationFailure(req, err));
+            return s.failureFor(out_allocator, a, id, account, req, reconciliationFailure(req, err));
         };
-        return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, data);
+        // Requested views only reshape an already committed result; a shaping
+        // failure returns the complete result instead of hiding a mutation.
+        const shaped = @import("cli_view.zig").shape(a, req, data, resolved_date) catch data;
+        return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, shaped);
+    }
+    /// Error frame with field-level guidance from the request contract. Any
+    /// failure to explain falls back to the plain stable code and sentence.
+    fn failureFor(s: *Session, out: std.mem.Allocator, a: std.mem.Allocator, id: Value, account: []const u8, req: Value, err: anyerror) ![]const u8 {
+        return s.rejected(out, a, id, account, req, @errorName(err), errorMessage(err)) catch |encoding_error| {
+            if (err == error.UnknownOutcome) return failureForError(out, id, account, err);
+            return encoding_error;
+        };
+    }
+    fn rejected(s: *Session, out: std.mem.Allocator, a: std.mem.Allocator, id: Value, account: []const u8, req: Value, code: []const u8, message: []const u8) ![]const u8 {
+        var configured: [3][]const u8 = undefined;
+        var count: usize = 0;
+        for (s.config.accounts[0..s.config.count]) |*entry| if (entry.enabled and count < configured.len) {
+            configured[count] = entry.address.slice();
+            count += 1;
+        };
+        const detail = @import("cli_contract.zig").explain(a, req, code, message, configured[0..count]) catch return failure(out, id, account, code, message);
+        return failureDetail(out, id, account, detail);
+    }
+    fn failureDetail(a: std.mem.Allocator, id: Value, account: []const u8, detail: Value) ![]const u8 {
+        return j.encodeAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = false, .account = account, .@"error" = detail }, .{});
     }
     fn reconciliationFailure(req: Value, err: anyerror) anyerror {
         const command = j.text(req, "cmd");
@@ -286,7 +316,10 @@ pub const Session = struct {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = false, .account = account, .@"error" = .{ .code = code, .message = message } }, .{});
     }
     fn failureForError(a: std.mem.Allocator, id: Value, account: []const u8, err: anyerror) ![]const u8 {
-        return failure(a, id, account, @errorName(err), errorMessage(err)) catch |encoding_error| {
+        const message = errorMessage(err);
+        var scratch: [512]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&scratch);
+        return failure(a, id, account, @errorName(err), if (std.mem.eql(u8, message, @errorName(err))) @import("error_text.zig").words(fixed.allocator(), message) catch message else message) catch |encoding_error| {
             // A failed error frame must not replace the warning that a remote
             // mutation may already have happened, including at CLI exit.
             if (err == error.UnknownOutcome) return error.UnknownOutcome;
@@ -318,7 +351,7 @@ pub const Session = struct {
             error.DiskQuotaExceeded => "The account disk quota is full; review history.drafts and explicitly delete retained sources, discard unused files, or increase the disk quota. Operation receipts and unknown outcomes remain protected.",
             error.CacheBusy => "Another client is using this account cache; retry later",
             error.UnknownQueryOperator, error.InvalidQueryDate, error.InvalidQueryValue, error.InvalidQuery, error.TimezoneUnavailable, error.TimezoneRangeUnavailable => cache_query.diagnostic(err),
-            else => @errorName(err),
+            else => @import("error_text.zig").sentence(@errorName(err)) orelse @errorName(err),
         };
     }
     fn preferences(s: *Session, a: std.mem.Allocator, req: Value, write: bool) !Value {
@@ -480,6 +513,8 @@ pub const Session = struct {
         }
         if (std.mem.startsWith(u8, cmd, "reminder.")) return s.followUps(a, address, req);
         if (std.mem.startsWith(u8, cmd, "draft.gmail-")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("send_memory.zig").seconds(cmd)), gmailDraftJob, .{ s, a, address, req });
+        // The public contract admits dryRun only on send and label mutations.
+        if (try j.boolean(req, "dryRun", false)) return s.dryRun(a, address, req);
         if (std.mem.eql(u8, cmd, "cache.activity") or (try j.boolean(req, "cacheOnly", false) and !std.mem.eql(u8, cmd, "invitation.inspect"))) return s.cachedDispatch(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo")) return s.batchMail(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.prefetch")) {
@@ -704,9 +739,11 @@ pub const Session = struct {
             try store.discardDraft(try j.required(req, "draftId"));
             return j.value(a, .{ .discarded = true });
         }
+        if (std.mem.eql(u8, cmd, "draft.patch")) return s.patchDraft(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.create") or std.mem.eql(u8, cmd, "draft.update")) {
             const acknowledgement_only = try j.boolean(req, "acknowledgementOnly", false);
             const input = j.get(req, "draft") orelse return error.MissingField;
+            if (std.mem.eql(u8, cmd, "draft.update") and !try j.boolean(req, "replace", false)) try guardReplacement(try store.draft(try j.required(req, "draftId")), input);
             var draft = try decodeDraft(a, input);
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "bodyFormat") == null) draft.bodyFormat = (try store.draft(try j.required(req, "draftId"))).bodyFormat;
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "includeOriginal") == null) draft.includeOriginal = (try store.draft(try j.required(req, "draftId"))).includeOriginal;
@@ -737,7 +774,8 @@ pub const Session = struct {
             try conversation_draft.requireBody(message);
             const original: ?t.Original = if (preserve) try s.captureOriginal(a, &store, req, message) else null;
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
-            const d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
+            var d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
+            try withNote(a, &d, req);
             try validateDraft(d, false);
             if (preserve) try conversation_source.validateFormatting(@import("send_memory.zig").commandBacking(s.allocator, cmd), d);
             if (!store.lockHeld) try s.reopenBody(a, &store);
@@ -763,7 +801,8 @@ pub const Session = struct {
             try conversation_draft.requireBody(message);
             const prepared = if (omit) message else try s.prepareForwardAttachments(a, &store, req, message, preserve);
             var source: ConversationAttachments = .{ .session = s, .store = &store, .request = req };
-            const draft = try conversation_source.forward(a, prepared, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .temporary_allocator = @import("send_memory.zig").commandBacking(s.allocator, cmd) }, source.adapter());
+            var draft = try conversation_source.forward(a, prepared, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .temporary_allocator = @import("send_memory.zig").commandBacking(s.allocator, cmd) }, source.adapter());
+            try withNote(a, &draft, req);
             if (!store.lockHeld) try s.reopenBody(a, &store);
             return mail_value.borrowed(a, try store.putDraft(draft, null));
         }
@@ -857,13 +896,17 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "mail.attachment-save")) return s.saveKnownAttachment(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) {
             try s.capability(a, address, req, "mail-modify");
+            // A compact receipt is the default; view:"message" keeps the full message.
+            const full_message = std.mem.eql(u8, j.text(req, "view"), "message");
             if (!s.options.fixtures) {
                 const id = try j.required(req, "messageId");
+                const before: ?[]const []const u8 = if (store.find(id)) |entry| try dupeLabels(a, entry.message.labels) else null;
                 // Discard cached state before dispatch, including uncertain outcomes.
                 try store.invalidate(id);
                 store.state.generation += 1;
                 try store.save();
-                return s.remote(a, address, cmd, req);
+                const updated = try s.remote(a, address, cmd, req);
+                return if (full_message) updated else messageLabelReceipt(a, updated, before) catch updated;
             }
             if (s.scenario("rejected-mutation")) return error.ProviderRejected;
             var m = try s.read(a, &store, try j.required(req, "messageId"), req);
@@ -876,6 +919,7 @@ pub const Session = struct {
             };
             for (store.state.outbox) |sent| canonical = canonical or std.mem.eql(u8, sent.id, m.id);
             if (!canonical) return error.MessageNotFound;
+            const before = m.labels;
             var labels: std.ArrayList([]const u8) = .empty;
             try labels.appendSlice(a, m.labels);
             if (std.mem.eql(u8, cmd, "mail.archive")) removeLabel(&labels, "INBOX");
@@ -911,7 +955,8 @@ pub const Session = struct {
                 try store.put(m, false);
             }
             try store.save();
-            return j.value(a, m);
+            const updated = try j.value(a, m);
+            return if (full_message) updated else messageLabelReceipt(a, updated, before) catch updated;
         }
         if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search") or std.mem.eql(u8, cmd, "contacts.upsert")) return s.contacts(a, &store, req, cmd);
         if (std.mem.eql(u8, cmd, "invitation.reply") or std.mem.eql(u8, cmd, "invitation.inspect")) {
@@ -1569,6 +1614,144 @@ pub const Session = struct {
         } else delta = try @import("gmail.zig").resolveBatchLabels(a, batch_remote.transport.?, delta);
         for (delta.add) |added| for (delta.remove) |removed| if (std.mem.eql(u8, added, removed)) return error.ConflictingLabels;
         return batch.run(context, a, req, delta);
+    }
+    /// dryRun repeats a mutation's validation, identity checks and plan from a
+    /// read-only store. No journal, queue, label, Drive or provider write occurs.
+    fn dryRun(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
+        const cmd = j.text(req, "cmd");
+        const sending = std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send") or std.mem.eql(u8, cmd, "draft.queue");
+        const labeling = std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark");
+        if (!sending and !labeling) return error.DryRunUnsupported;
+        var store = try s.openStore(a, address, true);
+        defer store.close();
+        return if (sending) s.sendPlan(a, &store, req) else s.labelPlan(a, &store, req);
+    }
+    fn sendPlan(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        const cmd = j.text(req, "cmd");
+        const saved = !std.mem.eql(u8, cmd, "mail.send");
+        const draft = if (saved) try store.draft(try j.required(req, "draftId")) else try decodeDraft(a, j.get(req, "draft") orelse return error.MissingField);
+        try s.capability(a, store.state.account, req, "mail-send");
+        try validateDraft(draft, true);
+        const operation_id = try j.required(req, "operationId");
+        if (operation_id.len > 256) return error.InvalidOperationId;
+        try recipients.validateHeader(operation_id);
+        if (std.mem.eql(u8, cmd, "draft.queue")) {
+            const delay = try j.integer(req, "delaySeconds", 10);
+            if (delay < 0 or delay > 30) return error.InvalidSendDelay;
+        }
+        const digest = try operationDigest(a, draft, store.state.account, null);
+        try requireReviewedDigest(req, &digest);
+        if (@import("draft_link.zig").find(store.state.draftLinks, draft.id)) |index| {
+            // Check the Gmail-copy acknowledgement on a copy; nothing is recorded.
+            var link = store.state.draftLinks[index];
+            if (try j.boolean(req, "acknowledgeGmailCopy", false)) {
+                if (!std.mem.eql(u8, j.text(req, "gmailCopyDigest"), &digest)) return error.DraftChanged;
+                try link.acknowledgeSend(a, &digest);
+            }
+            try link.permitSend(&digest);
+        }
+        // The submission's replay/conflict guards, reported instead of executed.
+        for (store.state.sendQueue) |entry| {
+            const same_operation = std.mem.eql(u8, entry.operationId, operation_id);
+            const same_content = std.mem.eql(u8, entry.hash, &digest);
+            if (same_operation and !same_content) return error.OperationConflict;
+            if (!same_operation and !same_content and !(draft.id.len != 0 and std.mem.eql(u8, entry.draftId, draft.id))) continue;
+            if (entry.state == .queued or entry.state == .preparing) return error.DraftQueued;
+            if (entry.state == .unknown or entry.state == .submitting) return error.UnknownOutcome;
+        }
+        var replay: ?storage.Operation = null;
+        if (try store.findOperation(a, operation_id)) |operation| {
+            if (!std.mem.eql(u8, operation.hash, &digest)) return error.OperationConflict;
+            replay = operation;
+        }
+        const native_delivery = @import("native_delivery.zig");
+        var result = try s.planCapabilities(a, req, try native_delivery.valueWithStore(a, store, draft, try native_delivery.preview(a, store, draft), operation_id));
+        const blocked = if (j.get(result, "blockers")) |blockers| blockers == .array and blockers.array.items.len != 0 else false;
+        try result.object.put(a, "dryRun", .{ .bool = true });
+        try result.object.put(a, "status", .{ .string = if (blocked) "blocked" else "planned" });
+        try result.object.put(a, "sendable", .{ .bool = !blocked });
+        try result.object.put(a, "operationId", .{ .string = operation_id });
+        try result.object.put(a, "contentDigest", .{ .string = try a.dupe(u8, &digest) });
+        if (saved) try result.object.put(a, "draftId", .{ .string = draft.id });
+        try result.object.put(a, "from", try j.value(a, draft.from orelse t.Address{ .address = store.state.account }));
+        for ([_][]const u8{ "to", "cc", "bcc" }, [_][]const t.Address{ draft.to, draft.cc, draft.bcc }) |name, list| try result.object.put(a, name, try j.value(a, list));
+        try result.object.put(a, "subject", .{ .string = draft.subject });
+        try result.object.put(a, "bodyFormat", .{ .string = @tagName(draft.bodyFormat) });
+        if (std.mem.eql(u8, cmd, "draft.queue")) try result.object.put(a, "delaySeconds", .{ .integer = try j.integer(req, "delaySeconds", 10) });
+        // A replayed identity returns its recorded receipt and never sends again.
+        if (replay) |operation| try result.object.put(a, "replay", try j.value(a, .{ .outcome = operation.outcome, .messageId = operation.messageId }));
+        return result;
+    }
+    fn labelPlan(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        const cmd = j.text(req, "cmd");
+        try s.capability(a, store.state.account, req, "mail-modify");
+        const batched = std.mem.eql(u8, cmd, "mail.batch");
+        var planning = try j.copyObject(a, req);
+        if (!batched) try planning.object.put(a, "action", .{ .string = if (std.mem.eql(u8, cmd, "mail.mark")) "mark" else cmd["mail.".len..] });
+        var delta = try triage.plan(a, planning);
+        const ids = if (batched) try triage.pinned(a, req) else single: {
+            const id = try j.required(req, "messageId");
+            try @import("../bounded.zig").identifier(id);
+            const list = try a.alloc([]const u8, 1);
+            list[0] = id;
+            break :single list;
+        };
+        const source: Value = if (s.options.fixtures) try s.fixture(a, store.state.account) else .null;
+        // Names resolve against the provider fixture or the downloaded label list;
+        // a live name absent from that list is reported, not guessed.
+        var unresolved: std.ArrayList([]const u8) = .empty;
+        for ([_]*[]const []const u8{ &delta.add, &delta.remove }) |list| {
+            const resolved = try a.alloc([]const u8, list.len);
+            for (list.*, resolved) |label, *id| {
+                id.* = if (s.options.fixtures) try fixtureLabel(source, label) else cachedLabel(store, label);
+                if (!s.options.fixtures and std.mem.eql(u8, id.*, label) and !knownLabel(store, label)) try unresolved.append(a, label);
+            }
+            list.* = resolved;
+        }
+        for (delta.add) |added| for (delta.remove) |removed| if (std.mem.eql(u8, added, removed)) return error.ConflictingLabels;
+        var messages: Value = .{ .array = .init(a) };
+        for (ids) |id| {
+            var item = try j.value(a, .{ .messageId = id });
+            const current: ?[]const []const u8 = if (store.find(id)) |entry| entry.message.labels else if (s.options.fixtures) (if (try rawFixtureMessage(source, id)) |raw| try fixtureLabels(a, raw) else null) else null;
+            try item.object.put(a, "known", .{ .bool = current != null });
+            if (current) |labels| {
+                const after = try triage.apply(a, labels, delta);
+                try item.object.put(a, "currentLabels", try j.value(a, labels));
+                try item.object.put(a, "resultLabels", try j.value(a, after));
+                var added: std.ArrayList([]const u8) = .empty;
+                var removed: std.ArrayList([]const u8) = .empty;
+                for (after) |label| if (!containsLabel(labels, label)) try added.append(a, label);
+                for (labels) |label| if (!containsLabel(after, label)) try removed.append(a, label);
+                try item.object.put(a, "addedLabels", try j.value(a, added.items));
+                try item.object.put(a, "removedLabels", try j.value(a, removed.items));
+            }
+            try messages.array.append(item);
+        }
+        var result = try j.value(a, .{ .dryRun = true, .action = j.text(planning, "action"), .addLabels = delta.add, .removeLabels = delta.remove, .unresolvedLabels = unresolved.items });
+        if (batched) try result.object.put(a, "messages", messages) else {
+            var it = messages.array.items[0].object.iterator();
+            while (it.next()) |field| try result.object.put(a, field.key_ptr.*, field.value_ptr.*);
+        }
+        return result;
+    }
+    /// Merge only the supplied draft fields into the saved source. Untouched
+    /// recipients, threading, attachments and original stay exactly as saved.
+    fn patchDraft(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        _ = s;
+        const draft_id = try j.required(req, "draftId");
+        const changes = j.get(req, "set") orelse return error.MissingField;
+        if (changes != .object) return error.InvalidRequest;
+        const current = try store.draft(draft_id);
+        if (current.recoveryFields != null) return error.RecoveryDraftRequiresUpdate;
+        const digest = try operationDigest(a, current, store.state.account, null);
+        try requireReviewedDigest(req, &digest);
+        var merged = try mail_value.borrowed(a, current);
+        _ = merged.object.swapRemove("summaryCounts");
+        var it = changes.object.iterator();
+        while (it.next()) |field| if (!std.mem.eql(u8, field.key_ptr.*, "id")) try merged.object.put(a, field.key_ptr.*, field.value_ptr.*);
+        const draft = try decodeDraft(a, merged);
+        try validateDraft(draft, false);
+        return draft_summary.savedResponse(a, try store.putDraft(draft, draft_id), try j.boolean(req, "acknowledgementOnly", false));
     }
     fn reopen(s: *Session, a: std.mem.Allocator, store: *storage.Store, expected: u64) !void {
         const account = store.state.account;
@@ -2848,7 +3031,7 @@ pub const Session = struct {
         };
         try incoming.finish(size);
         if (incoming.sealed != null) try s.reopenBody(a, store);
-        const draft = if (size <= t.Limits.body_bytes) small: {
+        var draft = if (size <= t.Limits.body_bytes) small: {
             // Keep the portable representation for small originals; the
             // download/decode phase has already been reclaimed before this.
             const raw = try a.alloc(u8, size);
@@ -2879,6 +3062,7 @@ pub const Session = struct {
             try validateDraft(large_draft, false);
             break :large large_draft;
         };
+        try withNote(a, &draft, req);
         if (!store.lockHeld) try s.reopenBody(a, store);
         if (s.options.fixtures) store.state.fixtureCalls += 1;
         return mail_value.borrowed(a, try store.putDraft(draft, null));
@@ -3927,6 +4111,53 @@ fn addLabel(a: std.mem.Allocator, list: *std.ArrayList([]const u8), label: []con
     for (list.items) |l| if (std.mem.eql(u8, l, label)) return;
     if (list.items.len == 64) return error.TooManyLabels;
     try list.append(a, label);
+}
+fn containsLabel(labels: []const []const u8, label: []const u8) bool {
+    for (labels) |item| if (std.mem.eql(u8, item, label)) return true;
+    return false;
+}
+fn knownLabel(store: *storage.Store, label: []const u8) bool {
+    for (system_labels) |system| if (std.ascii.eqlIgnoreCase(label, system)) return true;
+    for (store.state.labels) |definition| if (std.mem.eql(u8, label, definition.id)) return true;
+    return false;
+}
+fn dupeLabels(a: std.mem.Allocator, labels: []const []const u8) ![]const []const u8 {
+    const copy = try a.alloc([]const u8, labels.len);
+    for (labels, copy) |label, *item| item.* = try a.dupe(u8, label);
+    return copy;
+}
+/// Default single-message mutation reply: identity, resulting membership and
+/// the actual change. Without a retained "before" state the change is omitted.
+fn messageLabelReceipt(a: std.mem.Allocator, message: Value, before: ?[]const []const u8) !Value {
+    const labels = try j.decode([]const []const u8, a, j.get(message, "labels") orelse return error.InvalidProviderResponse);
+    var receipt = try j.value(a, .{ .messageId = try j.required(message, "id"), .threadId = j.text(message, "threadId"), .labels = labels, .unread = try j.boolean(message, "unread", false) });
+    if (before) |previous| {
+        var added: std.ArrayList([]const u8) = .empty;
+        var removed: std.ArrayList([]const u8) = .empty;
+        for (labels) |label| if (!containsLabel(previous, label)) try added.append(a, label);
+        for (previous) |label| if (!containsLabel(labels, label)) try removed.append(a, label);
+        try receipt.object.put(a, "addedLabels", try j.value(a, added.items));
+        try receipt.object.put(a, "removedLabels", try j.value(a, removed.items));
+    }
+    return receipt;
+}
+/// mail.reply/mail.forward bodyText: the caller's note above the generated
+/// quote (or as the editable note beside a preserved/attached original).
+fn withNote(a: std.mem.Allocator, draft: *t.Draft, req: Value) !void {
+    const note = try j.string(j.get(req, "bodyText") orelse return);
+    if (note.len == 0) return;
+    if (!std.unicode.utf8ValidateSlice(note)) return error.InvalidRequest;
+    const separator: []const u8 = if (draft.bodyText.len == 0 or std.mem.startsWith(u8, draft.bodyText, "\n")) "" else "\n\n";
+    if (note.len + separator.len + draft.bodyText.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
+    draft.bodyText = try std.mem.concat(a, u8, &.{ note, separator, draft.bodyText });
+}
+/// draft.update replaces editable fields. Refuse a replacement that silently
+/// omits the saved recipients or reply threading; replace:true opts in.
+fn guardReplacement(current: t.Draft, input: Value) !void {
+    if (input != .object) return;
+    const recipients_omitted = current.recoveryFields == null and ((current.to.len != 0 and j.get(input, "to") == null) or (current.cc.len != 0 and j.get(input, "cc") == null) or (current.bcc.len != 0 and j.get(input, "bcc") == null));
+    const threading_omitted = (current.threadId.len != 0 and j.get(input, "threadId") == null) or (current.inReplyTo.len != 0 and j.get(input, "inReplyTo") == null) or (current.references.len != 0 and j.get(input, "references") == null);
+    if (recipients_omitted or threading_omitted) return error.DraftReplaceWouldDropThreading;
 }
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;

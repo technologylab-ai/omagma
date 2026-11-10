@@ -74,6 +74,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     var attachment_sources: std.ArrayList(cli_files.Source) = .empty;
     var attachment_mode: ?t.AttachmentDelivery = null;
     var dry_run = false;
+    var strict = false;
     var send_delay: ?i64 = null;
     var browser_preview = false;
     const interactive = std.mem.eql(u8, mode, "tui");
@@ -105,10 +106,17 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         }
         if (eq(arg, "--help-all")) return if (jsonl) @import("cli_api.zig").full(io, sa) else help(io);
         if (eq(arg, "--schema")) {
-            if (!jsonl) return error.UnknownOption;
-            const target = args.next();
-            if (args.next() != null) return error.UnknownOption;
-            return @import("cli_api.zig").schemas(io, sa, target);
+            if (!jsonl) return unknownOption(arg);
+            return schemaRequest(io, sa, args);
+        }
+        if (eq(arg, "--manifest")) {
+            if (!jsonl) return unknownOption(arg);
+            return @import("cli_api.zig").manifest(io, sa);
+        }
+        if (eq(arg, "--strict")) {
+            if (!jsonl) return unknownOption(arg);
+            strict = true;
+            continue;
         }
         if (eq(arg, "--fixtures")) {
             options.fixtures = true;
@@ -118,7 +126,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             options.no_mouse = true;
             continue;
         }
-        if (eq(arg, "--cached")) {
+        if (eq(arg, "--cached") or eq(arg, "--cache-only")) {
             if (interactive or jsonl) return error.CachedFlagRequiresOneShotCommand;
             if (j.get(req, "cacheOnly")) |prior| if (prior == .bool and !prior.bool) return error.ConflictingSearchMode;
             try req.object.put(sa, "cacheOnly", .{ .bool = true });
@@ -190,7 +198,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             has_draft = true;
             continue;
         }
-        if (!valueOption(arg)) return error.UnknownOption;
+        if (!valueOption(arg)) return unknownOption(arg);
         const v = args.next() orelse return error.ValueRequired;
         if (eq(arg, "--backend")) backend_path = v else if (eq(arg, "--config")) options.config_file = v else if (eq(arg, "--metrics-file")) metrics_file = v else if (eq(arg, "--grant-file")) options.grant_file = v else if (eq(arg, "--client-file")) try req.object.put(sa, "clientFile", .{ .string = v }) else if (eq(arg, "--capabilities")) {
             var values: j.Value = .{ .array = .init(sa) };
@@ -204,7 +212,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             options.body_prefetch_limit = try std.fmt.parseInt(usize, v, 10);
             options.body_prefetch_limit_set = true;
             if (options.body_prefetch_limit > 64) return error.InvalidPrefetchLimit;
-            if (!interactive and !jsonl) try req.object.put(sa, "prefetchLimit", .{ .integer = @intCast(options.body_prefetch_limit) });
+            // Only a refresh request carries the body head; other one-shot
+            // commands use the same session option without an extra field.
+            if (!interactive and !jsonl and eq(j.text(req, "cmd"), "mail.refresh")) try req.object.put(sa, "prefetchLimit", .{ .integer = @intCast(options.body_prefetch_limit) });
         } else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) {
             options.disk_limit = try std.fmt.parseInt(usize, v, 10);
             options.disk_limit_set = true;
@@ -295,7 +305,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             var values = if (req.object.get(key)) |x| x else j.Value{ .array = .init(sa) };
             try values.array.append(.{ .string = v });
             try req.object.put(sa, key, values);
-        } else return error.UnknownOption;
+        } else return unknownOption(arg);
     }
     if (try j.boolean(req, "original", false) and try j.boolean(req, "preserveFormatting", false)) return error.ConflictingForwardModes;
     if (has_draft) {
@@ -326,7 +336,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         try dry_output.interface.writeByte('\n');
         try dry_output.interface.flush();
         const parsed = try std.json.parseFromSliceLeaky(j.Value, sa, planned, .{});
-        if (!try j.boolean(parsed, "ok", false)) return error.CommandFailed;
+        if (!try j.boolean(parsed, "ok", false)) return failed(j.text(j.get(parsed, "error") orelse .null, "code"));
         return;
     }
     // Printed authorization hints repeat an explicit --backend; an
@@ -370,9 +380,15 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         try output.interface.writeByte('\n');
         try output.interface.flush();
         const parsed = try std.json.parseFromSliceLeaky(j.Value, sa, reply, .{});
-        if (!try j.boolean(parsed, "ok", false)) return error.CommandFailed;
+        if (!try j.boolean(parsed, "ok", false)) return failed(j.text(j.get(parsed, "error") orelse .null, "code"));
         return;
     }
+    // --account fills in account only for frames that omit it.
+    const default_account: ?[]const u8 = if (options.account) |address| blk: {
+        try @import("recipients.zig").validateAddress(address);
+        break :blk address;
+    } else null;
+    var rejected_frames: usize = 0;
     var input_buffer: [8192]u8 = undefined;
     var input = std.Io.File.stdin().reader(io, &input_buffer);
     while (true) {
@@ -405,12 +421,110 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         if (eof and bytes.items.len == 0 and !oversized) break;
         var frame = std.heap.ArenaAllocator.init(@import("send_memory.zig").operationBacking(a, bytes.items, false));
         defer frame.deinit();
-        const response = try client.call(frame.allocator(), if (oversized) "" else bytes.items);
+        const request = if (oversized) "" else if (default_account) |address| try withAccount(frame.allocator(), bytes.items, address) else bytes.items;
+        const response = try client.call(frame.allocator(), request);
         try output.interface.writeAll(response);
         try output.interface.writeByte('\n');
         try output.interface.flush();
+        if (strict and !replyOk(frame.allocator(), response)) rejected_frames += 1;
         if (eof) break;
     }
+    if (rejected_frames != 0) return failed("");
+}
+/// Insert "account" into a frame that has none (and is not accounts.list).
+/// Only top-level keys are scanned; values are skipped without allocation,
+/// and an unparsable frame is passed on unchanged for the executor to refuse.
+fn withAccount(a: std.mem.Allocator, raw: []const u8, account: []const u8) ![]const u8 {
+    var scanner = std.json.Scanner.initCompleteInput(a, raw);
+    defer scanner.deinit();
+    if ((scanner.next() catch return raw) != .object_begin) return raw;
+    while (true) {
+        const key = switch (scanner.nextAlloc(a, .alloc_if_needed) catch return raw) {
+            .object_end => break,
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => return raw,
+        };
+        if (eq(key, "account")) return raw;
+        if (eq(key, "cmd")) {
+            const command = switch (scanner.nextAlloc(a, .alloc_if_needed) catch return raw) {
+                .string => |text| text,
+                .allocated_string => |text| text,
+                else => return raw,
+            };
+            if (eq(command, "accounts.list")) return raw;
+        } else scanner.skipValue() catch return raw;
+    }
+    const open = std.mem.indexOfScalar(u8, raw, '{') orelse return raw;
+    const rest = std.mem.trimStart(u8, raw[open + 1 ..], " \t\r");
+    const field = try std.json.Stringify.valueAlloc(a, account, .{});
+    return std.mem.concat(a, u8, &.{ raw[0 .. open + 1], "\"account\":", field, if (rest.len != 0 and rest[0] == '}') "" else ",", raw[open + 1 ..] });
+}
+/// Whether a reply frame reports ok:true, reading top-level keys only.
+fn replyOk(a: std.mem.Allocator, response: []const u8) bool {
+    var scanner = std.json.Scanner.initCompleteInput(a, response);
+    defer scanner.deinit();
+    if ((scanner.next() catch return false) != .object_begin) return false;
+    while (true) {
+        const key = switch (scanner.nextAlloc(a, .alloc_if_needed) catch return false) {
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => return false,
+        };
+        if (eq(key, "ok")) return (scanner.next() catch return false) == .true;
+        scanner.skipValue() catch return false;
+    }
+}
+/// Error code of the last failed one-shot or strict JSONL reply; main maps
+/// it to the documented exit status.
+pub var failed_code: [64]u8 = undefined;
+pub var failed_code_len: usize = 0;
+fn failed(code: []const u8) error{CommandFailed} {
+    failed_code_len = @min(code.len, failed_code.len);
+    @memcpy(failed_code[0..failed_code_len], code[0..failed_code_len]);
+    return error.CommandFailed;
+}
+/// Documented one-shot exit status for a reply error code: 3 request
+/// rejected, 4 authorization/capability, 5 target not found, 6 unknown outcome.
+pub fn exitStatus() u8 {
+    const code = failed_code[0..failed_code_len];
+    if (eq(code, "UnknownOutcome")) return 6;
+    for ([_][]const u8{ "PermissionDenied", "NotConnected", "InvalidGrant", "OAuthClientRequired", "WrongAccount", "GrantClientMismatch", "KeyringUnavailable", "KeyringLocked", "CredentialStorageAccessDenied", "VaultLocked", "BackendRequired", "DriveNotConnected", "DriveAccessExpired", "CalendarPermissionRequired", "MeetSettingsPermissionRequired" }) |auth| if (eq(code, auth)) return 4;
+    if (eq(code, "UnknownAccount") or eq(code, "CacheMiss") or std.mem.endsWith(u8, code, "NotFound")) return 5;
+    return 3;
+}
+/// The offending option, when it is a plain option-looking word that cannot
+/// carry private data; main names it with the nearest valid option.
+pub var unknown_option: [48]u8 = undefined;
+pub var unknown_option_len: usize = 0;
+fn unknownOption(arg: []const u8) error{UnknownOption} {
+    unknown_option_len = 0;
+    var plain = arg.len > 2 and arg.len <= unknown_option.len and std.mem.startsWith(u8, arg, "--");
+    for (arg) |byte| plain = plain and (std.ascii.isAlphanumeric(byte) or byte == '-');
+    if (plain) {
+        @memcpy(unknown_option[0..arg.len], arg);
+        unknown_option_len = arg.len;
+    }
+    return error.UnknownOption;
+}
+pub fn nearestOption(arg: []const u8) ?[]const u8 {
+    var candidates: [160][]const u8 = undefined;
+    var count: usize = 0;
+    for (value_options ++ boolean_options ++ [_][]const u8{ "--help", "--help-all", "--help-options", "--schema", "--manifest", "--compact", "--strict", "--calendar-id", "--event-id", "--date", "--view", "--time-zone", "--review-hash", "--send-updates", "--meet-ai-notes" }) |candidate| {
+        if (count == candidates.len) break;
+        candidates[count] = candidate;
+        count += 1;
+    }
+    return @import("cli_contract.zig").nearest(arg, candidates[0..count]);
+}
+/// --schema [COMMAND] [--compact], in either order after --schema.
+fn schemaRequest(io: std.Io, a: std.mem.Allocator, args: anytype) !void {
+    var target: ?[]const u8 = null;
+    var compact = false;
+    while (args.next()) |arg| {
+        if (eq(arg, "--compact")) compact = true else if (target == null and !std.mem.startsWith(u8, arg, "-")) target = arg else return unknownOption(arg);
+    }
+    return @import("cli_api.zig").schemas(io, a, target, compact);
 }
 fn commandBacking(normal: std.mem.Allocator, mode: []const u8, args: *std.process.Args.Iterator) std.mem.Allocator {
     var scan = args.*;
@@ -445,9 +559,11 @@ fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation
             return true;
         }
         if (jsonl and eq(arg, "--schema")) {
-            const target = scan.next();
-            if (scan.next() != null) return error.UnknownOption;
-            try @import("cli_api.zig").schemas(io, a, target);
+            try schemaRequest(io, a, &scan);
+            return true;
+        }
+        if (jsonl and eq(arg, "--manifest")) {
+            try @import("cli_api.zig").manifest(io, a);
             return true;
         }
         if (valueOption(arg)) {
@@ -456,8 +572,9 @@ fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation
     }
     return false;
 }
+const boolean_options = [_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--cache-only", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only", "--dry-run", "--strict" };
 fn booleanOption(arg: []const u8) bool {
-    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only", "--dry-run" }) |flag| if (eq(arg, flag)) return true;
+    for (boolean_options) |flag| if (eq(arg, flag)) return true;
     return false;
 }
 fn draftSourceCommand(command: []const u8) bool {
@@ -473,21 +590,22 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 }
 // Boolean flags have already been handled above. Check the name before taking
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
+const value_options = [_][]const u8{
+    "--backend",           "--config",           "--metrics-file",         "--grant-file",    "--client-file",  "--capabilities",
+    "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",       "--editor-mode",  "--metadata-limit",
+    "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes",   "--account",      "--action",
+    "--undo-token",        "--url",              "--path",                 "--message-ids",   "--message-id",   "--id",
+    "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",        "--from",         "--limit",
+    "--cursor",            "--query",            "--label",                "--thread-id",     "--draft-id",     "--attachment-id",
+    "--operation-id",      "--status",           "--to",                   "--cc",            "--bcc",          "--subject",
+    "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
+    "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
+    "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
+    "--send-delay",        "--delay-seconds",    "--next-attempt",         "--upload-file",   "--file",         "--attachment-mode",
+};
 fn valueOption(arg: []const u8) bool {
     if (calendarField(arg) != null) return true;
-    for ([_][]const u8{
-        "--backend",           "--config",           "--metrics-file",         "--grant-file",    "--client-file",  "--capabilities",
-        "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",       "--editor-mode",  "--metadata-limit",
-        "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes",   "--account",      "--action",
-        "--undo-token",        "--url",              "--path",                 "--message-ids",   "--message-id",   "--id",
-        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",        "--from",         "--limit",
-        "--cursor",            "--query",            "--label",                "--thread-id",     "--draft-id",     "--attachment-id",
-        "--operation-id",      "--status",           "--to",                   "--cc",            "--bcc",          "--subject",
-        "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
-        "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
-        "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
-        "--send-delay",        "--delay-seconds",    "--next-attempt",         "--upload-file",   "--file",         "--attachment-mode",
-    }) |candidate| if (eq(arg, candidate)) return true;
+    for (value_options) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }
 fn calendarField(arg: []const u8) ?[]const u8 {
@@ -572,4 +690,26 @@ fn runUpdates(io: std.Io, a: std.mem.Allocator, environ: *const std.process.Envi
     }
     try output.interface.writeByte('\n');
     try output.interface.flush();
+}
+
+test "cli process: --account fills only frames without one and --strict reads reply status" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const filled = try withAccount(a, " {\"id\":1,\"cmd\":\"mail.list\",\"limit\":2}", "fictional@example.test");
+    const value = try std.json.parseFromSliceLeaky(j.Value, a, filled, .{ .duplicate_field_behavior = .@"error" });
+    try std.testing.expectEqualStrings("fictional@example.test", j.text(value, "account"));
+    try std.testing.expectEqualStrings("{\"account\":\"fictional@example.test\"}", try withAccount(a, "{}", "fictional@example.test"));
+    for ([_][]const u8{ "{\"cmd\":\"mail.list\",\"account\":\"other@example.test\"}", "{\"cmd\":\"accounts.list\"}", "not json", "[1]" }) |raw| try std.testing.expectEqualStrings(raw, try withAccount(a, raw, "fictional@example.test"));
+    try std.testing.expect(replyOk(a, "{\"version\":1,\"id\":\"x\\\"y\",\"ok\":true,\"data\":{}}"));
+    try std.testing.expect(!replyOk(a, "{\"version\":1,\"id\":null,\"ok\":false,\"error\":{\"code\":\"MissingField\"}}"));
+    for ([_][]const u8{ "UnknownOutcome", "PermissionDenied", "MessageNotFound", "UnknownField", "" }, [_]u8{ 6, 4, 5, 3, 3 }) |code, status| {
+        _ = failed(code) catch {};
+        try std.testing.expectEqual(status, exitStatus());
+    }
+    _ = unknownOption("--fictional-flag") catch {};
+    try std.testing.expectEqualStrings("--fictional-flag", unknown_option[0..unknown_option_len]);
+    _ = unknownOption("private value with spaces") catch {};
+    try std.testing.expectEqual(@as(usize, 0), unknown_option_len);
+    try std.testing.expectEqualStrings("--cached", nearestOption("--cahced").?);
 }

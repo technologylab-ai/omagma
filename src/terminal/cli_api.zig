@@ -2,9 +2,9 @@
 const std = @import("std");
 const j = @import("json.zig");
 const Value = j.Value;
-const read_source = @embedFile("cli_api_read.json");
-const write_source = @embedFile("cli_api_write.json");
-const calendar_source = @embedFile("cli_api_calendar.json");
+pub const read_source = @embedFile("cli_api_read.json");
+pub const write_source = @embedFile("cli_api_write.json");
+pub const calendar_source = @embedFile("cli_api_calendar.json");
 comptime {
     if (read_source.len + write_source.len + calendar_source.len > 512 * 1024) @compileError("CLI discovery metadata exceeds its bound");
 }
@@ -45,6 +45,7 @@ fn commonProperties(a: std.mem.Allocator, name: []const u8) !Value {
         .id = .{ .type = .{ "string", "integer", "null" }, .maxLength = @as(usize, 256), .description = "Optional request correlation ID, echoed in its reply. A missing ID returns null." },
         .account = .{ .type = "string", .format = "email", .description = "Explicit configured, enabled account address from accounts.list. IDs, cursors and handles remain account-specific." },
         .grantFile = .{ .type = "string", .minLength = @as(usize, 1), .description = "Optional private terminal grant-registry path; defaults to --grant-file or the configured XDG/HOME grant registry." },
+        .fields = .{ .type = "array", .items = .{ .type = "string", .minLength = @as(usize, 1), .maxLength = @as(usize, 64) }, .maxItems = @as(usize, 64), .description = "Optional output projection: keep only these keys in each item of data.messages, data.events, data.contacts, data.drafts or data.items, or in a single-object result. Unknown names are ignored; the envelope is unchanged." },
     });
     try properties.object.put(a, "cmd", try j.value(a, .{ .type = "string", .@"const" = name }));
     return properties;
@@ -117,13 +118,33 @@ fn writeSchema(writer: anytype, value: Value) !void {
     try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, writer);
     try writer.writeByte('\n');
 }
-pub fn schemas(io: std.Io, a: std.mem.Allocator, target: ?[]const u8) !void {
+/// Minified request schema without the shared id/grantFile/fields block and
+/// build metadata; account keeps only its type.
+fn compactSchema(a: std.mem.Allocator, catalogue: Catalogue, entry: Value) !Value {
+    var schema = try requestSchema(a, catalogue, entry, true);
+    for ([_][]const u8{ "$schema", "x-omagma-version", "x-max-request-bytes", "x-max-nesting" }) |key| _ = schema.object.orderedRemove(key);
+    var properties = try j.copyObject(a, j.get(schema, "properties").?);
+    for ([_][]const u8{ "id", "grantFile", "fields" }) |key| _ = properties.object.orderedRemove(key);
+    try properties.object.put(a, "account", try j.value(a, .{ .type = "string", .format = "email" }));
+    try schema.object.put(a, "properties", properties);
+    return schema;
+}
+pub fn schemas(io: std.Io, a: std.mem.Allocator, target: ?[]const u8, compact: bool) !void {
     const catalogue = try load(a);
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     if (target) |name| {
         const entry = catalogue.find(name) orelse return error.UnknownCommand;
-        try writeSchema(&writer.interface, try requestSchema(a, catalogue, entry, true));
+        if (compact) {
+            try std.json.Stringify.value(try compactSchema(a, catalogue, entry), .{}, &writer.interface);
+            try writer.interface.writeByte('\n');
+        } else try writeSchema(&writer.interface, try requestSchema(a, catalogue, entry, true));
+    } else if (compact) {
+        // One minified request schema per line.
+        for (catalogue.commands) |entry| {
+            try std.json.Stringify.value(try compactSchema(a, catalogue, entry), .{}, &writer.interface);
+            try writer.interface.writeByte('\n');
+        }
     } else {
         var variants: Value = .{ .array = .init(a) };
         for (catalogue.commands) |entry| try variants.array.append(try requestSchema(a, catalogue, entry, false));
@@ -196,12 +217,139 @@ pub fn help(io: std.Io, a: std.mem.Allocator, target: []const u8) !void {
         }
         try writer.interface.writeAll("Omagma JSONL command catalogue\n\n");
         try list(&writer.interface, a, if (std.mem.eql(u8, target, "commands")) null else target, false);
-        try writer.interface.writeAll("\nUse omagma cli --help COMMAND for every field, nested object and constraint.\nUse omagma cli --schema COMMAND for machine-readable request metadata.\n");
+        try writer.interface.writeAll("\nUse omagma cli --help COMMAND for a compact field card and example.\nUse omagma cli --schema COMMAND for every field, nested object and constraint.\n");
     } else {
         const entry = catalogue.find(target) orelse return error.UnknownCommand;
-        try writer.interface.print("Omagma JSONL command: {s}\n{s}\n\nComplete request fields, constraints, examples and referenced object types:\n", .{ target, j.text(entry, "summary") });
-        try writeSchema(&writer.interface, try requestSchema(a, catalogue, entry, true));
+        try card(&writer.interface, a, catalogue, entry);
     }
+    try writer.interface.flush();
+}
+fn resolveDefinition(catalogue: Catalogue, schema: Value) Value {
+    var current = schema;
+    for (0..8) |_| {
+        const ref = j.text(current, "$ref");
+        if (!std.mem.startsWith(u8, ref, "#/$defs/")) break;
+        current = j.get(catalogue.definitions, ref["#/$defs/".len..]) orelse break;
+    }
+    return current;
+}
+/// "name:type", "name:a|b=default", "name:int 1..100" or "name:Draft".
+fn fieldLabel(a: std.mem.Allocator, catalogue: Catalogue, name: []const u8, schema: Value) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(a, "{s}:", .{name});
+    const resolved = resolveDefinition(catalogue, schema);
+    const ref = j.text(schema, "$ref");
+    if (j.get(resolved, "enum")) |values| {
+        for (values.array.items, 0..) |value, index| try out.print(a, "{s}{s}", .{ if (index == 0) "" else "|", if (value == .string) value.string else "?" });
+    } else if (j.get(resolved, "type")) |kind| {
+        const text = if (kind == .string) kind.string else if (kind == .array and kind.array.items.len != 0 and kind.array.items[0] == .string) kind.array.items[0].string else "value";
+        if (ref.len != 0 and std.mem.eql(u8, text, "object")) try out.appendSlice(a, ref["#/$defs/".len..]) else try out.appendSlice(a, if (std.mem.eql(u8, text, "integer")) "int" else if (std.mem.eql(u8, text, "boolean")) "bool" else text);
+        if (j.get(resolved, "minimum")) |minimum| if (minimum == .integer) try out.print(a, " {d}..", .{minimum.integer});
+        if (j.get(resolved, "maximum")) |maximum| if (maximum == .integer) {
+            if (j.get(resolved, "minimum") == null) try out.appendSlice(a, " ..");
+            try out.print(a, "{d}", .{maximum.integer});
+        };
+    } else try out.appendSlice(a, if (ref.len != 0) ref["#/$defs/".len..] else "value");
+    if (j.get(schema, "default") orelse j.get(resolved, "default")) |default| switch (default) {
+        .bool => |flag| try out.print(a, "={s}", .{if (flag) "true" else "false"}),
+        .integer => |number| try out.print(a, "={d}", .{number}),
+        .string => |text| if (text.len != 0) try out.print(a, "={s}", .{text}),
+        else => {},
+    };
+    return out.items;
+}
+fn returnsNote(entry: Value) ?[]const u8 {
+    const notes = j.get(entry, "notes") orelse return null;
+    if (notes != .array) return null;
+    for (notes.array.items) |note| if (note == .string) if (std.mem.indexOf(u8, note.string, "Returns ")) |start| {
+        const sentence = note.string[start..];
+        const end = std.mem.indexOf(u8, sentence, ". ") orelse sentence.len;
+        var cut = @min(end, 140);
+        while (cut > 0 and cut < sentence.len and (sentence[cut] & 0xC0) == 0x80) cut -= 1;
+        return sentence[0..cut];
+    };
+    return null;
+}
+fn idempotency(entry: Value) []const u8 {
+    const command = j.text(entry, "cmd");
+    if (j.get(j.get(entry, "properties") orelse .null, "operationId") != null) return "operationId";
+    if (@import("client_contract.zig").readOnlyEnvelope(command, false)) return "read-only";
+    return "none";
+}
+/// Compact discovery card (well under 1 KiB): what the command does, its
+/// required and optional fields with types, defaults and enums, one example.
+fn card(writer: anytype, a: std.mem.Allocator, catalogue: Catalogue, entry: Value) !void {
+    const command = j.text(entry, "cmd");
+    try writer.print("{s}: {s}\n", .{ command, j.text(entry, "summary") });
+    var caps: std.ArrayList([]const u8) = .empty;
+    if (j.get(entry, "capabilities")) |values| for (values.array.items) |value| try caps.append(a, try j.string(value));
+    try writer.print("capabilities: {s} · mutates: {s} · idempotency: {s}\n", .{ if (caps.items.len == 0) "none" else try std.mem.join(a, ",", caps.items), if (@import("client_contract.zig").readOnlyEnvelope(command, false)) "no" else "yes", idempotency(entry) });
+    const properties = j.get(entry, "properties") orelse j.object(a);
+    var required: std.ArrayList([]const u8) = .empty;
+    if (!std.mem.eql(u8, command, "accounts.list")) try required.append(a, "account:email");
+    var optional: std.ArrayList([]const u8) = .empty;
+    const names = j.get(entry, "required");
+    var it = properties.object.iterator();
+    while (it.next()) |field| {
+        if (j.boolean(field.value_ptr.*, "x-internal", false) catch false) continue;
+        var needed = false;
+        if (names) |required_names| for (required_names.array.items) |item| {
+            needed = needed or (item == .string and std.mem.eql(u8, item.string, field.key_ptr.*));
+        };
+        try (if (needed) &required else &optional).append(a, try fieldLabel(a, catalogue, field.key_ptr.*, field.value_ptr.*));
+    }
+    try writer.print("required: {s}\n", .{try std.mem.join(a, ", ", required.items)});
+    if (optional.items.len != 0) try writer.print("optional: {s}\n", .{try std.mem.join(a, ", ", optional.items)});
+    if (returnsNote(entry)) |text| try writer.print("returns: {s}\n", .{text});
+    if (j.get(entry, "examples")) |examples| if (examples == .array and examples.array.items.len != 0) {
+        var shortest = examples.array.items[0];
+        var shortest_bytes = (try std.json.Stringify.valueAlloc(a, shortest, .{})).len;
+        for (examples.array.items[1..]) |example| {
+            const bytes = (try std.json.Stringify.valueAlloc(a, example, .{})).len;
+            if (bytes < shortest_bytes) {
+                shortest = example;
+                shortest_bytes = bytes;
+            }
+        }
+        try writer.print("example: {s}\n", .{try std.json.Stringify.valueAlloc(a, shortest, .{})});
+    };
+    try writer.print("Complete request fields: omagma cli --schema {s} [--compact] (all commands: id, fields:[...]; unknown fields fail)\n", .{command});
+}
+/// One compact JSON index of every public command for agents.
+pub fn manifest(io: std.Io, a: std.mem.Allocator) !void {
+    const catalogue = try load(a);
+    var commands: Value = .{ .array = .init(a) };
+    for (catalogue.commands) |entry| {
+        const command = j.text(entry, "cmd");
+        var required: Value = .{ .array = .init(a) };
+        var optional: Value = .{ .array = .init(a) };
+        if (!std.mem.eql(u8, command, "accounts.list")) try required.array.append(.{ .string = "account" });
+        const names = j.get(entry, "required");
+        if (j.get(entry, "properties")) |properties| {
+            var it = properties.object.iterator();
+            while (it.next()) |field| {
+                if (j.boolean(field.value_ptr.*, "x-internal", false) catch false) continue;
+                var needed = false;
+                if (names) |required_names| for (required_names.array.items) |item| {
+                    needed = needed or (item == .string and std.mem.eql(u8, item.string, field.key_ptr.*));
+                };
+                try (if (needed) &required else &optional).array.append(.{ .string = field.key_ptr.* });
+            }
+        }
+        var row = try j.value(a, .{ .cmd = command, .summary = j.text(entry, "summary") });
+        try row.object.put(a, "caps", j.get(entry, "capabilities") orelse Value{ .array = .init(a) });
+        try row.object.put(a, "required", required);
+        try row.object.put(a, "optional", optional);
+        try row.object.put(a, "mutates", .{ .bool = !@import("client_contract.zig").readOnlyEnvelope(command, false) });
+        try row.object.put(a, "idempotency", .{ .string = idempotency(entry) });
+        try commands.array.append(row);
+    }
+    var root = try j.value(a, .{ .version = @import("build_options").version, .common = [_][]const u8{ "id", "account", "grantFile", "fields" }, .strict = true, .schema = "omagma cli --schema CMD [--compact]" });
+    try root.object.put(a, "commands", commands);
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try std.json.Stringify.value(root, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
     try writer.interface.flush();
 }
 pub fn full(io: std.Io, a: std.mem.Allocator) !void {
@@ -231,12 +379,35 @@ pub fn sourceSchema(io: std.Io, a: std.mem.Allocator, name: []const u8, field: [
     try writer.interface.flush();
 }
 
+test "cli discovery: command cards stay compact and name required fields, types and an example" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const catalogue = try load(a);
+    for (catalogue.commands) |entry| {
+        var out: std.Io.Writer.Allocating = .init(a);
+        try card(&out.writer, a, catalogue, entry);
+        const text = out.written();
+        try std.testing.expect(std.mem.indexOf(u8, text, "required: ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Complete request fields") != null);
+        if (std.mem.startsWith(u8, j.text(entry, "cmd"), "mail.")) try std.testing.expect(text.len < 800);
+        try std.testing.expect(text.len < 1600);
+    }
+    var out: std.Io.Writer.Allocating = .init(a);
+    try card(&out.writer, a, catalogue, catalogue.find("mail.list").?);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "limit:int 1..100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "view:full|summary=full") != null);
+    const compact = try compactSchema(a, catalogue, catalogue.find("mail.send").?);
+    try std.testing.expect(j.get(j.get(compact, "properties").?, "grantFile") == null);
+    try std.testing.expect(j.get(j.get(compact, "properties").?, "dryRun") != null);
+}
+
 test "meet notes: public authorization capabilities match the runtime grant set" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const catalogue = try load(arena.allocator());
     const definition = j.get(catalogue.definitions, "ReadCapabilities") orelse return error.MissingCapabilities;
-    const runtime = @import("auth.zig").capabilities;
+    const runtime = @import("auth.zig").allowed_capabilities;
     try std.testing.expectEqual(@as(i64, @intCast(runtime.len)), try j.integer(definition, "maxItems", 0));
     const values = j.get(j.get(definition, "items") orelse .null, "enum") orelse return error.MissingCapabilities;
     try std.testing.expectEqual(runtime.len, values.array.items.len);

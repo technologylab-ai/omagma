@@ -52,13 +52,14 @@ def run(binary, directory):
         require(set(ids).issubset({mail["id"] for mail in client.request("mail.list", label=renamed_name)["messages"]}), "renamed name failed provider resolution")
         require(set(ids).issubset({mail["id"] for mail in client.request("mail.search", cacheOnly=True, query='label:"' + renamed_name + '"', limit=100)["messages"]}), "cache search retained stale label name")
         require(client.request("labels.delete", labelId=label_id, confirmName="Wrong name", operationId="bad-delete", ok=False)["code"] == "InvalidLabelConfirmation", "delete accepted stale or incorrect name")
-        for operation in ("labels.rename", "labels.delete"):
-            params = {"labelId": "INBOX", "operationId": "protected-" + operation, "name": "Custom", "confirmName": "INBOX"}
+        for operation, field in (("labels.rename", {"name": "Custom"}), ("labels.delete", {"confirmName": "INBOX"})):
+            params = {"labelId": "INBOX", "operationId": "protected-" + operation, **field}
             require(client.request(operation, ok=False, **params)["code"] == "SystemLabelImmutable", "system collection was mutable")
         for invalid in ("", " inbox ", "bad\r\nname", "bad\x1bname", "bad\u0085name", "x" * 257):
             require(client.request("labels.create", name=invalid, operationId="invalid-" + str(len(invalid)), ok=False)["code"] in {"InvalidLabelName", "MissingField"}, "unsafe label name accepted")
         require(client.request("labels.create", name="inbox", operationId="reserved", ok=False)["code"] == "SystemLabelImmutable", "reserved name accepted")
-        require(client.request("labels.create", name="Cache mutation", operationId="cached", cacheOnly=True, ok=False)["code"] == "CacheUnsupported", "cache-only path wrote collection")
+        # cacheOnly is not part of a mutation's contract and is refused before execution.
+        require(client.request("labels.create", name="Cache mutation", operationId="cached", cacheOnly=True, ok=False)["code"] == "UnknownField", "cache-only path wrote collection")
         deleted = client.request("labels.delete", labelId=label_id, confirmName=renamed_name, operationId="delete-travel")
         require(deleted["outcome"] == "applied" and deleted["deleted"] and deleted["labelId"] == label_id, "delete omitted explicit receipt")
         deletion_calls = client.request("cache.stats")["fixtureCalls"]
@@ -98,8 +99,10 @@ def run(binary, directory):
         require(result.returncode == 0 and not any(label["id"] == one_id for label in json.loads(result.stdout)["data"]["labels"]),
                 "one-shot list did not show current cached collection")
     with Client(binary, directory / "readonly", scenario="readonly") as client:
-        for command in ("labels.create", "labels.rename", "labels.delete"):
-            error = client.request(command, name="Readonly cannot write", labelId="Label_demo", confirmName="Projects", operationId=command, ok=False)
+        for command, fields in (("labels.create", {"name": "Readonly cannot write"}),
+                                ("labels.rename", {"labelId": "Label_demo", "name": "Readonly cannot write"}),
+                                ("labels.delete", {"labelId": "Label_demo", "confirmName": "Projects"})):
+            error = client.request(command, operationId=command, ok=False, **fields)
             require(error["code"] == "PermissionDenied", "read-only grant wrote label collection")
         require(client.request("operation.list")["operations"] == [], "denied collection request entered mutation journal")
     with Client(binary, directory / "unknown", scenario="unknown-send") as client:

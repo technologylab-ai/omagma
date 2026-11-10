@@ -125,8 +125,15 @@ const WorkerConversation = struct {
         defer arena.deinit();
         const a = arena.allocator();
         for (0..3) |index| {
-            const result = try self.call(a, .{
-                .cmd = if (index == 2) @as([]const u8, "mail.forward") else "mail.reply",
+            // Forward has no reply-all field; the strict contract refuses it.
+            const result = if (index == 2) try self.call(a, .{
+                .cmd = "mail.forward",
+                .account = account,
+                .messageId = "worker-source",
+                .bodyFormat = "markdown",
+                .preserveFormatting = true,
+            }) else try self.call(a, .{
+                .cmd = "mail.reply",
                 .account = account,
                 .messageId = "worker-source",
                 .all = index == 1,

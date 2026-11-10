@@ -147,8 +147,13 @@ def evicted_metadata(binary, root):
         old = client.request("mail.read", messageId=old_id)
         retained = client.request("mail.list", cacheOnly=True)["messages"]
         require([item["id"] for item in retained] == [MESSAGE], "quota fixture did not evict older displayed metadata")
-        saved = client.request("reminder.set", messageId=old_id, dueDate="2026-10-14", expectedVersion=0,
-                               snapshot={"subject": "Untrusted caller", "threadId": "wrong"})["entry"]
+        # A caller-supplied snapshot is not part of the contract: it is refused
+        # before execution, and the follow-up always uses verified metadata.
+        untrusted = client.request("reminder.set", messageId=old_id, dueDate="2026-10-14", expectedVersion=0,
+                                   snapshot={"subject": "Untrusted caller", "threadId": "wrong"}, ok=False)
+        require(untrusted["code"] == "UnknownField" and untrusted["field"] == "snapshot",
+                "untrusted follow-up snapshot was not refused by the request contract")
+        saved = client.request("reminder.set", messageId=old_id, dueDate="2026-10-14", expectedVersion=0)["entry"]
         require(saved["subject"] == old["subject"] and saved["threadId"] == old["threadId"],
                 "uncached follow-up trusted caller fields or lost exact provider identity")
         require([item["id"] for item in client.request("mail.list", cacheOnly=True)["messages"]] == [MESSAGE],

@@ -18,7 +18,7 @@ import tempfile
 import traceback
 
 from build_info import build_mode, read_build_info
-from terminal_integration import ACCOUNTS, FIXTURES, no_core_dump, require
+from terminal_integration import ACCOUNTS, FIXTURES, ROOT, no_core_dump, require
 
 
 HINT = b"Try omagma --help for available commands and options."
@@ -309,7 +309,7 @@ contacts.list contacts.search contacts.upsert
 cache.stats cache.clear cache.activity cache.refresh-status
 browser.open auth.status auth.authorize auth.revoke
 draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
-draft.discard draft.send draft.queue
+draft.discard draft.send draft.queue draft.patch
 draft.clone draft.measure draft.delivery-plan draft.selection-plan history.delete-source history.drafts history.operations history.queues
 draft.gmail-info draft.gmail-save draft.gmail-status draft.gmail-take-back draft.gmail-import
 queue.list queue.read queue.cancel queue.resume queue.process queue.send-now
@@ -559,6 +559,89 @@ def meet_help_examples(runner):
             "schema reconcile or duplicate apply repeated a provider write")
 
 
+def agent_contract(runner):
+    """Strict JSONL fields, dry runs, lean views, documented recipes and process exits."""
+    account = ACCOUNTS[0]
+    counter = iter(range(1, 1000))
+
+    def session(name, lines, *extra):
+        common = ["--fixtures", "--fixture-root", str(FIXTURES), "--cache-dir", str(runner.directory / name)]
+        result = runner.run(["cli", *common, *extra], "".join(json.dumps(line) + "\n" for line in lines).encode())
+        return result, [json.loads(line) for line in result.stdout.splitlines()]
+
+    def sends(name):
+        return session(name, [{"cmd": "cache.stats", "account": account}])[1][0]["data"]["fixtureSends"]
+
+    # The three formerly silent failures: none may submit mail.
+    draft = {"to": ["alex@example.org"], "subject": "Never sent", "bodyText": "Plan only"}
+    _, replies = session("dangerous", [
+        {"id": "dry", "cmd": "mail.send", "account": account, "operationId": "op-dry", "dryRun": True, "draft": draft},
+        {"id": "body", "cmd": "draft.create", "account": account, "draft": {"to": ["alex@example.org"], "body": "Hi"}},
+        {"id": "all", "cmd": "mail.reply", "account": account, "messageId": "shared-msg-005", "replyAll": True},
+        {"id": "drafts", "cmd": "draft.list", "account": account}])
+    require(replies[0]["ok"] and replies[0]["data"]["dryRun"] and replies[0]["data"]["status"] == "planned",
+            "mail.send dryRun did not return a plan")
+    require(replies[1]["error"]["code"] == "UnknownField" and replies[1]["error"]["didYouMean"] == "draft.bodyText",
+            "misspelled draft body was not refused with its intended field")
+    require(len(replies[2]["data"]["to"]) + len(replies[2]["data"]["cc"]) > 1, "replyAll alias produced a plain reply")
+    require(len(replies[3]["data"]["drafts"]) == 1, "a refused draft.create still saved a draft")
+    require(sends("dangerous") == 0, "a dry run or refused request sent mail")
+    # Every other dry-run spelling or placement is refused before execution.
+    _, created = session("spellings", [{"cmd": "draft.create", "account": account, "draft": draft}])
+    draft_id = created[0]["data"]["id"]
+    lines = []
+    for index, key in enumerate(("dry_run", "dry-run", "dryrun", "simulate", "validateOnly", "noSend")):
+        lines += [{"cmd": "mail.send", "account": account, "operationId": f"top-{index}", key: True, "draft": draft},
+                  {"cmd": "mail.send", "account": account, "operationId": f"nested-{index}", "draft": {**draft, key: True}},
+                  {"cmd": "draft.send", "account": account, "draftId": draft_id, "operationId": f"saved-{index}", key: True},
+                  {"cmd": "draft.queue", "account": account, "draftId": draft_id, "operationId": f"queue-{index}", key: True}]
+    _, replies = session("spellings", lines)
+    require(all(reply["error"]["code"] == "UnknownField" for reply in replies), "a dry-run spelling was not refused")
+    require(sends("spellings") == 0 and not session("spellings", [{"cmd": "queue.list", "account": account}])[1][0]["data"]["queue"],
+            "a refused dry-run spelling sent or queued mail")
+
+    # The documented recipes run unchanged against the fixtures.
+    text = (ROOT / "docs/AGENT-CLI.md").read_text()
+    recipes = [json.loads(line) for line in text.split("## Agent recipes", 1)[1].split("```jsonl", 1)[1].split("```", 1)[0].strip().splitlines()]
+    require(len(recipes) == 15, "agent recipes block changed size")
+    returned = {}
+    for recipe in recipes:
+        line = json.loads(json.dumps(recipe).replace("RETURNED_DRAFT_ID", returned.get("draft", "")).replace("RETURNED_CONTENT_DIGEST", returned.get("digest", "")))
+        _, (reply,) = session("recipes", [line])
+        require(reply.get("ok") is True and reply["id"] == recipe["id"], f"documented recipe {recipe['id']} failed: {reply}")
+        if recipe["cmd"] == "mail.reply":
+            returned["draft"] = reply["data"]["id"]
+        if recipe.get("dryRun") and recipe["cmd"] == "draft.send":
+            returned["digest"] = reply["data"]["contentDigest"]
+    require(sends("recipes") == 1, "recipes sent other than exactly the reviewed reply")
+
+    # Discovery stays compact.
+    card = runner.run(["cli", "--help", "mail.send"], without_home=True)
+    require(card.returncode == 0 and len(card.stdout) < 800 and b"dryRun:bool" in card.stdout, "mail.send card is not compact")
+    compact = runner.run(["cli", "--schema", "mail.send", "--compact"], without_home=True)
+    schema = json.loads(compact.stdout)
+    require(b"\n" not in compact.stdout.strip() and "grantFile" not in schema["properties"] and "dryRun" in schema["properties"],
+            "compact schema kept the shared block or lost dryRun")
+    manifest = json.loads(runner.run(["cli", "--manifest"], without_home=True, catalogue=True).stdout)
+    rows = {row["cmd"]: row for row in manifest["commands"]}
+    require(set(rows) == PUBLIC_JSONL and rows["mail.send"]["mutates"] and rows["mail.send"]["idempotency"] == "operationId"
+            and not rows["mail.read"]["mutates"], "manifest omitted commands or mutation/idempotency facts")
+
+    # Process composition: default account, strict status and one-shot exits.
+    result, replies = session("process", [{"cmd": "mail.list", "limit": 1}, {"cmd": "mail.read"}], "--account", account, "--strict")
+    require(replies[0]["ok"] and replies[0]["account"] == account and replies[1]["error"]["code"] == "MissingField"
+            and replies[1]["error"]["field"] == "messageId" and result.returncode == 3, "--account default or --strict exit failed")
+    common = ["--fixtures", "--fixture-root", str(FIXTURES), "--cache-dir", str(runner.directory / "exits"), "--account", account]
+    for arguments, status in ((["mail", "list", "--limit", "1"], 0), (["mail", "list", "--cache-only", "--limit", "1"], 0),
+                              (["mail", "list", "--limit", "500"], 3), (["mail", "read", "--message-id", "missing-message"], 5),
+                              (["mail", "list", "--limt", "1"], 2)):
+        result = runner.run([*arguments, *common])
+        require(result.returncode == status, f"{arguments} exited {result.returncode}, expected {status}")
+        require(b"CommandFailed" not in result.stderr, "a JSON error reply also printed a redundant stderr line")
+    require(b"Unknown option --limt; did you mean --limit?" in runner.run(["mail", "list", "--limt", "1"]).stderr,
+            "unknown option was not named with its nearest valid option")
+
+
 def protocol(runner):
     fixture_cache = runner.directory / "fixture-cache"
     common = ["--fixtures", "--cache-dir", str(fixture_cache)]
@@ -667,7 +750,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
         for name, exercise in (("guidance", guidance), ("options", options), ("file-option-guidance", file_option_guidance), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
-                               ("meet-help-examples", meet_help_examples), ("protocol", protocol), ("rsvp-contract", rsvp_contract),
+                               ("meet-help-examples", meet_help_examples), ("agent-contract", agent_contract), ("protocol", protocol), ("rsvp-contract", rsvp_contract),
                                ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)
