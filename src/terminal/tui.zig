@@ -2155,7 +2155,6 @@ const App = struct {
     generation: u64 = 0,
     selection_generation: u64 = 0,
     g_pending: bool = false,
-    g_at: i64 = 0,
     query: Field = .{},
     query_scope: QueryScope = .cache,
     input_query_scope: QueryScope = .cache,
@@ -11672,6 +11671,7 @@ const App = struct {
         self.leaveContacts();
     }
     fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
+        if (mouse.type == .press) self.g_pending = false;
         if (!self.options.no_mouse and mouse.type == .press) _ = self.cancelMeetingRead();
         if (try self.onMeetingMouse(mouse)) return;
         if (try self.onReaderCopyMouse(mouse)) return;
@@ -12568,6 +12568,9 @@ const App = struct {
         self.paste_cr = false;
     }
     fn onKey(self: *App, original_key: Key) !void {
+        // The g prefix is visible in the footer and lasts for exactly one key.
+        const g_was_pending = self.g_pending;
+        self.g_pending = false;
         self.acknowledgeNewMail();
         if (!self.paste) _ = self.cancelMeetingRead();
         if (try self.onMeetingKey(original_key)) return;
@@ -12846,15 +12849,10 @@ const App = struct {
             if (key.matches('J', .{}) or key.matches('j', .{ .shift = true })) return self.adjacentMail(true);
             if (key.matches('K', .{}) or key.matches('k', .{ .shift = true })) return self.adjacentMail(false);
         }
-        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
-        if (self.g_pending and now - self.g_at > 750) self.g_pending = false;
-        if (self.g_pending and self.mode == .browse) {
-            if (goFolder(key)) |folder| {
-                self.g_pending = false;
-                return self.jumpFolder(folder);
-            }
-            // Any other key ends the prefix before it acts on its own.
-            if (!key.matches('g', .{})) self.g_pending = false;
+        if (g_was_pending and self.mode == .browse) {
+            if (goFolder(key)) |folder| return self.jumpFolder(folder);
+            // Escape only cancels the prefix; any other key acts on its own.
+            if (key.matches(Key.escape, .{})) return;
         }
         if (try self.onReaderKey(key)) return;
         if (try self.onMailControls(key)) return;
@@ -12865,16 +12863,11 @@ const App = struct {
         }
         if (key.matches('f', .{}) or key.matches('F', .{}) or key.matches('f', .{ .shift = true })) return self.composeForward();
         if (key.matches('g', .{})) {
-            if (self.g_pending) {
-                self.g_pending = false;
+            if (g_was_pending) {
                 if (self.expanded and self.focus == .reader) self.reader_scroll = 0 else try self.jumpFirstMail();
-            } else {
-                self.g_pending = true;
-                self.g_at = now;
-            }
+            } else self.g_pending = true;
             return;
         }
-        self.g_pending = false;
         if (key.matches('j', .{}) or key.matches(Key.down, .{})) try self.move(true, 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) try self.move(false, 1) else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) try self.movePage(true, key.mods.ctrl) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) try self.movePage(false, key.mods.ctrl) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) self.focusMailPane(switch (self.focus) {
             .navigation => .navigation,
             .list => .navigation,
@@ -15531,6 +15524,8 @@ const App = struct {
         return x +| @as(u16, @intCast(@min(printed.col, std.math.maxInt(u16))));
     }
     fn rawHints(self: *App, width: u16) []const u8 {
+        // A pending g prefix replaces the footer with its choices until the next key.
+        if (self.g_pending and self.mode == .browse) return if (width < 44) "GOTO · i/s/d/a/t Mailbox · g Top · Esc" else if (width < 78) "GOTO · i Inbox · s Sent · d Drafts · a All · t Trash" else "GOTO · i Inbox · s Sent · d Drafts · a All Mail · t Trash · g Top · Esc Cancel";
         if (self.ux_overlay == .gmail_draft) return if (width < 66) "Tab Choose · Enter · Ctrl+D/U · Esc Back" else self.contextHints();
         if (self.ux_overlay == .none and self.mode == .compose and self.compose.gmailPaused()) return if (width < 66) "Paused in Gmail · g Status · q Back" else self.contextHints();
         if (self.ux_overlay == .follow_up) return self.contextHints();
@@ -24002,7 +23997,15 @@ test "local UI: g prefixes and n/N unread moves work through onKey" {
     // g then Escape ends the prefix; nothing jumps.
     try app.onKey(.{ .codepoint = 'g', .text = "g" });
     try std.testing.expect(app.g_pending);
+    // While the prefix waits, the footer names its choices at every width.
+    for ([_]u16{ 40, 60, 100 }) |width| {
+        const hints = app.fittedHints(width);
+        try std.testing.expect(std.mem.startsWith(u8, hints, "GOTO · "));
+        try std.testing.expect(std.mem.indexOf(u8, hints, "g Top") != null or width >= 44);
+        try std.testing.expect(std.mem.indexOf(u8, hints, "t Trash") != null or width < 44);
+    }
     try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(100), "GOTO") == null);
     try std.testing.expect(!app.g_pending);
     try std.testing.expectEqual(@as(usize, 0), app.folder);
     // g then a digit ends the prefix; the digit acts on its own.

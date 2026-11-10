@@ -324,8 +324,44 @@ def scope_trash(binary, directory, capture_dir=None):
         terminal.close()
 
 
+def goto_prefix(binary, directory, capture_dir=None):
+    """A pending g names its choices in the footer until exactly one key."""
+    source = fixtures(binary, directory)
+    terminal = start(binary, directory, source.options(), MARKER)
+    try:
+        footer = lambda: terminal.screen.lines()[-2]
+        require("GOTO" not in terminal.text(), "idle footer already showed the goto prefix")
+        terminal.send(b"g")
+        terminal.until(lambda: "GOTO" in footer() and "i Inbox" in footer() and "t Trash" in footer()
+                       and "Esc Cancel" in footer())
+        capture(terminal, capture_dir, "ux-goto-prefix-160x40")
+        terminal.resize(40, 12)
+        terminal.until(lambda: "GOTO" in footer() and "i/s/d/a/t Mailbox" in footer())
+        terminal.resize(160, 40)
+        terminal.until(lambda: "GOTO" in footer() and "t Trash" in footer())
+        terminal.send(ESC)
+        terminal.until(lambda: "GOTO" not in terminal.text() and MARKER in terminal.text())
+        require(terminal.process.poll() is None, "Escape after g left the application")
+        # The cancelled prefix is gone: s alone must not open Sent.
+        terminal.send(b"g")
+        terminal.until(lambda: "GOTO" in footer())
+        terminal.send(b"s")
+        terminal.until(lambda: "GOTO" not in terminal.text() and "Sent" in terminal.screen.lines()[0])
+        terminal.send(b"g")
+        terminal.until(lambda: "GOTO" in footer())
+        terminal.send(b"i")
+        terminal.until(lambda: "GOTO" not in terminal.text() and MARKER in terminal.text())
+        no_writes(binary, directory, source.options())
+        terminal.finish()
+    except Exception:
+        diagnose(terminal)
+        raise
+    finally:
+        terminal.close()
+
+
 def main():
-    cases = (("palette", palette), ("palette-mono", palette_mono), ("find-unread", find_and_unread),
+    cases = (("goto-prefix", goto_prefix), ("palette", palette), ("palette-mono", palette_mono), ("find-unread", find_and_unread),
              ("labels", labels), ("history", history), ("scope-trash", scope_trash))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)

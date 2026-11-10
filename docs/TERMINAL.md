@@ -37,6 +37,8 @@ A compact **New mail** card appears at the top right of the main mailbox screen.
 
 Gmail-style jumps open a mailbox directly: `g i` Inbox, `g s` Sent, `g d`
 Drafts, `g a` All Mail and `g t` Trash (they also clear an active search).
+After `g` the footer shows `GOTO` with these choices and waits for one key;
+Escape cancels it and any other key acts as usual.
 Without an active `:find`, `n`/`N` move to the next/previous unread cached mail.
 Escape steps back one view but never quits; only `q`, `:q` or an idle Ctrl+C
 leave the TUI.
