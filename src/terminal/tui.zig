@@ -21366,8 +21366,14 @@ const App = struct {
         return .{ .first_day = first, .days = days, .first_hour = @intCast(first_hour), .hours = @max(last_hour, first_hour + 1) - first_hour };
     }
     fn calendar_uiClockPrefix(self: *App, event: Value) ![]const u8 {
+        const a = self.frame.allocator();
         const point = (try calendar_slot.Identity.init(event)).start;
-        return if (point.kind == .date) "All-day" else calendar_ui.clock(self.frame.allocator(), point, &self.calendar.zone);
+        if (point.kind == .date) return "All-day";
+        const clock = try calendar_ui.clock(a, point, &self.calendar.zone);
+        // A day-long timed event sits in the band: name its start day too.
+        const end = try @import("json.zig").decode(@import("calendar_time.zig").Point, a, get(event, "end"));
+        if (calendar_grid.inBand(point, end)) return std.fmt.allocPrint(a, "{s} {s}", .{ try calendar_text.shortDate(a, try calendar_ui.pointDay(point, &self.calendar.zone)), clock });
+        return clock;
     }
     fn calendarWriteGuide(self: *App) bool {
         return same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired");
