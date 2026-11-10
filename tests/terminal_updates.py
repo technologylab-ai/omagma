@@ -117,7 +117,10 @@ def card_and_guide(binary, directory, capture_dir):
                        and "Ctrl+S Review" in terminal.screen.lines()[-2])
         require(terminal.screen.locate("Upgrade available") is None,
                 "upgrade card distracted during composing")
+        # Esc only leaves insert mode; q saves the draft and closes it.
         terminal.send(b"\x1b")
+        terminal.gap(.2)
+        terminal.send(b"q")
         wait_card(terminal)
         click(terminal, *point(terminal, "[Dismiss]"))
         terminal.until(lambda: terminal.screen.locate("Upgrade available") is None)

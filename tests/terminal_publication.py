@@ -129,7 +129,7 @@ def hero_snapshots(binary, directory):
         tui.gap(.15)
         right = screen_capture(tui)
         tui.send(b":layout below\r")
-        tui.until(lambda: "Reader below" in tui.screen.lines()[0] and reader_contains(tui.screen, "Your suspiciously productive volcano"))
+        tui.until(lambda: "Reader below" in tui.screen.lines()[0] and reader_contains(tui.screen, "Meanwhile, a 2 GB Gmail tab"))
         tui.gap(.15)
         below = screen_capture(tui)
         tui.finish()

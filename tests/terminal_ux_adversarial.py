@@ -177,7 +177,7 @@ def queued_resume(binary, directory, capture_dir=None):
         with Client(binary, directory, extra=extra) as client:
             require(client.request("cache.stats")["fixtureSends"] == 0, "opening a queued draft sent it")
         command(terminal, "resume-send")
-        terminal.until(lambda: "accepted" in terminal.text().lower() or "send complete" in terminal.text().lower(), seconds=6)
+        terminal.until(lambda: any(value in terminal.text().lower() for value in ("accepted", "send complete", "sent to")), seconds=6)
         with Client(binary, directory, extra=extra) as client:
             require(client.request("queue.read", queueId=queue["queueId"])["state"] == "applied",
                     "explicit resume did not finish its existing queue")
