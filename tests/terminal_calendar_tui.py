@@ -59,7 +59,8 @@ def wait_calendar(terminal, view="Agenda"):
 
 
 def hour_gutter(terminal):
-    return [line[:5] for line in terminal.screen.lines() if re.match(r"^\d{2}:00(?: |$)", line)]
+    """Hour labels of the Day/Week time axis, top to bottom."""
+    return [line[:5] for line in terminal.screen.lines() if re.match(r"^\d{2}:00(?:[ │┤↑↓]|$)", line)]
 
 
 def hour_band(terminal, hour):
@@ -576,7 +577,7 @@ def browsing(binary, directory, captures):
         capture(terminal, captures, "calendar-week-three-days")
         terminal.resize(48, 22)
         terminal.until(lambda: "more event" in terminal.text())
-        require("Week needs 104 cols" in terminal.text(), "narrow Week omitted fallback explanation")
+        require("Week needs 60 cols" in terminal.text(), "narrow Week omitted fallback explanation")
         require("more event" in terminal.text(), "narrow agenda hides later events without an indication")
         lines = terminal.screen.lines()
         marker = next(i for i, row in enumerate(lines) if "more event" in row)
@@ -860,31 +861,32 @@ def grid_coverage(binary, directory, captures):
         # at00:00 and must never supply the midnight coverage oracle.
         terminal.send(b"k" * len(definitions))
         terminal.until(lambda: "Early start" in terminal.screen.lines()[-3])
-        expected_hours = [f"{hour:02}:00" for hour in range(24)]
-
-        # At38 rows all24 actual gutter labels fit, in chronological order.
-        require(hour_gutter(terminal) == expected_hours, "wide grid wastes room while hiding hours")
-        # The gutter names the hour and a cell keeps its non-zero minute: the
-        # full 09:30 start is derivable from the 09:00 row itself.
+        # The time axis follows the selection, in order.
+        gutter = hour_gutter(terminal)
+        require("02:00" in gutter and gutter == sorted(gutter), "the selected 02:00 event is not scrolled into view")
+        terminal.send(b"j")
+        terminal.until(lambda: "Long planning" in terminal.screen.lines()[-3])
+        # 09:30–11:15: a block from the 09:30 row down to 11:15, its time below
+        # the title; the 09:45 meeting sits beside it.
         band_9 = hour_band(terminal, 9)
-        require(cell_time(band_9[0], 6, None) == "09:30", "grid lost the actual 09:30 start time")
-        # The 09:45 overlap is either listed beside it or counted.
-        require(any("Overlap" in row for row in band_9) or any("+1" in row for row in band_9),
-                "grid hid the overlapping meeting without a count")
-        band_10 = hour_band(terminal, 10)
-        band_11 = hour_band(terminal, 11)
-        require(any("│" in row[6:] for row in band_10) and any("Long" in row for row in band_11),
+        require("Lo" in band_9[1] and "" in band_9[1], "block lost its 09:30 start row, camera or title")
+        require(any("09:30" in row[6:] for row in hour_band(terminal, 9) + hour_band(terminal, 10) + hour_band(terminal, 11)), "block lost its time")
+        require(any("Overlap" in row for row in band_9 + hour_band(terminal, 10)), "overlapping meeting is not beside the block")
+        bar_rows = hour_band(terminal, 10) + hour_band(terminal, 11)[:1]
+        y0 = terminal.screen.lines().index(hour_band(terminal, 10)[0])
+        require(all(terminal.screen.cells[y0 + offset][6] not in (" ", "┈") for offset in range(len(bar_rows))),
                 "multi-hour meeting incorrectly appears free after start hour")
         capture(terminal, captures, "calendar-overlaps-wide")
         for columns in (104, 110):
             before = terminal.screen.completed_frames
             terminal.resize(columns, 38)
             terminal.until(lambda: terminal.screen.completed_frames > before and "│Sun " in terminal.text())
-            require(hour_gutter(terminal) == expected_hours, "seven-day resize hid an hour gutter label")
+            gutter = hour_gutter(terminal)
+            require("09:00" in gutter and gutter == sorted(gutter), "seven-day resize lost the selected hour")
             band_9 = hour_band(terminal, 9)
-            require("" in band_9[0] and "Lo" in band_9[0] and cell_time(band_9[0], 6, None) == "09:30",
-                    "narrow seven-day cell dropped camera, title or start minute")
-            require(any("+1" in row or "Ov" in row for row in band_9), "narrow seven-day cell hid the overlap without a count")
+            require("" in band_9[1] and "Lo" in band_9[1], "narrow seven-day block dropped camera or title")
+            # One lane per day here: the overlap is counted and listed by +1.
+            require(any("+1" in row for row in band_9), "narrow seven-day column hid the overlap without a count")
             capture(terminal, captures, f"calendar-camera-grid-{columns}")
         # A shorter terminal still counts what no longer fits.
         before = terminal.screen.completed_frames
@@ -895,7 +897,8 @@ def grid_coverage(binary, directory, captures):
         terminal.until(lambda: "Week needs 104 cols" in terminal.text())
         terminal.send(b"kkkk")
         terminal.gap(.15)
-        require("↓1 later · j" in terminal.text(), "hidden later meeting has no accurate offscreen indication")
+        heading = next(line for line in terminal.screen.lines() if "│Mon 19 Oct" in line)
+        require("↓1" in heading, "hidden later meeting has no accurate offscreen indication")
         capture(terminal, captures, "calendar-overlaps-compact")
         before = terminal.text()
         terminal.send(b"l")
@@ -912,17 +915,230 @@ def grid_coverage(binary, directory, captures):
         terminal.close()
 
 
+GRID_WEEK = datetime(2026, 10, 19, tzinfo=timezone.utc)  # A Monday.
+
+
+def _grid_stamp(minutes):
+    return {"dateTime": (GRID_WEEK + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")}
+
+
+def _grid_date(days):
+    return {"date": (GRID_WEEK + timedelta(days=days)).date().isoformat()}
+
+
+# id, title, start, end, response, location
+GRID_EVENTS = [
+    ("standup", "Daily standup", _grid_stamp(9 * 60), _grid_stamp(9 * 60 + 15), "accepted", None),
+    ("planning", "Quarterly planning 会議 🧭 with product", _grid_stamp(9 * 60 + 30), _grid_stamp(11 * 60 + 15), "accepted", "Room 4.12"),
+    ("design", "Design review", _grid_stamp(10 * 60), _grid_stamp(11 * 60), "tentative", None),
+    ("vendor", "Vendor sync", _grid_stamp(10 * 60 + 30), _grid_stamp(11 * 60 + 30), "needsAction", None),
+    ("lunch", "Lunch", _grid_stamp(12 * 60), _grid_stamp(13 * 60), "accepted", None),
+    ("allhands", "Optional all-hands", _grid_stamp(14 * 60), _grid_stamp(15 * 60), "declined", None),
+    ("ping", "Reminder ping", _grid_stamp(15 * 60 + 30), _grid_stamp(15 * 60 + 30), "accepted", None),
+    ("quick", "Quick call", _grid_stamp(16 * 60), _grid_stamp(16 * 60 + 5), "accepted", None),
+    ("deploy", "Overnight deploy", _grid_stamp(23 * 60), _grid_stamp(24 * 60 + 90), "accepted", None),
+    ("hike", "Hike", _grid_stamp(5 * 24 * 60 + 8 * 60), _grid_stamp(5 * 24 * 60 + 14 * 60), "accepted", None),
+    ("trip", "Conference trip to Lisbon", _grid_date(1), _grid_date(4), "accepted", None),
+    ("holiday", "Company day", _grid_date(0), _grid_date(1), "accepted", None),
+    ("oncall", "On-call week", _grid_stamp(-6 * 60), _grid_stamp(6 * 24 * 60 + 9 * 60), "accepted", None),
+]
+
+
+def grid_seed(binary, directory):
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    with Client(binary, owned, extra=fixture.options()) as client:
+        client.request("calendar.list")
+        state = provider_state(client)
+    template = copy.deepcopy(state["events"][0])
+    state["events"] = []
+    for ident, title, begin, end, response, location in GRID_EVENTS:
+        item = copy.deepcopy(template)
+        item["calendar_id"] = ACCOUNTS[0]
+        event = item["value"]
+        event.pop("hangoutLink", None)
+        event.pop("location", None)
+        event.update(id="grid-" + ident, iCalUID="grid-" + ident + "@example.test", summary=title, start=begin, end=end,
+                     attendees=[{"email": ACCOUNTS[0], "self": True, "responseStatus": response}])
+        if location:
+            event["location"] = location
+        state["events"].append(item)
+    paths = [path for path in (owned / "cache").rglob("calendar-provider-fixture.json")
+             if json.loads(path.read_text())["account"] == ACCOUNTS[0]]
+    require(len(paths) == 1, "grid fixture account storage is ambiguous")
+    paths[0].write_text(json.dumps(state) + "\n")
+    return fixture, owned
+
+
+def select_event(terminal, title):
+    terminal.send(b"k" * 40)
+    terminal.gap(.1)
+    for _ in range(40):
+        if title in terminal.screen.lines()[-3]:
+            return
+        before = terminal.screen.completed_frames
+        terminal.send(b"j")
+        terminal.until(lambda: terminal.screen.completed_frames > before)
+    raise AssertionError("event was not selectable: " + title)
+
+
+def cell_at(terminal, literal, columns=None):
+    """(x, y) of the first cell starting `literal`, by physical columns."""
+    for y, row in enumerate(terminal.screen.cells):
+        for x in range(len(row)):
+            if columns and not columns[0] <= x < columns[1]:
+                continue
+            text, index = "", x
+            while len(text) < len(literal) and index < len(row):
+                text += row[index]
+                index += 1
+            if text.startswith(literal):
+                return x, y
+    return None
+
+
+def gutter_rows(terminal):
+    return {line[:5]: index for index, line in enumerate(terminal.screen.lines()) if re.match(r"^\d{2}:\d{2}", line)}
+
+
+def grid_blocks(binary, directory, captures):
+    fixture, owned = grid_seed(binary, directory)
+    background = ("rgb", 17, 22, 32)
+    expected_hours = [f"{hour:02}:00" for hour in range(24)]
+    for no_color in (False, True):
+        suffix = "-no-color" if no_color else ""
+        terminal = start(binary, owned, fixture, columns=200, rows=60, no_color=no_color)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            terminal.send(b"\x07\x05" + b"\x7f" * 12 + GRID_WEEK.date().isoformat().encode() + b"\r")
+            wait_calendar(terminal)
+            terminal.send(b"3")
+            wait_calendar(terminal, "Week")
+            select_event(terminal, "Overnight deploy")
+            lines = terminal.screen.lines()
+            header = next(index for index, line in enumerate(lines) if "│Mon 19 Oct" in line)
+            for name in ("Mon 19 Oct", "Tue 20 Oct", "Wed 21 Oct", "Thu 22 Oct", "Fri 23 Oct", "Sat 24 Oct", "Sun 25 Oct"):
+                require("│" + name in lines[header], "Week lost a Monday-first dated column: " + name)
+            # 200x60 holds the whole day at two rows per hour.
+            require(hour_gutter(terminal) == expected_hours, "a tall Week does not show the whole day in order")
+            rows = gutter_rows(terminal)
+            pitch = (200 - 6) // 7
+            monday, tuesday = (6, 6 + pitch - 1), (6 + pitch, 6 + 2 * pitch - 1)
+            # Duration: 09:30–11:15 starts on the 09:30 row and fills to 11:15.
+            # Three lanes share Monday here, so the title is shortened.
+            title = cell_at(terminal, "Quarte", monday)
+            require(title and title[1] == rows["09:00"] + 1, "planning block does not start at 09:30")
+            require("09:30" in lines[title[1] + 1] or "09:30" in lines[title[1] + 2], "planning block lost its time")
+            for offset in range(4):
+                require(terminal.screen.cells[title[1] + offset][title[0] - 1] not in (" ", "┈"), "a 1h45 block is not drawn over all its rows")
+            require(terminal.screen.cells[title[1] + 4][title[0] - 1] in (" ", "┈"), "a block runs past its end")
+            # Overlaps share the column side by side.
+            design = cell_at(terminal, "~ Desig", monday)
+            vendor = cell_at(terminal, "? Vendo", monday)
+            require(design and vendor and design[0] > title[0] and vendor[0] > design[0], "overlapping events are not side by side")
+            # Midnight: the deploy is drawn on Monday at 23:00 and Tuesday at 00:00.
+            require(cell_at(terminal, "Overnight", monday)[1] == rows["23:00"], "deploy missing at Monday 23:00")
+            require(cell_at(terminal, "Overnight", tuesday)[1] == rows["00:00"], "deploy missing after midnight")
+            # Short and zero-length events keep a readable row.
+            require(cell_at(terminal, "Reminder ping", monday) or cell_at(terminal, "15:30 Reminder", monday), "zero-length event invisible")
+            require(cell_at(terminal, "Quick call", monday) or cell_at(terminal, "16:00 Quick", monday), "five-minute event invisible")
+            # States: declined struck and dotted, unanswered outlined.
+            require(cell_at(terminal, "× Optional", monday), "declined event lost its mark")
+            # Band: the on-call week started on Sunday; the trip spans Tue–Thu
+            # as one bar over the day dividers.
+            oncall = cell_at(terminal, "◂On-call week")
+            require(oncall and oncall[0] == 6, "day-long timed event is not a band bar continuing from before the week")
+            trip = cell_at(terminal, "Conference trip to Lisbon")
+            require(trip and tuesday[0] <= trip[0] < tuesday[1], "multi-day all-day event does not start on Tuesday")
+            for divider in (5 + 2 * pitch, 5 + 3 * pitch):
+                require(terminal.screen.cells[trip[1]][divider] != "│", "multi-day bar is split by a day divider")
+            require(terminal.screen.cells[trip[1]][5 + 4 * pitch] == "│", "multi-day bar continues past Thursday")
+            selected = cell_at(terminal, "Overnight", monday)
+            lunch = cell_at(terminal, "Lunch", monday)
+            if no_color:
+                require(terminal.screen.reversed[selected[1]][selected[0] + 2], "NO_COLOR selection is not reverse video")
+                require(not terminal.screen.reversed[lunch[1]][lunch[0] + 2], "NO_COLOR marks an unselected block as selected")
+            else:
+                chosen = terminal.screen.styles[selected[1]][selected[0] + 2][1]
+                plain = terminal.screen.styles[lunch[1]][lunch[0] + 2][1]
+                require(chosen not in (None, background) and plain not in (None, background) and chosen != plain,
+                        "blocks are not filled, or the selection is not distinct")
+                strike = cell_at(terminal, "Optional", monday)
+                require(terminal.screen.styles[strike[1]][strike[0]][5], "declined title is not struck through")
+            capture(terminal, captures, "calendar-grid-week-200" + suffix)
+            # A click selects and opens the event under the pointer.
+            click(terminal, lunch[0] + 1, lunch[1] + 1)
+            terminal.until(lambda: "Calendar · Event" in terminal.text() and "Lunch" in terminal.text())
+            terminal.send(b"q")
+            terminal.until(lambda: "Calendar · Week" in terminal.text())
+            # Narrower terminals keep readable columns: 3 days, then the list.
+            for columns, rows_count in ((120, 40), (80, 24), (40, 12)):
+                terminal.resize(columns, rows_count)
+                terminal.until(lambda: terminal.screen.columns == columns and "Calendar · Week" in terminal.text())
+                terminal.gap(.2)
+                if columns >= 104:
+                    terminal.until(lambda: "│Sun 25 Oct" in terminal.text())
+                elif columns >= 60:
+                    terminal.until(lambda: "Week needs 104 cols" in terminal.text() and "│Tue 20 Oct" in terminal.text())
+                    require("│Thu 22 Oct" not in terminal.text(), "compact Week shows unreadable slivers")
+                else:
+                    terminal.until(lambda: "Week needs 60 cols" in terminal.text())
+                capture(terminal, captures, f"calendar-grid-week-{columns}" + suffix)
+            # Day: one wide column at 80 columns, still a grid at 40x12.
+            terminal.resize(80, 24)
+            terminal.send(b"2")
+            wait_calendar(terminal, "Day")
+            select_event(terminal, "Quarterly planning")
+            terminal.until(lambda: any(re.match(r"^09:00", line) for line in terminal.screen.lines()))
+            require(cell_at(terminal, "Quarterly", (6, 80)), "Day view lost the planning block")
+            capture(terminal, captures, "calendar-grid-day-80" + suffix)
+            before = min(int(label[:2]) for label in gutter_rows(terminal))
+            terminal.send(b"\x05")  # Ctrl+E: one hour later.
+            terminal.until(lambda: min(int(label[:2]) for label in gutter_rows(terminal)) == before + 1)
+            terminal.send(b"\x19")  # Ctrl+Y: back.
+            terminal.until(lambda: min(int(label[:2]) for label in gutter_rows(terminal)) == before)
+            terminal.resize(40, 12)
+            terminal.until(lambda: terminal.screen.columns == 40)
+            terminal.until(lambda: any(re.match(r"^\d{2}:\d{2}[│┤↑↓]", line) for line in terminal.screen.lines()))
+            capture(terminal, captures, "calendar-grid-day-40" + suffix)
+            # Today: highlighted header and the current-time line (whole day in view).
+            terminal.resize(140, 62)
+            terminal.send(b"3t")
+            wait_calendar(terminal, "Week")
+            terminal.gap(.3)
+            header = next(index for index, line in enumerate(terminal.screen.lines()) if "│Mon " in line)
+            if not no_color:
+                red = ("rgb", 255, 112, 112)
+                now_rows = [y for y, styles in enumerate(terminal.screen.styles) if styles[0][0] == red and re.match(r"^\d{2}:\d{2}", terminal.screen.lines()[y])]
+                require(len(now_rows) == 1, "the current time is not marked once in the gutter")
+                require(any(terminal.screen.cells[now_rows[0]][x] == "─" or terminal.screen.styles[now_rows[0]][x][4]
+                            for x in range(6, 140)), "no line marks the current time in today's column")
+                require(any(style[1] == ("rgb", 255, 158, 97) for style in terminal.screen.styles[header]), "today's header is not emphasised")
+            capture(terminal, captures, "calendar-grid-today" + suffix)
+            terminal.send(b"q")
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+    provider_counts(binary, owned, fixture, 0)
+    return {"sizes": ["200x60", "120x40", "80x24", "40x12", "140x62"], "noColor": True, "midnight": True,
+            "overlapLanes": True, "band": True, "click": True, "scroll": True, "writes": 0}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--capture-dir", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--case", choices=("browse", "combined-sources", "picker-read-access", "source-priority", "sidebar-navigation", "lifecycle", "lost-response", "readonly", "narrow-confirm", "grid-coverage"))
+    parser.add_argument("--case", choices=("browse", "combined-sources", "picker-read-access", "source-priority", "sidebar-navigation", "lifecycle", "lost-response", "readonly", "narrow-confirm", "grid-coverage", "grid-blocks"))
     args = parser.parse_args()
     binary = args.binary.resolve()
     receipt = {"build": read_build_info(binary), "cases": []}
     cases = [("browse", browsing), ("combined-sources", combined_sources), ("picker-read-access", picker_read_access), ("source-priority", source_priority), ("sidebar-navigation", sidebar_navigation), ("lifecycle", lifecycle),
-             ("lost-response", lambda b, d, c: lifecycle(b, d, c, True)), ("readonly", readonly), ("narrow-confirm", narrow_confirmation), ("grid-coverage", grid_coverage)]
+             ("lost-response", lambda b, d, c: lifecycle(b, d, c, True)), ("readonly", readonly), ("narrow-confirm", narrow_confirmation), ("grid-coverage", grid_coverage), ("grid-blocks", grid_blocks)]
     try:
         for name, task in cases:
             if args.case and args.case != name:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native Week disclosure using isolated synthetic providers and owned PTYs.
 
-Calendar snapshots, exact hour badges, visible-row unions, adaptive title rows,
+Calendar snapshots, exact hour badges, visible-row unions, side-by-side lanes,
 read-only selection and destination account identity are verified independently
 of screenshots. No live Calendar, contacts, desktop or OAuth writes occur.
 """
@@ -18,7 +18,7 @@ import traceback
 
 from build_info import read_build_info
 from terminal_calendar import Invitations, provider_state
-from terminal_calendar_tui import capture, cell_time, hour_gutter, start, wait_calendar
+from terminal_calendar_tui import capture, hour_gutter, start, wait_calendar
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_mouse import click, point
 
@@ -107,34 +107,23 @@ def select_week_event(terminal, title):
 
 def chooser(binary, directory, captures):
     fixture, owned, day = seed(binary, directory)
-    # The compact Calendar chrome leaves more Week rows than before: at 38
-    # rows 11:00 lists both of its events and needs no +N badge, so 35 rows
-    # keep the earlier grid height whose badge this chooser path clicks.
     terminal = start(binary, owned, fixture, columns=140, rows=35, no_color=True)
     try:
         open_week(terminal, day)
-        # Fresh/date-reloaded passive selection cannot suppress a new start
-        # from the saved exact Work Priority source.
-        row10 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("10:00"))
-        # The cell keeps the minute; with its row's gutter hour the full start
-        # time (10:30) is derivable from what is on screen.
-        require(cell_time(terminal.screen.lines()[row10], 6, 24) == "10:30" and "Spe" in terminal.screen.lines()[row10][6:24],
-                "passive initial routine hid the preferred new Work start or its 10:30 start time")
+        # At 140 columns a day has two lanes: the 09:00–12:00 routine and the
+        # starts beside it. Among the 10:30 starts the saved Work Priority
+        # source takes the free lane, also under a passive initial selection.
+        lines = terminal.screen.lines()
+        row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
+        require("Spe" in lines[row10 + 1][6:24], "passive initial selection hid the preferred new 10:30 Work start")
         capture(terminal, captures, "week-passive-priority")
         select_week_event(terminal, "Weekly studio block")
-        # Choosing the routine from11:00 pins only that bucket. The10:30 Work
-        # start must stay visible at10:00 while the routine is revealed at11.
-        row11 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("11:00"))
-        col11 = terminal.screen.lines()[row11].find("+", 6, 24)
-        require(col11 >= 0, "11:00 group is missing its count badge")
-        click(terminal, col11, row11)
-        terminal.until(lambda: "2 events" in terminal.text() and "11:00–12:00" in terminal.text())
-        click(terminal, *point(terminal, "[Enter Select]"))
-        terminal.until(lambda: "Calendar · Week" in terminal.text() and selected(terminal, "Weekly studio block"))
-        row10 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("10:00"))
-        row11 = next(index for index, line in enumerate(terminal.screen.lines()) if line.startswith("11:00"))
-        require("Spe" in terminal.screen.lines()[row10][6:24] and "Weekly" in terminal.screen.lines()[row11][6:24],
-                "single-bucket reveal covered another hour's preferred new start")
+        # Selecting the routine never covers the starts beside it.
+        lines = terminal.screen.lines()
+        row9 = next(index for index, line in enumerate(lines) if line.startswith("09:00"))
+        row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
+        require("Weekly" in lines[row9][6:24] and "Spe" in lines[row10 + 1][6:24],
+                "the selected routine covered another start beside it")
         capture(terminal, captures, "week-explicit-single-hour")
         require(("Also here:" in terminal.text() or "Hidden here:" in terminal.text()) and "[Space Show all 8]" in terminal.text(),
                 "selected event's union count/secondary preview is not discoverable")
@@ -201,9 +190,12 @@ def chooser(binary, directory, captures):
         terminal.until(lambda: "Calendar · Week" in terminal.text())
         terminal.resize(140, 38)
         terminal.until(lambda: "│Sun " in terminal.text())
-        # All-day disclosure is separate from timed rows and uses civil ends.
-        badge = point(terminal, "+1 all-day")
-        click(terminal, *badge)
+        # All-day disclosure is separate from timed rows and uses civil ends:
+        # the band's +1 sits at the end of Monday's last band row.
+        lines = terminal.screen.lines()
+        day_header = next(index for index, line in enumerate(lines) if "│Mon 19 Oct" in line)
+        band_row = next(row for row in (day_header + 2, day_header + 1) if "+1" in lines[row][6:24])
+        click(terminal, lines[band_row].find("+1", 6, 24), band_row)
         terminal.until(lambda: "3 events" in terminal.text() and "All day" in terminal.text())
         require("Weekly studio block" not in terminal.text(), "all-day chooser included a timed event")
         capture(terminal, captures, "week-all-day-chooser")
@@ -211,7 +203,7 @@ def chooser(binary, directory, captures):
         terminal.until(lambda: "Local holiday" in terminal.text())
         click(terminal, *point(terminal, "[Enter Select]"))
         terminal.until(lambda: "Calendar · Week" in terminal.text() and selected(terminal, "Local holiday"))
-        day_header = next(index for index, line in enumerate(terminal.screen.lines()) if "Mon 10-19" in line)
+        day_header = next(index for index, line in enumerate(terminal.screen.lines()) if "│Mon 19 Oct" in line)
         require(any("Local holiday" in line[6:24] for line in terminal.screen.lines()[day_header + 1:day_header + 3]),
                 "hidden all-day choice was not promoted into its actual day band")
         terminal.send(b"\r")
@@ -256,33 +248,33 @@ def expansion(binary, directory, captures):
         capture(terminal, captures, "week-crowded-140x38")
         expected_hours = [f"{hour:02}:00" for hour in range(24)]
         before_frame = terminal.screen.completed_frames
-        terminal.resize(140, 60)
-        terminal.until(lambda: terminal.screen.completed_frames > before_frame and "Notes" in terminal.text())
-        require(hour_gutter(terminal) == expected_hours, "expanded grid hid an hour gutter label")
+        terminal.resize(140, 62)
+        terminal.until(lambda: terminal.screen.completed_frames > before_frame and hour_gutter(terminal) == expected_hours)
         lines = terminal.screen.lines()
         row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
-        row11 = next(index for index, line in enumerate(lines) if line.startswith("11:00"))
-        actual = [line[6:24] for line in lines[row10:row11]]
-        require(len(actual) == 4 and sum(bool(part.strip()) for part in actual) == 4,
-                "spare rows do not reveal four actual meeting titles")
-        require(any("+3" in part for part in actual), "badge count did not exclude all four distinct visible titles")
+        actual = [line[6:24] for line in lines[row10:row10 + 2]]
+        # The routine, the earliest start and the preferred 10:30 start are
+        # drawn; the hour's four other events are counted by its badge.
+        require(any("+4" in part for part in actual), "badge count is not the hour's hidden events")
+        require(any("Early" in part for part in actual) and "Spe" in actual[1], "free lanes do not show the starts beside the routine")
         require("overlapping" not in terminal.text(), "Week falsely labels same-hour appointments as conflicts")
-        capture(terminal, captures, "week-expanded-140x60")
+        capture(terminal, captures, "week-expanded-140x62")
         # Layout geometry is independent of selection.
         before = hour_gutter(terminal)
         terminal.send(b"jj")
         terminal.gap(.1)
         after = hour_gutter(terminal)
-        require(before == after, "selection changed the allocated hour rows")
+        require(before == after, "selection changed the time axis")
         before_frame = terminal.screen.completed_frames
         terminal.resize(104, 44)
-        terminal.until(lambda: terminal.screen.completed_frames > before_frame and "Sun" in terminal.text())
-        require(hour_gutter(terminal) == expected_hours, "populated seven-day resize hid an hour gutter label")
+        terminal.until(lambda: terminal.screen.completed_frames > before_frame and "│Sun " in terminal.text())
+        gutter = hour_gutter(terminal)
+        require(gutter == sorted(gutter) and len(gutter) >= 10, "populated seven-day resize lost its ordered time axis")
         capture(terminal, captures, "week-crowded-104")
         terminal.finish()
         with Client(binary, owned, extra=fixture.options()) as client:
             require(all(provider_state(client, account)["writes"] == 0 for account in ACCOUNTS), "adaptive Week mutated a provider")
-        return {"adaptiveTitlesPerHour": 4, "visibleHours": 24, "selectionStableLayout": True, "writes": 0}
+        return {"lanesPerDay": 2, "visibleHours": 24, "selectionStableLayout": True, "writes": 0}
     except Exception:
         print(terminal.text(), file=sys.stderr)
         raise
