@@ -52,7 +52,7 @@
         },
         "date": {
           "type": "string",
-          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in timeZone or the local zone; the reply echoes resolvedDate."
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in the same zone as the window: timeZone, else the selected calendar's time_zone, else the local zone; the reply echoes resolvedDate."
         },
         "view": {
           "type": "string",
@@ -165,7 +165,7 @@
         },
         "date": {
           "type": "string",
-          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in timeZone or the local zone; the reply echoes resolvedDate."
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days. Relative forms today, tomorrow, yesterday, +Nd/-Nd and weekday names (next occurrence, today included) resolve in the same zone as the window: timeZone, else the selected calendar's time_zone, else the local zone; the reply echoes resolvedDate."
         },
         "view": {
           "type": "string",

@@ -49,7 +49,7 @@ fn attachmentScopeBeforeRouting(command: []const u8, args: *std.process.Args.Ite
             if (!scan.skip()) return error.ValueRequired;
             if ((eq(arg, "--attach-file") or eq(arg, "--upload-file") or eq(arg, "--file") or eq(arg, "--attachment-mode")) and !draftSourceCommand(command)) return error.AttachmentsRequireDraftSource;
         } else if (eq(arg, "--dry-run")) {
-            if (!draftSourceCommand(command)) return error.DryRunRequiresDraftSource;
+            if (!draftSourceCommand(command) and !plannedCommand(command)) return error.DryRunRequiresDraftSource;
         } else if (!booleanOption(arg)) return;
     }
 }
@@ -150,8 +150,20 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         }
         if (eq(arg, "--json")) continue;
         if (eq(arg, "--dry-run")) {
-            if (!draftSourceCommand(j.text(req, "cmd"))) return error.DryRunRequiresDraftSource;
+            const command = j.text(req, "cmd");
+            // Saved-draft sends and label changes use the executor's own
+            // dryRun plan; supplied sources keep the local file plan.
+            if (plannedCommand(command)) {
+                try req.object.put(sa, "dryRun", .{ .bool = true });
+                continue;
+            }
+            if (!draftSourceCommand(command)) return error.DryRunRequiresDraftSource;
             dry_run = true;
+            continue;
+        }
+        if (eq(arg, "--replace")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "draft.update")) return error.ReplaceRequiresDraftUpdate;
+            try req.object.put(sa, "replace", .{ .bool = true });
             continue;
         }
         if (eq(arg, "--browser")) {
@@ -181,6 +193,8 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             continue;
         }
         if (eq(arg, "--all") or eq(arg, "--reply-all")) {
+            // Only a reply has recipients to widen; forwarding chooses none.
+            if (!interactive and !jsonl and !eq(j.text(req, "cmd"), "mail.reply")) return error.ReplyAllRequiresReply;
             try req.object.put(sa, "all", .{ .bool = true });
             continue;
         }
@@ -206,17 +220,17 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             while (split.next()) |part| try values.array.append(.{ .string = part });
             try req.object.put(sa, "capabilities", values);
         } else if (eq(arg, "--fixture-root")) options.fixture_root = v else if (eq(arg, "--fixture-scenario")) options.fixture_scenario = v else if (eq(arg, "--cache-dir")) options.cache_dir = v else if (eq(arg, "--ui-file")) options.ui_file = v else if (eq(arg, "--editor-mode")) options.editor_mode = v else if ((eq(arg, "--metadata-limit") or eq(arg, "--cache-messages"))) {
-            options.metadata_limit = try std.fmt.parseInt(usize, v, 10);
+            options.metadata_limit = std.fmt.parseInt(usize, v, 10) catch return error.InvalidOptionValue;
             options.metadata_limit_set = true;
         } else if (eq(arg, "--prefetch-bodies")) {
-            options.body_prefetch_limit = try std.fmt.parseInt(usize, v, 10);
+            options.body_prefetch_limit = std.fmt.parseInt(usize, v, 10) catch return error.InvalidOptionValue;
             options.body_prefetch_limit_set = true;
             if (options.body_prefetch_limit > 64) return error.InvalidPrefetchLimit;
             // Only a refresh request carries the body head; other one-shot
             // commands use the same session option without an extra field.
             if (!interactive and !jsonl and eq(j.text(req, "cmd"), "mail.refresh")) try req.object.put(sa, "prefetchLimit", .{ .integer = @intCast(options.body_prefetch_limit) });
         } else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) {
-            options.disk_limit = try std.fmt.parseInt(usize, v, 10);
+            options.disk_limit = std.fmt.parseInt(usize, v, 10) catch return error.InvalidOptionValue;
             options.disk_limit_set = true;
         } else if (eq(arg, "--account")) {
             options.account = v;
@@ -263,7 +277,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else if (eq(arg, "--before-message-id") or eq(arg, "--after-message-id")) {
             try req.object.put(sa, if (eq(arg, "--before-message-id")) "beforeMessageId" else "afterMessageId", .{ .string = v });
         } else if (eq(arg, "--boundary-received-at")) {
-            try req.object.put(sa, "boundaryReceivedAt", .{ .integer = try std.fmt.parseInt(i64, v, 10) });
+            try req.object.put(sa, "boundaryReceivedAt", .{ .integer = std.fmt.parseInt(i64, v, 10) catch return error.InvalidOptionValue });
+        } else if (eq(arg, "--expected-content-digest")) {
+            const command = j.text(req, "cmd");
+            if (interactive or jsonl or (!eq(command, "draft.patch") and !eq(command, "draft.send") and !eq(command, "draft.queue"))) return error.ContentDigestRequiresSavedDraft;
+            try req.object.put(sa, "expectedContentDigest", .{ .string = v });
         } else if (eq(arg, "--format")) {
             if (!eq(v, "markdown") and !eq(v, "plain")) return error.InvalidBodyFormat;
             if (interactive or jsonl) return error.FormatRequiresComposeCommand;
@@ -271,7 +289,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else if (eq(arg, "--from")) {
             try draft.object.put(sa, "from", .{ .string = v });
             has_draft = true;
-        } else if (eq(arg, "--limit")) try req.object.put(sa, "limit", .{ .integer = try std.fmt.parseInt(i64, v, 10) }) else if (eq(arg, "--cursor")) try req.object.put(sa, "cursor", .{ .string = v }) else if (eq(arg, "--query")) try req.object.put(sa, "query", .{ .string = v }) else if (eq(arg, "--label")) try req.object.put(sa, "label", .{ .string = v }) else if (eq(arg, "--message-id") or eq(arg, "--id")) try req.object.put(sa, "messageId", .{ .string = v }) else if (eq(arg, "--thread-id")) try req.object.put(sa, "threadId", .{ .string = v }) else if (eq(arg, "--draft-id")) try req.object.put(sa, "draftId", .{ .string = v }) else if (eq(arg, "--attachment-id")) try req.object.put(sa, "attachmentId", .{ .string = v }) else if (eq(arg, "--operation-id")) try req.object.put(sa, "operationId", .{ .string = v }) else if (eq(arg, "--status")) try req.object.put(sa, "status", .{ .string = v }) else if (eq(arg, "--to") or eq(arg, "--cc") or eq(arg, "--bcc")) {
+        } else if (eq(arg, "--limit")) try req.object.put(sa, "limit", .{ .integer = std.fmt.parseInt(i64, v, 10) catch return error.InvalidOptionValue }) else if (eq(arg, "--cursor")) try req.object.put(sa, "cursor", .{ .string = v }) else if (eq(arg, "--query")) try req.object.put(sa, "query", .{ .string = v }) else if (eq(arg, "--label")) try req.object.put(sa, "label", .{ .string = v }) else if (eq(arg, "--message-id") or eq(arg, "--id")) try req.object.put(sa, "messageId", .{ .string = v }) else if (eq(arg, "--thread-id")) try req.object.put(sa, "threadId", .{ .string = v }) else if (eq(arg, "--draft-id")) try req.object.put(sa, "draftId", .{ .string = v }) else if (eq(arg, "--attachment-id")) try req.object.put(sa, "attachmentId", .{ .string = v }) else if (eq(arg, "--operation-id")) try req.object.put(sa, "operationId", .{ .string = v }) else if (eq(arg, "--status")) try req.object.put(sa, "status", .{ .string = v }) else if (eq(arg, "--to") or eq(arg, "--cc") or eq(arg, "--bcc")) {
             try draft.object.put(sa, arg[2..], .{ .string = v });
             has_draft = true;
         } else if (eq(arg, "--subject")) {
@@ -308,6 +326,16 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else return unknownOption(arg);
     }
     if (try j.boolean(req, "original", false) and try j.boolean(req, "preserveFormatting", false)) return error.ConflictingForwardModes;
+    const one_shot_command = j.text(req, "cmd");
+    if (!interactive and !jsonl and (eq(one_shot_command, "mail.reply") or eq(one_shot_command, "mail.forward")) and has_draft) {
+        // A reply or forward note is the top-level bodyText; the recipients,
+        // subject and threading come from the original message.
+        var it = draft.object.iterator();
+        while (it.next()) |field| if (!eq(field.key_ptr.*, "bodyText")) return error.ReplyAcceptsOnlyBody;
+        if (j.get(draft, "bodyText")) |body| try req.object.put(sa, "bodyText", body);
+        has_draft = false;
+    }
+    if (j.get(req, "dryRun") != null and send_delay != null) return error.DryRunConflictsWithSendDelay;
     if (has_draft) {
         if (req.object.get("draft") != null) return error.ConflictingDraftOptions;
         try req.object.put(sa, "draft", draft);
@@ -316,12 +344,18 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         const command = j.text(req, "cmd");
         if (eq(command, "mail.reply") or eq(command, "mail.forward")) {
             try req.object.put(sa, "bodyFormat", .{ .string = format });
-        } else if (eq(command, "draft.create") or eq(command, "draft.update") or eq(command, "draft.preview") or eq(command, "mail.send")) {
+        } else if (eq(command, "draft.create") or eq(command, "draft.update") or eq(command, "draft.preview") or eq(command, "draft.patch") or eq(command, "mail.send")) {
             if (eq(command, "draft.preview") and j.text(req, "draftId").len != 0 and req.object.get("draft") == null) return error.FormatRequiresDraftSource;
             var formatted = try j.copyObject(sa, req.object.get("draft") orelse draft);
             try formatted.object.put(sa, "bodyFormat", .{ .string = format });
             try req.object.put(sa, "draft", formatted);
         } else return error.FormatRequiresComposeCommand;
+    }
+    if (!interactive and !jsonl and eq(j.text(req, "cmd"), "draft.patch")) {
+        // Patch flags and a --draft-file name only the fields to change.
+        const changes = req.object.get("draft") orelse return error.PatchRequiresChanges;
+        _ = req.object.orderedRemove("draft");
+        try req.object.put(sa, "set", changes);
     }
     const resolved_files = try cli_files.resolve(io, sa, attachment_paths.items, attachment_sources.items, attachment_mode);
     if (dry_run) {
@@ -336,7 +370,8 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         try dry_output.interface.writeByte('\n');
         try dry_output.interface.flush();
         const parsed = try std.json.parseFromSliceLeaky(j.Value, sa, planned, .{});
-        if (!try j.boolean(parsed, "ok", false)) return failed(j.text(j.get(parsed, "error") orelse .null, "code"));
+        const status = replyStatus(j.text(req, "cmd"), parsed);
+        if (status != 0) return failed(status);
         return;
     }
     // Printed authorization hints repeat an explicit --backend; an
@@ -380,15 +415,19 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         try output.interface.writeByte('\n');
         try output.interface.flush();
         const parsed = try std.json.parseFromSliceLeaky(j.Value, sa, reply, .{});
-        if (!try j.boolean(parsed, "ok", false)) return failed(j.text(j.get(parsed, "error") orelse .null, "code"));
+        // ok:true alone is not success for a send or RSVP: its outcome decides.
+        const status = replyStatus(j.text(req, "cmd"), parsed);
+        if (status != 0) return failed(status);
         return;
     }
-    // --account fills in account only for frames that omit it.
+    // --account fills in account only for frames that omit it. A malformed
+    // process option is a usage error before any frame is read.
     const default_account: ?[]const u8 = if (options.account) |address| blk: {
-        try @import("recipients.zig").validateAddress(address);
+        @import("recipients.zig").validateAddress(address) catch return error.InvalidAccountOption;
         break :blk address;
     } else null;
-    var rejected_frames: usize = 0;
+    var saw_unknown = false;
+    var saw_failure = false;
     var input_buffer: [8192]u8 = undefined;
     var input = std.Io.File.stdin().reader(io, &input_buffer);
     while (true) {
@@ -426,10 +465,17 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         try output.interface.writeAll(response);
         try output.interface.writeByte('\n');
         try output.interface.flush();
-        if (strict and !replyOk(frame.allocator(), response)) rejected_frames += 1;
+        if (strict) switch (strictStatus(frame.allocator(), request, response)) {
+            0 => {},
+            6 => saw_unknown = true,
+            else => saw_failure = true,
+        };
         if (eof) break;
     }
-    if (rejected_frames != 0) return failed("");
+    // --strict: 6 when any reply may have applied an unknown outcome, else 3
+    // when any reply failed or reported a send/RSVP that was not applied.
+    if (saw_unknown) return failed(6);
+    if (saw_failure) return failed(3);
 }
 /// Insert "account" into a frame that has none (and is not accounts.list).
 /// Only top-level keys are scanned; values are skipped without allocation,
@@ -475,23 +521,97 @@ fn replyOk(a: std.mem.Allocator, response: []const u8) bool {
         scanner.skipValue() catch return false;
     }
 }
-/// Error code of the last failed one-shot or strict JSONL reply; main maps
-/// it to the documented exit status.
-pub var failed_code: [64]u8 = undefined;
-pub var failed_code_len: usize = 0;
-fn failed(code: []const u8) error{CommandFailed} {
-    failed_code_len = @min(code.len, failed_code.len);
-    @memcpy(failed_code[0..failed_code_len], code[0..failed_code_len]);
+/// Exit status of the last failed one-shot or strict JSONL run; main exits
+/// with it. See replyStatus for the documented table.
+var exit_status: u8 = 0;
+fn failed(status: u8) error{CommandFailed} {
+    exit_status = status;
     return error.CommandFailed;
 }
-/// Documented one-shot exit status for a reply error code: 3 request
-/// rejected, 4 authorization/capability, 5 target not found, 6 unknown outcome.
 pub fn exitStatus() u8 {
-    const code = failed_code[0..failed_code_len];
+    return if (exit_status == 0) 3 else exit_status;
+}
+const authorization_codes = [_][]const u8{ "PermissionDenied", "NotConnected", "InvalidGrant", "OAuthClientRequired", "WrongAccount", "GrantClientMismatch", "KeyringUnavailable", "KeyringLocked", "CredentialStorageAccessDenied", "VaultLocked", "BackendRequired", "DriveNotConnected", "DriveAccessExpired", "CalendarPermissionRequired", "MeetSettingsPermissionRequired" };
+/// Commands whose ok:true reply is a send or RSVP receipt: success depends on
+/// its outcome/state, not on ok alone.
+fn sendCommand(command: []const u8) bool {
+    for ([_][]const u8{ "mail.send", "draft.send", "draft.queue", "queue.process", "queue.send-now", "invitation.reply" }) |name| if (eq(command, name)) return true;
+    return false;
+}
+/// Documented exit status of one reply frame:
+///   0 ok (a send/RSVP was applied, staged or planned as sendable)
+///   3 rejected or not applied (validation, refusal, blocked dry run, send
+///     outcome rejected/blocked/preparationStopped/stopped, canceled queue)
+///   4 authorization or capability missing
+///   5 account, message, draft, label or other target not found
+///   6 unknown outcome (UnknownOutcome, send outcome/state unknown or
+///     submitting, or an interrupted write without a replay identity)
+///   7 transient: the reply says retryable:true; repeat it later unchanged
+pub fn replyStatus(command: []const u8, frame: j.Value) u8 {
+    if (frame != .object) return 3;
+    if (!(j.boolean(frame, "ok", false) catch false)) return errorStatus(command, j.get(frame, "error") orelse .null);
+    return outcomeStatus(command, j.get(frame, "data") orelse .null);
+}
+fn errorStatus(command: []const u8, failure: j.Value) u8 {
+    const code = j.text(failure, "code");
     if (eq(code, "UnknownOutcome")) return 6;
-    for ([_][]const u8{ "PermissionDenied", "NotConnected", "InvalidGrant", "OAuthClientRequired", "WrongAccount", "GrantClientMismatch", "KeyringUnavailable", "KeyringLocked", "CredentialStorageAccessDenied", "VaultLocked", "BackendRequired", "DriveNotConnected", "DriveAccessExpired", "CalendarPermissionRequired", "MeetSettingsPermissionRequired" }) |auth| if (eq(code, auth)) return 4;
+    for (authorization_codes) |auth| if (eq(code, auth)) return 4;
     if (eq(code, "UnknownAccount") or eq(code, "CacheMiss") or std.mem.endsWith(u8, code, "NotFound")) return 5;
+    if (j.boolean(failure, "retryable", false) catch false) return 7;
+    // The executor withholds retryable from an interrupted write that has no
+    // operationId/undoToken: it may have been applied.
+    if (@import("cli_contract.zig").interruption(code) and @import("client_contract.zig").mayMutate(command)) return 6;
     return 3;
+}
+fn outcomeStatus(command: []const u8, data: j.Value) u8 {
+    if (!sendCommand(command) or data != .object) return 0;
+    if (j.boolean(data, "dryRun", false) catch false) {
+        // A dry run of an identity with a recorded receipt replays it.
+        const replayed = j.text(j.get(data, "replay") orelse .null, "outcome");
+        if (eq(replayed, "unknown")) return 6;
+        if (eq(replayed, "rejected") or eq(j.text(data, "status"), "blocked")) return 3;
+        return 0;
+    }
+    const outcome = j.text(data, "outcome");
+    if (eq(outcome, "unknown")) return 6;
+    if (eq(outcome, "rejected") or eq(outcome, "blocked") or eq(outcome, "preparationStopped") or eq(j.text(data, "status"), "stopped")) return 3;
+    const state = j.text(data, "state");
+    if (eq(state, "unknown") or eq(state, "submitting")) return 6;
+    if (eq(state, "rejected") or eq(state, "canceled") or eq(state, "preparing")) return 3;
+    if (eq(state, "queued")) {
+        // Staging succeeds as queued unless its preparation stopped; a
+        // processing command that leaves the item queued did not send it.
+        if (!eq(command, "draft.queue")) return 3;
+        const preparation = j.get(data, "preparation") orelse .null;
+        if (eq(j.text(preparation, "outcome"), "preparationStopped") or eq(j.text(preparation, "status"), "stopped")) return 3;
+    }
+    return 0;
+}
+/// The cmd of a request frame, reading top-level keys only.
+fn frameCommand(a: std.mem.Allocator, raw: []const u8) []const u8 {
+    var scanner = std.json.Scanner.initCompleteInput(a, raw);
+    defer scanner.deinit();
+    if ((scanner.next() catch return "") != .object_begin) return "";
+    while (true) {
+        const key = switch (scanner.nextAlloc(a, .alloc_if_needed) catch return "") {
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => return "",
+        };
+        if (!eq(key, "cmd")) {
+            scanner.skipValue() catch return "";
+            continue;
+        }
+        return switch (scanner.nextAlloc(a, .alloc_if_needed) catch return "") {
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => "",
+        };
+    }
+}
+fn strictStatus(a: std.mem.Allocator, request: []const u8, response: []const u8) u8 {
+    const frame = std.json.parseFromSliceLeaky(j.Value, a, response, .{}) catch return 3;
+    return replyStatus(frameCommand(a, request), frame);
 }
 /// The offending option, when it is a plain option-looking word that cannot
 /// carry private data; main names it with the nearest valid option.
@@ -517,12 +637,25 @@ pub fn nearestOption(arg: []const u8) ?[]const u8 {
     }
     return @import("cli_contract.zig").nearest(arg, candidates[0..count]);
 }
-/// --schema [COMMAND] [--compact], in either order after --schema.
+/// --schema [COMMAND] [--compact], in either order after --schema. Schemas
+/// are offline: shared process options (and their values) are accepted and
+/// ignored; anything else is named as not valid with --schema.
 fn schemaRequest(io: std.Io, a: std.mem.Allocator, args: anytype) !void {
     var target: ?[]const u8 = null;
     var compact = false;
     while (args.next()) |arg| {
-        if (eq(arg, "--compact")) compact = true else if (target == null and !std.mem.startsWith(u8, arg, "-")) target = arg else return unknownOption(arg);
+        if (eq(arg, "--compact")) {
+            compact = true;
+        } else if (target == null and !std.mem.startsWith(u8, arg, "-")) {
+            target = arg;
+        } else if (booleanOption(arg)) {
+            continue;
+        } else if (valueOption(arg)) {
+            if (!args.skip()) return error.ValueRequired;
+        } else {
+            _ = unknownOption(arg) catch {};
+            return error.SchemaOptionUnsupported;
+        }
     }
     return @import("cli_api.zig").schemas(io, a, target, compact);
 }
@@ -572,13 +705,19 @@ fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation
     }
     return false;
 }
-const boolean_options = [_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--cache-only", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only", "--dry-run", "--strict" };
+const boolean_options = [_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--cache-only", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only", "--dry-run", "--strict", "--replace" };
 fn booleanOption(arg: []const u8) bool {
     for (boolean_options) |flag| if (eq(arg, flag)) return true;
     return false;
 }
 fn draftSourceCommand(command: []const u8) bool {
     return eq(command, "mail.send") or eq(command, "draft.create") or eq(command, "draft.update") or eq(command, "draft.preview");
+}
+/// One-shot commands whose --dry-run is the executor's JSONL dryRun plan:
+/// saved-draft sends and label changes (spam/unspam become mail.batch).
+fn plannedCommand(command: []const u8) bool {
+    for ([_][]const u8{ "draft.send", "draft.queue", "mail.archive", "mail.trash", "mail.restore", "mail.mark", "mail.batch", "mail.spam", "mail.unspam" }) |name| if (eq(command, name)) return true;
+    return false;
 }
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
@@ -591,17 +730,18 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 // Boolean flags have already been handled above. Check the name before taking
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
 const value_options = [_][]const u8{
-    "--backend",           "--config",           "--metrics-file",         "--grant-file",    "--client-file",  "--capabilities",
-    "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",       "--editor-mode",  "--metadata-limit",
-    "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes",   "--account",      "--action",
-    "--undo-token",        "--url",              "--path",                 "--message-ids",   "--message-id",   "--id",
-    "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",        "--from",         "--limit",
-    "--cursor",            "--query",            "--label",                "--thread-id",     "--draft-id",     "--attachment-id",
-    "--operation-id",      "--status",           "--to",                   "--cc",            "--bcc",          "--subject",
-    "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
-    "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
-    "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
-    "--send-delay",        "--delay-seconds",    "--next-attempt",         "--upload-file",   "--file",         "--attachment-mode",
+    "--backend",                 "--config",           "--metrics-file",         "--grant-file",    "--client-file",  "--capabilities",
+    "--fixture-root",            "--fixture-scenario", "--cache-dir",            "--ui-file",       "--editor-mode",  "--metadata-limit",
+    "--cache-messages",          "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes",   "--account",      "--action",
+    "--undo-token",              "--url",              "--path",                 "--message-ids",   "--message-id",   "--id",
+    "--before-message-id",       "--after-message-id", "--boundary-received-at", "--format",        "--from",         "--limit",
+    "--cursor",                  "--query",            "--label",                "--thread-id",     "--draft-id",     "--attachment-id",
+    "--operation-id",            "--status",           "--to",                   "--cc",            "--bcc",          "--subject",
+    "--body",                    "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
+    "--draft-file",              "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
+    "--background-color",        "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
+    "--send-delay",              "--delay-seconds",    "--next-attempt",         "--upload-file",   "--file",         "--attachment-mode",
+    "--expected-content-digest",
 };
 fn valueOption(arg: []const u8) bool {
     if (calendarField(arg) != null) return true;
@@ -703,13 +843,64 @@ test "cli process: --account fills only frames without one and --strict reads re
     for ([_][]const u8{ "{\"cmd\":\"mail.list\",\"account\":\"other@example.test\"}", "{\"cmd\":\"accounts.list\"}", "not json", "[1]" }) |raw| try std.testing.expectEqualStrings(raw, try withAccount(a, raw, "fictional@example.test"));
     try std.testing.expect(replyOk(a, "{\"version\":1,\"id\":\"x\\\"y\",\"ok\":true,\"data\":{}}"));
     try std.testing.expect(!replyOk(a, "{\"version\":1,\"id\":null,\"ok\":false,\"error\":{\"code\":\"MissingField\"}}"));
-    for ([_][]const u8{ "UnknownOutcome", "PermissionDenied", "MessageNotFound", "UnknownField", "" }, [_]u8{ 6, 4, 5, 3, 3 }) |code, status| {
-        _ = failed(code) catch {};
-        try std.testing.expectEqual(status, exitStatus());
-    }
+    try std.testing.expectEqualStrings("draft.send", frameCommand(a, "{\"id\":{\"cmd\":\"x\"},\"cmd\":\"draft.send\",\"draftId\":\"d\"}"));
+    try std.testing.expectEqualStrings("", frameCommand(a, "not json"));
+    _ = failed(6) catch {};
+    try std.testing.expectEqual(@as(u8, 6), exitStatus());
     _ = unknownOption("--fictional-flag") catch {};
     try std.testing.expectEqualStrings("--fictional-flag", unknown_option[0..unknown_option_len]);
     _ = unknownOption("private value with spaces") catch {};
     try std.testing.expectEqual(@as(usize, 0), unknown_option_len);
     try std.testing.expectEqualStrings("--cached", nearestOption("--cahced").?);
+}
+test "cli process: every documented exit status row is derived from the reply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Row = struct { command: []const u8, reply: []const u8, status: u8 };
+    for ([_]Row{
+        // 0: applied, staged or planned sendable; reads and other writes.
+        .{ .command = "mail.send", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"applied\"}}", .status = 0 },
+        .{ .command = "draft.queue", .reply = "{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":false}}", .status = 0 },
+        .{ .command = "queue.process", .reply = "{\"ok\":true,\"data\":{\"state\":\"applied\",\"operation\":{\"outcome\":\"applied\"}}}", .status = 0 },
+        .{ .command = "draft.send", .reply = "{\"ok\":true,\"data\":{\"dryRun\":true,\"status\":\"planned\",\"sendable\":true}}", .status = 0 },
+        .{ .command = "mail.read", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"unknown\"}}", .status = 0 },
+        .{ .command = "invitation.reply", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"applied\",\"calendarSync\":{}}}", .status = 0 },
+        // 3: rejected or not applied.
+        .{ .command = "draft.send", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"rejected\"}}", .status = 3 },
+        .{ .command = "invitation.reply", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"blocked\",\"errorCode\":\"CalendarPermissionRequired\"}}", .status = 3 },
+        .{ .command = "draft.send", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"preparationStopped\",\"status\":\"stopped\",\"canRetryPreparation\":true}}", .status = 3 },
+        .{ .command = "mail.send", .reply = "{\"ok\":true,\"data\":{\"status\":\"stopped\"}}", .status = 3 },
+        .{ .command = "queue.process", .reply = "{\"ok\":true,\"data\":{\"state\":\"canceled\"}}", .status = 3 },
+        .{ .command = "queue.send-now", .reply = "{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":true}}", .status = 3 },
+        .{ .command = "draft.queue", .reply = "{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":true,\"preparation\":{\"outcome\":\"preparationStopped\",\"status\":\"stopped\"}}}", .status = 3 },
+        .{ .command = "mail.send", .reply = "{\"ok\":true,\"data\":{\"dryRun\":true,\"status\":\"blocked\",\"sendable\":false}}", .status = 3 },
+        .{ .command = "mail.read", .reply = "{\"ok\":false,\"error\":{\"code\":\"UnknownField\",\"retryable\":false}}", .status = 3 },
+        .{ .command = "mail.send", .reply = "{\"ok\":false,\"error\":{\"code\":\"AttachmentPlanBlocked\"}}", .status = 3 },
+        // 4 and 5.
+        .{ .command = "mail.send", .reply = "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}", .status = 4 },
+        .{ .command = "mail.read", .reply = "{\"ok\":false,\"error\":{\"code\":\"MessageNotFound\"}}", .status = 5 },
+        .{ .command = "mail.read", .reply = "{\"ok\":false,\"error\":{\"code\":\"UnknownAccount\"}}", .status = 5 },
+        // 6: the change may have happened.
+        .{ .command = "draft.send", .reply = "{\"ok\":false,\"error\":{\"code\":\"UnknownOutcome\",\"retryable\":false}}", .status = 6 },
+        .{ .command = "mail.send", .reply = "{\"ok\":true,\"data\":{\"outcome\":\"unknown\"}}", .status = 6 },
+        .{ .command = "queue.process", .reply = "{\"ok\":true,\"data\":{\"state\":\"submitting\"}}", .status = 6 },
+        .{ .command = "draft.send", .reply = "{\"ok\":true,\"data\":{\"dryRun\":true,\"status\":\"planned\",\"replay\":{\"outcome\":\"unknown\"}}}", .status = 6 },
+        .{ .command = "contacts.upsert", .reply = "{\"ok\":false,\"error\":{\"code\":\"Timeout\",\"hint\":\"verify\"}}", .status = 6 },
+        // 7: the reply itself says the same request may succeed later.
+        .{ .command = "mail.read", .reply = "{\"ok\":false,\"error\":{\"code\":\"Timeout\",\"retryable\":true}}", .status = 7 },
+        .{ .command = "labels.create", .reply = "{\"ok\":false,\"error\":{\"code\":\"Timeout\",\"retryable\":true}}", .status = 7 },
+        .{ .command = "mail.list", .reply = "{\"ok\":false,\"error\":{\"code\":\"RateLimited\",\"retryable\":true}}", .status = 7 },
+    }) |row| {
+        const frame = try std.json.parseFromSliceLeaky(j.Value, a, row.reply, .{});
+        std.testing.expectEqual(row.status, replyStatus(row.command, frame)) catch |err| {
+            std.debug.print("{s} {s}\n", .{ row.command, row.reply });
+            return err;
+        };
+    }
+    // --strict collapses to 6 when any reply is unknown, else 3, else 0.
+    try std.testing.expectEqual(@as(u8, 6), strictStatus(a, "{\"cmd\":\"draft.send\"}", "{\"ok\":true,\"data\":{\"outcome\":\"unknown\"}}"));
+    try std.testing.expectEqual(@as(u8, 3), strictStatus(a, "{\"cmd\":\"draft.send\"}", "{\"ok\":true,\"data\":{\"outcome\":\"rejected\"}}"));
+    try std.testing.expectEqual(@as(u8, 0), strictStatus(a, "{\"cmd\":\"mail.list\"}", "{\"ok\":true,\"data\":{}}"));
+    try std.testing.expectEqual(@as(u8, 3), strictStatus(a, "{\"cmd\":\"mail.list\"}", "garbage"));
 }

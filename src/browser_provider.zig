@@ -316,8 +316,37 @@ pub const Provider = struct {
         if (self.live_count == 0) return &.{ "mail-read", "contacts-read" };
         return self.live_sessions[index].capabilities();
     }
+    /// The browser provider has no dry-run planner and does not embed the
+    /// JSONL catalogue, so it cannot reject every unknown field. A request
+    /// asking for a dry run in any spelling or nesting must therefore never
+    /// execute as the real change.
+    fn dryRunRequested(request: Value) bool {
+        if (request != .object) return false;
+        var it = request.object.iterator();
+        while (it.next()) |field| {
+            if (dryRunKey(field.key_ptr.*)) return true;
+            if (field.value_ptr.* == .object) {
+                var nested = field.value_ptr.object.iterator();
+                while (nested.next()) |inner| if (dryRunKey(inner.key_ptr.*)) return true;
+            }
+        }
+        return false;
+    }
+    fn dryRunKey(key: []const u8) bool {
+        var folded: [32]u8 = undefined;
+        var len: usize = 0;
+        for (key) |byte| {
+            if (byte == '_' or byte == '-') continue;
+            if (len == folded.len) return false;
+            folded[len] = std.ascii.toLower(byte);
+            len += 1;
+        }
+        for ([_][]const u8{ "dryrun", "simulate", "validateonly", "nosend" }) |name| if (std.mem.eql(u8, folded[0..len], name)) return true;
+        return false;
+    }
     fn dispatch(self: *Provider, a: Allocator, request: Value, cached_call: bool) !Value {
         const cmd = try j.required(request, "cmd");
+        if (dryRunRequested(request)) return error.DryRunUnsupported;
         if (self.live_count == 0) try self.ensureFixtures();
         if (std.mem.eql(u8, cmd, "accounts.list")) {
             var accounts: std.ArrayList(Value) = .empty;

@@ -40,15 +40,21 @@ pub fn main(init: std.process.Init.Minimal) void {
         if (err == error.BackendProtocolMismatch) std.debug.print("{s}\n", .{@import("terminal/vault_transport.zig").mismatch_message});
         if (err == error.UnknownOption and cli.unknown_option_len != 0) {
             const option = cli.unknown_option[0..cli.unknown_option_len];
-            if (cli.nearestOption(option)) |suggestion| std.debug.print("Unknown option {s}; did you mean {s}?\n", .{ option, suggestion }) else std.debug.print("Unknown option {s}.\n", .{option});
+            if (cli.nearestOption(option)) |suggestion| {
+                // A valid option in the wrong place has no better spelling.
+                if (std.mem.eql(u8, suggestion, option)) std.debug.print("Option {s} is not valid here.\n", .{option}) else std.debug.print("Unknown option {s}; did you mean {s}?\n", .{ option, suggestion });
+            } else std.debug.print("Unknown option {s}.\n", .{option});
         }
+        if (err == error.SchemaOptionUnsupported) std.debug.print("{s}{s} is not valid with --schema; use omagma cli --schema [COMMAND] [--compact].\n", .{ if (cli.unknown_option_len != 0) "Option " else "This argument", cli.unknown_option[0..cli.unknown_option_len] });
         if (usageError(err)) {
             std.debug.print("Try omagma --help for available commands and options.\n", .{});
             contextHelpHint(init.args);
             std.process.exit(2);
         }
-        // Exit statuses: 0 ok, 2 usage, 3 rejected request, 4 authorization,
-        // 5 not found, 6 unknown outcome, 1 any other failure.
+        // Exit statuses: 0 ok, 2 usage, 3 rejected or not applied, 4
+        // authorization, 5 not found, 6 unknown outcome, 7 transient (the
+        // reply says retryable:true), 1 any other failure. CommandFailed
+        // carries the status derived from the reply (cli.replyStatus).
         std.process.exit(if (err == error.UnknownOutcome) 6 else 1);
     };
 }
@@ -114,6 +120,15 @@ fn usageError(err: anyerror) bool {
         error.CachedFlagRequiresOneShotCommand,
         error.ServerFlagRequiresSearch,
         error.InvalidUpdatePreference,
+        error.ReplyAllRequiresReply,
+        error.ReplyAcceptsOnlyBody,
+        error.ReplaceRequiresDraftUpdate,
+        error.ContentDigestRequiresSavedDraft,
+        error.DryRunConflictsWithSendDelay,
+        error.PatchRequiresChanges,
+        error.InvalidOptionValue,
+        error.InvalidAccountOption,
+        error.SchemaOptionUnsupported,
         => true,
         else => false,
     };

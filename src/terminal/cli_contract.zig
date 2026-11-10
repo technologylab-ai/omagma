@@ -11,16 +11,38 @@ const Value = j.Value;
 const A = std.mem.Allocator;
 
 /// Accepted by every command besides its own properties (see cli_api commonProperties).
-pub const common_fields = [_][]const u8{ "id", "cmd", "account", "grantFile", "fields" };
+/// The fields projection is not common: only reads accept it (see projectable).
+pub const common_fields = [_][]const u8{ "id", "cmd", "account", "grantFile" };
 /// Added by the native vault client transport; never public request data.
 const envelope_fields = [_][]const u8{ "_vaultId", "_progress", "_cancelOnDisconnect" };
 /// Private TUI commands outside the public catalogue and their accepted fields.
-const Internal = struct { cmd: []const u8, fields: []const []const u8 };
+const Internal = struct { cmd: []const u8, fields: []const []const u8, read: bool };
 const internal_commands = [_]Internal{
-    .{ .cmd = "preferences.get", .fields = &.{} },
-    .{ .cmd = "preferences.set", .fields = &.{"preferences"} },
-    .{ .cmd = "mail.compose-source", .fields = &.{ "messageId", "cacheOnly" } },
+    .{ .cmd = "preferences.get", .fields = &.{}, .read = true },
+    .{ .cmd = "preferences.set", .fields = &.{"preferences"}, .read = false },
+    .{ .cmd = "mail.compose-source", .fields = &.{ "messageId", "cacheOnly" }, .read = true },
 };
+/// fields only reshapes a read. A write or a dry run of one always returns
+/// its complete result: outcome, warnings and identifiers can never be hidden.
+pub fn projectionAllowed(request: Value) bool {
+    if (j.get(request, "dryRun") != null) return false;
+    const command = j.text(request, "cmd");
+    for (internal_commands) |internal| if (eq(internal.cmd, command)) return internal.read;
+    return @import("client_contract.zig").readOnlyRequest(request);
+}
+fn projectionRefused(a: A, command: []const u8, valid: []const []const u8) !Value {
+    var detail = j.object(a);
+    try detail.object.put(a, "code", .{ .string = "UnknownField" });
+    try detail.object.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "fields is only available on read commands; {s} can change state, so it always returns its complete result", .{command}) });
+    try detail.object.put(a, "field", .{ .string = "fields" });
+    var list: Value = .{ .array = .init(a) };
+    for (valid) |item| try list.array.append(.{ .string = item });
+    try detail.object.put(a, "validFields", list);
+    try detail.object.put(a, "hint", .{ .string = "Remove fields. Mutation and dryRun replies keep their outcome, status, warnings and identifiers" });
+    try detail.object.put(a, "help", .{ .string = try std.fmt.allocPrint(a, "omagma cli --schema {s}", .{command}) });
+    try detail.object.put(a, "retryable", .{ .bool = false });
+    return detail;
+}
 /// Common mistakes whose intended field is not a near spelling.
 const Synonym = struct { from: []const u8, to: []const u8 };
 const synonyms = [_]Synonym{
@@ -242,12 +264,18 @@ fn distance(left: []const u8, right: []const u8) usize {
 /// The intended valid name for a mistyped one, or null when nothing is close.
 pub fn nearest(name: []const u8, candidates: []const []const u8) ?[]const u8 {
     for (synonyms) |synonym| if (std.ascii.eqlIgnoreCase(name, synonym.from) and contains(candidates, synonym.to)) return synonym.to;
+    for (candidates) |candidate| if (looselyEqual(name, candidate)) return candidate;
+    // An abbreviation ("q", "lim") means the shortest name it starts; a short
+    // prefix is a stronger signal than a short edit distance to another name.
+    var prefixed: ?[]const u8 = null;
+    if (name.len != 0 and !eq(name, "-") and !eq(name, "--")) for (candidates) |candidate| {
+        if (candidate.len > name.len and std.ascii.startsWithIgnoreCase(candidate, name) and (prefixed == null or candidate.len < prefixed.?.len)) prefixed = candidate;
+    };
+    if (prefixed) |candidate| return candidate;
     var best: ?[]const u8 = null;
     var best_score: usize = std.math.maxInt(usize);
     for (candidates) |candidate| {
-        if (looselyEqual(name, candidate)) return candidate;
-        var score = distance(name, candidate);
-        if (name.len >= 3 and candidate.len > name.len and std.ascii.startsWithIgnoreCase(candidate, name)) score = @min(score, 1);
+        const score = distance(name, candidate);
         if (score < best_score) {
             best = candidate;
             best_score = score;
@@ -281,17 +309,54 @@ fn unsupported(a: A, catalogue: *Catalogue, command: []const u8) !Value {
     return detail;
 }
 
+/// An object schema that deliberately has no declared properties: a returned
+/// read-only/internal value passed back unchanged, or an explicitly open map.
+fn opaqueObject(found: []const Shape) bool {
+    for (found) |shape| {
+        if (j.boolean(shape.schema, "readOnly", false) catch false) return true;
+        if (internalField(shape.schema)) return true;
+        if (j.get(shape.schema, "additionalProperties")) |open| if (open == .bool and open.bool) return true;
+    }
+    return false;
+}
+/// Whether an object can satisfy these shapes: one admits type object, or
+/// none constrains the type at all (an unconstrained schema).
+fn admitsObject(found: []const Shape) bool {
+    var typed = false;
+    for (found) |shape| if (j.get(shape.schema, "type")) |declared_type| {
+        typed = true;
+        if (declared_type == .string and eq(declared_type.string, "object")) return true;
+        if (declared_type == .array) for (declared_type.array.items) |item| if (item == .string and eq(item.string, "object")) return true;
+    };
+    return !typed;
+}
+fn undeclaredNested(a: A, command: []const u8, path: []const u8) !Value {
+    var detail = j.object(a);
+    try detail.object.put(a, "code", .{ .string = "UnknownField" });
+    try detail.object.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "{s}: the contract declares no fields for '{s}', so this write is refused instead of running with unchecked data", .{ command, path }) });
+    try detail.object.put(a, "field", .{ .string = path });
+    try detail.object.put(a, "help", .{ .string = try std.fmt.allocPrint(a, "omagma cli --schema {s}", .{command}) });
+    try detail.object.put(a, "retryable", .{ .bool = false });
+    return detail;
+}
+
 const Walker = struct {
     a: A,
     catalogue: *Catalogue,
     command: []const u8,
+    /// Writes fail closed on a nested object whose schema declares nothing.
+    mutating: bool = true,
     fn walk(self: *Walker, path: []const u8, value: Value, schemas: []const Value, depth: usize) anyerror!?Value {
         if (depth > 32 or schemas.len == 0) return null;
         const found = try self.catalogue.shapes(schemas);
         switch (value) {
             .object => |map| {
                 var names: std.ArrayList([]const u8) = .empty;
-                if (!try declared(self.a, found, &names, false)) return null;
+                if (!try declared(self.a, found, &names, false)) {
+                    // A type mismatch is reported later with its expected type.
+                    if (!self.mutating or opaqueObject(found) or !admitsObject(found)) return null;
+                    return try undeclaredNested(self.a, self.command, path);
+                }
                 var it = map.iterator();
                 while (it.next()) |field| {
                     const name = field.key_ptr.*;
@@ -331,6 +396,11 @@ pub fn check(a: A, request: Value) !?Value {
             var valid: std.ArrayList([]const u8) = .empty;
             try valid.appendSlice(a, internal.fields);
             try valid.appendSlice(a, &common_fields);
+            if (eq(name, "fields")) {
+                if (internal.read) continue;
+                return try projectionRefused(a, command, valid.items);
+            }
+            if (internal.read) try valid.append(a, "fields");
             return try unknownField(a, command, "", name, valid.items);
         }
         return null;
@@ -340,20 +410,53 @@ pub fn check(a: A, request: Value) !?Value {
     const found = try catalogue.shapes(&.{entry});
     var names: std.ArrayList([]const u8) = .empty;
     _ = try declared(a, found, &names, false);
-    var walker: Walker = .{ .a = a, .catalogue = &catalogue, .command = command };
+    const mutating = !@import("client_contract.zig").readOnlyRequest(request);
+    var walker: Walker = .{ .a = a, .catalogue = &catalogue, .command = command, .mutating = mutating };
     var it = request.object.iterator();
     while (it.next()) |field| {
         const name = field.key_ptr.*;
         if (contains(&envelope_fields, name) or contains(&common_fields, name)) continue;
+        const projection = eq(name, "fields") and @import("cli_api.zig").projectable(command);
+        if (projection and projectionAllowed(request)) continue;
         if (!contains(names.items, name)) {
             var public: std.ArrayList([]const u8) = .empty;
             _ = try declared(a, found, &public, true);
             for (common_fields) |common| if (!eq(common, "cmd")) try public.append(a, common);
+            if (@import("cli_api.zig").projectable(command) and !mutating) try public.append(a, "fields");
+            // A write (or reconcile/dry run) never drops parts of its result.
+            if (eq(name, "fields")) return try projectionRefused(a, command, public.items);
             return try unknownField(a, command, "", name, public.items);
         }
         if (try walker.walk(name, field.value_ptr.*, try propertySchemas(a, found, name), 1)) |detail| return detail;
     }
+    if (eq(command, "draft.patch")) if (j.get(request, "set")) |changes| if (changes == .object) {
+        var keys = changes.object.iterator();
+        while (keys.next()) |field| {
+            const name = field.key_ptr.*;
+            const same_id = eq(name, "id") and field.value_ptr.* == .string and eq(field.value_ptr.string, j.text(request, "draftId"));
+            if ((eq(name, "id") and !same_id) or contains(&patch_read_only, name)) return try readOnlyRefusal(a, command, name);
+        }
+    };
     return null;
+}
+/// Fields a patch can never set: returned read-only values, the target's own
+/// ID and unfinished recovery fields (core enforces the same list).
+const patch_read_only = [_][]const u8{ "recoveryFields", "contentDigest", "gmailLink", "summaryCounts" };
+fn readOnlyRefusal(a: A, command: []const u8, name: []const u8) !Value {
+    var detail = j.object(a);
+    const field = try join(a, "set", name);
+    try detail.object.put(a, "code", .{ .string = "ReadOnlyField" });
+    try detail.object.put(a, "field", .{ .string = field });
+    try detail.object.put(a, "message", .{ .string = if (eq(name, "recoveryFields"))
+        try std.fmt.allocPrint(a, "{s}: '{s}' cannot be patched; unfinished raw fields are saved with draft.recovery-save and finished with draft.update", .{ command, field })
+    else if (eq(name, "id"))
+        try std.fmt.allocPrint(a, "{s}: '{s}' is read-only; draftId selects the draft to patch", .{ command, field })
+    else
+        try std.fmt.allocPrint(a, "{s}: '{s}' is read-only (returned by draft.read); to bind this patch to the reviewed version pass expectedContentDigest", .{ command, field }) });
+    try detail.object.put(a, "hint", .{ .string = "Patch editable fields only; pass expectedContentDigest from draft.read or draft.measure to refuse a changed draft" });
+    try detail.object.put(a, "help", .{ .string = try std.fmt.allocPrint(a, "omagma cli --schema {s}", .{command}) });
+    try detail.object.put(a, "retryable", .{ .bool = false });
+    return detail;
 }
 
 /// Documented harmless aliases are rewritten after validation.
@@ -617,8 +720,18 @@ const hints = [_]Hint{
     .{ .code = "Timeout", .text = "Retry after a short delay; for sends inspect operation.read first" },
     .{ .code = "CacheWindowRequiresCached", .text = "Add cacheOnly:true or remove beforeMessageId/afterMessageId" },
     .{ .code = "EventNotFound", .text = "Use an event id returned by calendar.agenda for this calendar" },
+    .{ .code = "ReadOnlyFieldChanged", .text = "Read the draft again with draft.read and pass back its read-only fields unchanged, or omit them" },
+    .{ .code = "EmptyMutation", .text = "Add at least one change: unread, starred, addLabels or removeLabels" },
+    .{ .code = "DryRunUnsupported", .text = "dryRun is available on mail.send, draft.send, draft.queue, mail.batch, mail.archive, mail.trash, mail.restore and mail.mark" },
 };
-const transient = [_][]const u8{ "CacheBusy", "Timeout", "RateLimited", "TransientFailure", "VaultBusy", "OperationPending", "CacheChanged", "NetworkUnreachable", "ConnectionRefused", "ConnectionTimedOut", "ConnectionResetByPeer" };
+const transient = [_][]const u8{ "CacheBusy", "Timeout", "Canceled", "RateLimited", "TransientFailure", "NetworkFailure", "VaultBusy", "OperationPending", "CacheChanged", "NetworkUnreachable", "ConnectionRefused", "ConnectionTimedOut", "ConnectionResetByPeer" };
+/// Interruptions after which a request may already have reached the provider
+/// or the local store. Others (busy, rate limit, refused connection) fail
+/// before any write starts.
+const interrupted = [_][]const u8{ "Timeout", "Canceled", "TransientFailure", "NetworkFailure", "ConnectionTimedOut", "ConnectionResetByPeer" };
+pub fn interruption(code: []const u8) bool {
+    return contains(&interrupted, code);
+}
 /// true: the same request may succeed later. false: retrying unchanged is
 /// pointless or unsafe. null: depends on context, so the field is omitted.
 pub fn retryable(code: []const u8) ?bool {
@@ -626,6 +739,23 @@ pub fn retryable(code: []const u8) ?bool {
     if (eq(code, "UnknownOutcome") or eq(code, "UnknownField") or eq(code, "UnsupportedCommand") or eq(code, "OperationConflict") or eq(code, "DraftReplaceWouldDropThreading") or eq(code, "PermissionDenied") or eq(code, "CacheWindowRequiresCached")) return false;
     for ([_][]const u8{ "Invalid", "Missing", "Conflicting", "Unknown" }) |prefix| if (std.mem.startsWith(u8, code, prefix)) return false;
     return null;
+}
+/// A write that an interruption may have applied and that has no replay
+/// identity (operationId or undoToken): repeating it could apply it twice.
+pub fn unsafeToRepeat(a: A, catalogue: *Catalogue, request: Value, code: []const u8) !bool {
+    if (!interruption(code) or @import("client_contract.zig").readOnlyRequest(request)) return false;
+    const entry = (try catalogue.command(j.text(request, "cmd"))) orelse return true;
+    const found = try catalogue.shapes(&.{entry});
+    for ([_][]const u8{ "operationId", "undoToken" }) |identity| if ((try propertySchemas(a, found, identity)).len != 0) return false;
+    return true;
+}
+/// The read that settles whether an interrupted write was applied.
+fn verifyHint(command: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, command, "mail.")) return "This change may already be applied. Check the current labels with mail.read or mail.label-state before repeating it";
+    if (std.mem.startsWith(u8, command, "contacts.")) return "The contact may already be saved. Check with contacts.search before repeating it; a repeated creation can add a duplicate";
+    if (std.mem.startsWith(u8, command, "reminder.")) return "The follow-up may already be saved. Read reminder.list before repeating, with the version it reports";
+    if (std.mem.startsWith(u8, command, "draft.")) return "The draft may already be saved. Check draft.list or draft.read before repeating; a repeated draft.create can save a second copy";
+    return "This write may already be applied. Verify the current state with the matching read command before repeating it";
 }
 /// Complete error object for a failed request: stable code, a human sentence
 /// and, when known, field-level details, a next step and retry guidance.
@@ -649,6 +779,14 @@ pub fn explain(a: A, request: ?Value, code: []const u8, message: []const u8, con
     };
     if (eq(code, "UnknownAccount")) try putList(a, &detail, "configured", configured);
     for (hints) |hint| if (eq(hint.code, code)) try detail.object.put(a, "hint", .{ .string = hint.text });
+    if (request) |value| if (value == .object) {
+        var catalogue = try Catalogue.init(a);
+        if (try unsafeToRepeat(a, &catalogue, value, code)) {
+            // Never invite a blind repeat of a write that may have happened.
+            try detail.object.put(a, "hint", .{ .string = verifyHint(j.text(value, "cmd")) });
+            return detail;
+        }
+    };
     if (retryable(code)) |flag| try detail.object.put(a, "retryable", .{ .bool = flag });
     return detail;
 }
@@ -759,4 +897,85 @@ test "cli contract: nearest names prefer documented synonyms, loose spelling and
     try std.testing.expectEqualStrings("all", nearest("replyAll", &fields).?);
     try std.testing.expectEqualStrings("summary", nearest("title", &fields).?);
     try std.testing.expect(nearest("fictionalUnrelatedName", &fields) == null);
+    // An abbreviation names the field it starts, not a short edit away.
+    const list = [_][]const u8{ "limit", "query", "label", "cursor", "cacheOnly", "id", "account" };
+    try std.testing.expectEqualStrings("query", nearest("q", &list).?);
+    try std.testing.expectEqualStrings("limit", nearest("lim", &list).?);
+    try std.testing.expectEqualStrings("cursor", nearest("cur", &list).?);
+}
+test "cli contract: interrupted writes without a replay identity never claim to be retryable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { raw: []const u8, code: []const u8, retryable: ?bool };
+    for ([_]Case{
+        // Reads and operationId/undoToken writes replay safely.
+        .{ .raw = "{\"cmd\":\"mail.read\",\"account\":\"f@example.test\",\"messageId\":\"m\"}", .code = "Timeout", .retryable = true },
+        .{ .raw = "{\"cmd\":\"draft.send\",\"account\":\"f@example.test\",\"draftId\":\"d\",\"operationId\":\"op\"}", .code = "Timeout", .retryable = true },
+        .{ .raw = "{\"cmd\":\"labels.create\",\"account\":\"f@example.test\",\"name\":\"N\",\"operationId\":\"op\"}", .code = "Canceled", .retryable = true },
+        .{ .raw = "{\"cmd\":\"mail.undo\",\"account\":\"f@example.test\",\"undoToken\":\"u\"}", .code = "Timeout", .retryable = true },
+        // Writes without one may already have happened.
+        .{ .raw = "{\"cmd\":\"contacts.upsert\",\"account\":\"f@example.test\",\"contact\":{\"name\":\"N\"}}", .code = "Timeout", .retryable = null },
+        .{ .raw = "{\"cmd\":\"mail.archive\",\"account\":\"f@example.test\",\"messageId\":\"m\"}", .code = "Canceled", .retryable = null },
+        .{ .raw = "{\"cmd\":\"reminder.set\",\"account\":\"f@example.test\",\"messageId\":\"m\",\"expectedVersion\":0,\"dueDate\":\"2026-11-11\"}", .code = "NetworkFailure", .retryable = null },
+        .{ .raw = "{\"cmd\":\"draft.create\",\"account\":\"f@example.test\",\"draft\":{}}", .code = "Timeout", .retryable = null },
+        .{ .raw = "{\"cmd\":\"invitation.inspect\",\"account\":\"f@example.test\",\"messageId\":\"m\",\"reconcile\":true}", .code = "Timeout", .retryable = null },
+        // Failures before any write starts stay retryable everywhere.
+        .{ .raw = "{\"cmd\":\"contacts.upsert\",\"account\":\"f@example.test\",\"contact\":{\"name\":\"N\"}}", .code = "RateLimited", .retryable = true },
+        .{ .raw = "{\"cmd\":\"mail.mark\",\"account\":\"f@example.test\",\"messageId\":\"m\",\"starred\":true}", .code = "CacheBusy", .retryable = true },
+    }) |case| {
+        const detail = try explain(a, try parseTest(a, case.raw), case.code, case.code, &.{});
+        const flag = j.get(detail, "retryable");
+        if (case.retryable) |expected| {
+            try std.testing.expectEqual(expected, flag.?.bool);
+        } else {
+            try std.testing.expect(flag == null);
+            try std.testing.expect(std.mem.indexOf(u8, j.text(detail, "hint"), "before repeating") != null);
+        }
+    }
+}
+test "cli contract: every nested object in the catalogues declares its fields or is explicitly opaque" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var catalogue = try Catalogue.init(a);
+    const Visit = struct {
+        fn walk(c: *Catalogue, al: A, command: []const u8, path: []const u8, schemas: []const Value, depth: usize, checked: *usize) anyerror!void {
+            if (depth > 12 or schemas.len == 0) return;
+            const found = try c.shapes(schemas);
+            var names: std.ArrayList([]const u8) = .empty;
+            const has_properties = try declared(al, found, &names, false);
+            if (admitsObject(found)) {
+                checked.* += 1;
+                if (!has_properties and !opaqueObject(found)) {
+                    std.debug.print("{s}: nested object '{s}' declares no properties\n", .{ command, path });
+                    return error.UndeclaredNestedObject;
+                }
+            }
+            for (names.items) |name| try walk(c, al, command, try join(al, path, name), try propertySchemas(al, found, name), depth + 1, checked);
+            var items: std.ArrayList(Value) = .empty;
+            for (found) |shape| if (j.get(shape.schema, "items")) |item| if (item == .object) try items.append(al, item);
+            try walk(c, al, command, try std.fmt.allocPrint(al, "{s}[]", .{path}), items.items, depth + 1, checked);
+        }
+    };
+    var checked: usize = 0;
+    for (try catalogue.commandNames()) |name| {
+        const entry = (try catalogue.command(name)).?;
+        const found = try catalogue.shapes(&.{entry});
+        var names: std.ArrayList([]const u8) = .empty;
+        _ = try declared(a, found, &names, false);
+        for (names.items) |field| try Visit.walk(&catalogue, a, name, field, try propertySchemas(a, found, field), 1, &checked);
+    }
+    // draft, set, event, contact, color, original, attachments ... were visited.
+    try std.testing.expect(checked > 100);
+    // A nested object schema without properties fails closed for writes.
+    var walker: Walker = .{ .a = a, .catalogue = &catalogue, .command = "fictional.write", .mutating = true };
+    const open_schema = try parseTest(a, "{\"type\":\"object\"}");
+    const value = try parseTest(a, "{\"anything\":true}");
+    const refused = (try walker.walk("payload", value, &.{open_schema}, 1)).?;
+    try std.testing.expectEqualStrings("UnknownField", j.text(refused, "code"));
+    try std.testing.expectEqualStrings("payload", j.text(refused, "field"));
+    for ([_][]const u8{ "{\"type\":\"object\",\"readOnly\":true}", "{\"type\":[\"object\",\"null\"],\"x-internal\":true}", "{\"type\":\"object\",\"additionalProperties\":true}", "{\"type\":\"string\"}" }) |raw| try std.testing.expect(try walker.walk("payload", value, &.{try parseTest(a, raw)}, 1) == null);
+    walker.mutating = false;
+    try std.testing.expect(try walker.walk("payload", value, &.{open_schema}, 1) == null);
 }

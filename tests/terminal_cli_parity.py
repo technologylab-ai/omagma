@@ -33,7 +33,7 @@ CASES = ("invitations", "uncertainty", "permissions", "browser", "attachments", 
 PROFILES = ("Profile 3", "Profile 1", "Profile 2")
 
 
-def one_shot(client, family, verb, arguments=(), account=ACCOUNTS[0], stdin=b"", error=None):
+def one_shot(client, family, verb, arguments=(), account=ACCOUNTS[0], stdin=b"", error=None, status=None):
     argv = [str(client.binary), family, verb, "--fixtures", "--fixture-root", str(FIXTURES),
             "--cache-dir", str(client.directory / "cache")]
     if client.scenario:
@@ -58,7 +58,11 @@ def one_shot(client, family, verb, arguments=(), account=ACCOUNTS[0], stdin=b"",
     require(reply.get("version") == 1 and reply.get("ok") is (error is None),
             f"one-shot {family} {verb} returned version={reply.get('version')}, ok={reply.get('ok')}, "
             f"error={reply.get('error', {}).get('code')}; expected {error or 'success'}")
-    require((result.returncode == 0) is (error is None), "one-shot exit status disagreed with outcome")
+    # An ok:true send/RSVP receipt exits by its outcome: 3 blocked/rejected, 6 unknown.
+    if status is not None:
+        require(result.returncode == status, f"one-shot exited {result.returncode}, expected {status} for its outcome")
+    else:
+        require((result.returncode == 0) is (error is None), "one-shot exit status disagreed with outcome")
     if account is not None:
         require(reply.get("account") == account, "one-shot response lost selected account")
     if error:
@@ -82,7 +86,7 @@ def invitations(binary, directory):
                 for status in ("accepted", "tentative"):
                     operation_id = "blocked-default-" + status
                     blocked = one_shot(client, "invitations", "reply",
-                                       [*flags, "--status", status, "--operation-id", operation_id])
+                                       [*flags, "--status", status, "--operation-id", operation_id], status=3)
                     require(blocked["outcome"] == "blocked" and blocked["calendarSync"]["errorCode"]
                             and blocked["errorCode"] == blocked["calendarSync"]["errorCode"],
                             "default one-shot RSVP did not disclose its Calendar preflight blocker")
@@ -188,7 +192,7 @@ def uncertainty(binary, directory):
     for scenario, sends in (("unknown-send", 0), ("applied-lost", 1)):
         with Client(binary, directory / scenario, scenario=scenario, extra=source.options()) as client:
             flags = ["--message-id", "invite-named-octet", "--status", "tentative", "--rsvp-only"]
-            first = one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"])
+            first = one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"], status=6)
             require(first["outcome"] == "unknown", "one-shot lost-response scenario claimed certainty")
             reply_identity(first, "named-octet", ACCOUNTS[0], "tentative", "uncertain-one-shot")
             require(first["calendarSync"] == {"state": "skipped", "calendarId": "", "eventId": "",
@@ -202,7 +206,7 @@ def uncertainty(binary, directory):
                                                "operationId": "", "errorCode": "RsvpOnlyRequested", "canRetry": False}}
             require(journal == [stored], "unknown RSVP lost its durable mail receipt or mail-only policy")
             before = client.request("cache.stats")
-            require(one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"]) == first,
+            require(one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"], status=6) == first,
                     "same-ID one-shot retry changed the uncertain RSVP receipt")
             one_shot(client, "invitations", "reply", [*flags, "--operation-id", "changed-id-one-shot"], error="UnknownOutcome")
             client.restart()

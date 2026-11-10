@@ -26,9 +26,9 @@ configuration, authorization or network access.
 | `omagma contacts upsert --help-all` | Contact flags plus the complete bare Contact file schema |
 | `omagma cli --help-options` | Launch/config/cache/fixture/resource options |
 | `omagma cli --help mail.read` | Compact card: summary, capabilities, required and optional fields with types, defaults and enums, and one example |
-| `omagma cli --manifest` | One compact JSON index of every command: summary, capabilities, required/optional fields, whether it mutates and its idempotency key |
+| `omagma cli --manifest` | One compact JSON index of every command: summary, capabilities, required/optional fields, whether it mutates (`mutatesWhen` names a conditional trigger such as `reconcile:true`) and its idempotency key |
 | `omagma cli --schema mail.read` | Machine-readable JSON Schema for that request, with all referenced types included |
-| `omagma cli --schema mail.read --compact` | The same schema minified, without the shared id/grantFile/fields block |
+| `omagma cli --schema mail.read --compact` | The same schema minified, without the shared id/grantFile block |
 | `omagma cli --schema` | Machine-readable schemas for all public JSONL commands |
 | `omagma cli --help-all` | Complete offline JSONL reference, including shared object definitions |
 | `omagma --help-all` | Extended command overview |
@@ -160,9 +160,19 @@ the account-scoped JSONL protocol. See [updates](UPDATES.md).
 Errors use `ok:false,error:{code,message}`; `code` is the stable contract and
 `message` a human sentence. When known, the error also names the `field`, the
 `expected` type, `enum`, `minimum`/`maximum` or `required` list, a `hint` with
-the next step, `retryable` (true for CacheBusy, Timeout, RateLimited and
-TransientFailure; false for UnknownOutcome and request errors), `configured`
-addresses for UnknownAccount and `didYouMean` for a misspelled field or `cmd`.
+the next step, `retryable`, `configured` addresses for UnknownAccount and
+`didYouMean` for a misspelled field, an abbreviation (`q` → `query`) or `cmd`.
+
+`retryable:true` means the same request may succeed later unchanged:
+CacheBusy, RateLimited, VaultBusy, refused connections, and interruptions
+(Timeout, Canceled, TransientFailure, NetworkFailure, reset connections) of a
+read or of a write that has its own replay identity (`operationId`, or
+`undoToken` for mail.undo). An interrupted write **without** such an identity
+— for example `contacts.upsert`, `mail.archive`/`mark`/`batch`, `reminder.*`
+or `draft.create`/`update`/`patch` — may already have been applied, so its
+error omits `retryable` and its `hint` names the read that settles it
+(mail.read/mail.label-state, contacts.search, reminder.list, draft.list).
+`retryable:false` marks UnknownOutcome and request errors.
 
 **Requests are strict.** Every field must appear in the command's schema
 (`omagma cli --schema CMD`). An unknown or misspelled field, at the top level
@@ -171,7 +181,15 @@ runs, for example
 `{"code":"UnknownField","field":"draft.body","message":"draft.create has no field 'draft.body'","didYouMean":"draft.bodyText","validFields":[...],"help":"omagma cli --schema draft.create"}`.
 Returned objects can be passed back unchanged: a draft from `draft.read`
 (including `contentDigest`/`gmailLink`) or a contact with `readWarnings`.
+`draft.update` compares those read-only draft fields with the saved draft: a
+`contentDigest` that no longer matches fails `ReviewedDraftChanged` (the draft
+changed since that read) and an edited `gmailLink`/`summaryCounts` fails
+`ReadOnlyFieldChanged`. `draft.patch` never accepts them, a different `id` or
+`recoveryFields` in `set` (`ReadOnlyField`); bind a patch to a reviewed version
+with `expectedContentDigest`. Nested objects of a write must declare their
+fields in the schema; an undeclared nested object is refused, not ignored.
 `replyAll` is an accepted alias of `all` on `mail.reply`.
+A repeated JSON key is refused as `InvalidRequest` ("duplicate key").
 id may be a string, integer or null.
 Ordinary requests are at most 3 MiB; nesting is limited to 64. Selected native
 compose commands, including replies, forwards, draft editing/review and
@@ -183,7 +201,7 @@ requests retain the 3 MiB limit. See [all limits](TERMINAL.md#bounds-and-recover
 Optional string fields must be strings or omitted, not JSON null. Tokens never
 appear in this interface.
 
-Except `accounts.list`, **every command requires an explicit configured account**. `omagma cli --account ADDRESS` fills it in for lines that omit it; a line's own `account` always wins. `omagma cli --strict` exits with status 3 at EOF when any reply had `ok:false`. Provider message/thread IDs can collide across accounts. Never reuse a cursor, draft ID, contact or operation from another account. `accounts.list` reports enabled accounts and locally configured capabilities; successful provider authorization is checked again before network access. Private config and grant registry are not message data.
+Except `accounts.list`, **every command requires an explicit configured account**. `omagma cli --account ADDRESS` fills it in for lines that omit it; a line's own `account` always wins (an invalid `--account` is a usage error, status 2). `omagma cli --strict` exits at EOF with 6 when any reply was `UnknownOutcome` or reported a send/RSVP outcome or queue state `unknown`/`submitting` (or an interrupted write without replay identity), else 3 when any reply had `ok:false` or reported a send/RSVP that was not applied (rejected, blocked, preparationStopped, stopped, canceled, a blocked dry run), else 0. Provider message/thread IDs can collide across accounts. Never reuse a cursor, draft ID, contact or operation from another account. `accounts.list` reports enabled accounts and locally configured capabilities; successful provider authorization is checked again before network access. Private config and grant registry are not message data.
 
 ```sh
 omagma cli --fixtures --cache-dir /absolute/private/mock-cache
@@ -201,10 +219,22 @@ Send lines such as:
 
 Recommended agent defaults: `view:"summary"` for lists, threads and contacts;
 `body:"text"` with `maxBodyBytes`/`stripQuoted` for reads (the default `body`
-stays `both` for compatibility); `fields` to keep only what the task needs;
-`dryRun:true` before any send or label change. These lines run unchanged
-against `omagma cli --fixtures` (replace each `RETURNED_*` value with the
-previous reply's `id` or `contentDigest`):
+stays `both` for compatibility); `fields` to keep only what a **read** needs;
+`dryRun:true` before any send or label change. `fields` is refused
+(`UnknownField`) on every command that can change state, including dry runs
+and `invitation.inspect` with `reconcile:true`: their replies always carry the
+complete outcome, status, warnings and identifiers. A read projection always
+keeps truncation, paging and warning markers that are set (`bodyTruncated`,
+`bodyBytes`, `bodyHtmlBytes`, `quotedStripped`, `partial`, `hasMore`,
+`nextCursor`, `decodeWarning`, `bodyCacheError`, `metadataPartial`,
+`complete:false`, `stale`, `readWarnings`). With `body:"text"`, truncation
+flags and sizes describe only the text that is returned. `stripQuoted` removes
+quoted lines only after an attribution line ("On … wrote:", "Am … schrieb …:",
+"… a écrit :", "… escribió:") or as the trailing quoted block, and cuts at
+`-----Original Message-----` or at an underscore rule followed by a
+From:/Sent: header block; inline replies between quotes stay. These lines run
+unchanged against `omagma cli --fixtures` (replace each `RETURNED_*` value with
+the previous reply's `id` or `contentDigest`):
 
 ```jsonl
 {"id":"1","cmd":"accounts.list"}
@@ -212,9 +242,9 @@ previous reply's `id` or `contentDigest`):
 {"id":"3","cmd":"mail.search","account":"personal@example.com","query":"invitation","limit":10,"view":"summary"}
 {"id":"4","cmd":"mail.read","account":"personal@example.com","messageId":"shared-msg-005","body":"text","stripQuoted":true,"maxBodyBytes":4000,"attachmentData":false}
 {"id":"5","cmd":"mail.thread","account":"personal@example.com","threadId":"shared-thread-001","view":"summary"}
-{"id":"6","cmd":"mail.reply","account":"personal@example.com","messageId":"shared-msg-005","all":true,"bodyText":"Thanks, Thursday works.","fields":["id","to","cc","subject"]}
+{"id":"6","cmd":"mail.reply","account":"personal@example.com","messageId":"shared-msg-005","all":true,"bodyText":"Thanks, Thursday works."}
 {"id":"7","cmd":"draft.patch","account":"personal@example.com","draftId":"RETURNED_DRAFT_ID","set":{"bodyText":"Thanks, Thursday at 10:00 works."},"acknowledgementOnly":true}
-{"id":"8","cmd":"draft.send","account":"personal@example.com","draftId":"RETURNED_DRAFT_ID","operationId":"reply-thursday-1","dryRun":true,"fields":["status","sendable","to","cc","contentDigest"]}
+{"id":"8","cmd":"draft.send","account":"personal@example.com","draftId":"RETURNED_DRAFT_ID","operationId":"reply-thursday-1","dryRun":true}
 {"id":"9","cmd":"draft.send","account":"personal@example.com","draftId":"RETURNED_DRAFT_ID","operationId":"reply-thursday-1","expectedContentDigest":"RETURNED_CONTENT_DIGEST"}
 {"id":"10","cmd":"mail.archive","account":"personal@example.com","messageId":"shared-msg-005","dryRun":true}
 {"id":"11","cmd":"mail.archive","account":"personal@example.com","messageId":"shared-msg-005"}
@@ -224,9 +254,13 @@ previous reply's `id` or `contentDigest`):
 {"id":"15","cmd":"mail.list","account":"personal@example.com","label":"INBOX","limit":5,"fields":["id","subject","unread"]}
 ```
 
-Check `ok` on every reply. Line 8 sends nothing; line 9 sends only the content
-reviewed there, or fails with `ReviewedDraftChanged`. Line 11 replies with a
-compact receipt; add `"view":"message"` for the full message.
+Check `ok` on every reply, and `data.outcome` on sends. Line 8 sends nothing
+and returns the complete plan (`status`, `sendable`, recipients and
+`contentDigest`); line 9 sends only the content reviewed there, or fails with
+`ReviewedDraftChanged`. Line 11 replies with a compact receipt; add
+`"view":"message"` for the full message. A label dry run (line 10) and the real
+change refuse the same requests: an unknown message (`MessageNotFound`), an
+empty `mail.mark` (`EmptyMutation`), conflicting labels or an invalid `scope`.
 
 ## Commands
 
@@ -258,8 +292,8 @@ compact receipt; add `"view":"message"` for the full message.
 | mail.batch | messageIds (1..100 distinct IDs), action archive/trash/restore/spam/unspam/mark, optional unread/starred/addLabels/removeLabels; per-ID outcomes and undoToken; dryRun:true resolves label IDs and per-message changes only |
 | mail.undo | undoToken; restores only actual touched-label changes for confirmed successful batch items |
 | draft.create / update | draft with bodyText source and optional bodyFormat plain/markdown; update also requires draftId and replaces editable fields, refusing (DraftReplaceWouldDropThreading) to drop saved recipients or threading unless replace:true |
-| draft.patch | draftId and set:{fields}; changes only the supplied fields and keeps recipients, threading, attachments and original; optional expectedContentDigest |
-| draft.preview | draft or draftId; bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
+| draft.patch | draftId and set:{fields}; changes only the supplied fields and keeps recipients, threading, attachments and original; optional expectedContentDigest; set refuses read-only contentDigest/gmailLink/summaryCounts, a different id and recoveryFields (ReadOnlyField) |
+| draft.preview | draft or draftId, optional operationId (reuses that send's recorded Drive receipts in attachmentPlan); bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
 | draft.open-preview | draftId; writes a bounded private sandboxed HTML preview and explicitly opens this account's Chrome profile; sends no mail |
 | draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent; explicit forkIfSettled/copyFromDraftId preserve local edits under a new ID |
 | draft.list / read / send / discard | list pages compact active summaries with limit/cursor; read/send/discard require draftId; send also requires operationId |
@@ -270,7 +304,7 @@ compact receipt; add `"view":"message"` for the full message.
 | contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag; omitted emails on name-only updates preserve all supported addresses/provider metadata |
 | invitation.inspect | messageId; optional cacheOnly or reconcile; identities, friendly time displays, joinUrl, attendeeStatus, confirmedResponse, responseOutcome and calendarSync |
 | invitation.reply | messageId,status accepted/tentative/declined,operationId; optional rsvpOnly:true explicitly sends email without Calendar; default Accept/Tentative can return outcome:blocked before submission |
-| operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
+| operation.list / read | list accepts optional draftId to return only that draft's operations; read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
 | cache.refresh-status | refreshInProgress for this account; no mail or token data |
 | cache.activity | local-only inboxArrivalCount, generation, lastSyncAt; arrival serial advances on successful incoming Inbox history checkpoints |
@@ -297,9 +331,13 @@ Calendar event points. Messages also carry `rfcMessageId`, a copy of their RFC
 `messageId` header; a message's `id` is the value to pass as request
 `messageId`. The TUI's local-time display does not change these values.
 `calendar.agenda`/`calendar.freebusy` `date` and `reminder.set` `dueDate`
-accept `today`, `tomorrow`, `yesterday`, `+Nd`/`-Nd` and weekday names (next
-occurrence, today included); the reply echoes the civil date as `resolvedDate`.
-`calendarId:"primary"` selects the account's primary calendar.
+accept `today`, `tomorrow`, `yesterday`, `+Nd`/`-Nd` and weekday names; the
+reply echoes the civil date as `resolvedDate`. A Calendar date resolves in the
+zone that also builds its window: the request `timeZone`, else the selected
+calendar's time zone, else the local zone; a weekday name there means its next
+occurrence with today included. A `reminder.set` due date resolves in the local
+zone, and a weekday name equal to today means **next week's** day (use `today`
+for today). `calendarId:"primary"` selects the account's primary calendar.
 
 For a local-only lookup, set `cacheOnly:true` on `mail.list`, `mail.read`, `mail.thread` or `cache.stats`. One-shot commands use `--cached`. This path does not contact Gmail and remains available while a separate client refreshes the account. Cached `mail.read` returns a known final body refusal as a successful metadata-only message with `bodyCached:false`, a nonempty `bodyCacheError`, and no plain-text or HTML body. An absent message or uncached body without such a refusal returns `CacheMiss`; cached threads can be partial. Cached list results report cache readiness, age and partial state, and have their own account/query/generation-scoped cursors. The end of cached pagination means the end of that bounded cache view, not proof that Gmail has no more results. Provider and cache cursors are distinct; pass each only to the matching operation. Arbitrary Gmail searches require a recorded provider result rather than an invented local approximation. See [cache-first behavior](TUI-CACHE.md).
 
@@ -553,15 +591,17 @@ ordinary files or retained resources.
   authorization, network or store write; the reply sets `dryRun` and
   `mimeEstimate`.
 
-Dry-run requires supplied draft source, rather than `--draft-id` or `--browser`.
-A Draft file containing stored blob handles returns `DryRunRequiresLocalFiles`;
-use `draft preview --draft-id ID` or JSONL `draft.delivery-plan` for a saved
-draft. A blocked dry-run returns `ok:false`, `data.status:"blocked"` and a
+This local file dry run requires supplied draft source, rather than `--draft-id`
+or `--browser`. A Draft file containing stored blob handles returns
+`DryRunRequiresLocalFiles`; for a saved draft use `draft send|queue --draft-id
+ID --operation-id ID --dry-run` (the JSONL plan below), `draft preview
+--draft-id ID` or JSONL `draft.delivery-plan`. A blocked dry-run returns `ok:false`, `data.status:"blocked"` and a
 non-zero exit status; inspect its blockers before sending. JSONL `mail.send`,
 `draft.send` and `draft.queue` accept `dryRun:true`, including for saved drafts
 and stored files: the reply is the same plan with `status`, `sendable`,
 `contentDigest` and the resolved sender and recipients, `ok:true` even when
-blocked, and nothing is journaled, queued, uploaded or sent.
+blocked (a one-shot `--dry-run` then exits 3), and nothing is journaled,
+queued, uploaded or sent. `fields` is refused on these dry runs.
 
 Files are compared by canonical path. An explicit flag wins over `--file`
 regardless of order; a path in both `--attach-file` and `--upload-file`
@@ -707,9 +747,12 @@ omagma mail list --account personal@example.com --label INBOX --limit 100
 omagma mail search --account personal@example.com --query launch --cached
 omagma mail search --account personal@example.com --query 'from:alex@example.org' --server
 omagma mail read --account personal@example.com --message-id PROVIDER_ID
-omagma mail reply --account personal@example.com --message-id PROVIDER_ID --all
+omagma mail reply --account personal@example.com --message-id PROVIDER_ID --all --body 'Thursday works.'
+omagma draft patch --account personal@example.com --draft-id LOCAL_ID --body-file /absolute/private/note.txt
 omagma mail mark --account personal@example.com --message-id PROVIDER_ID --unread --add-label EXISTING_LABEL_ID
-omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation-id TASK_ID
+omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation-id TASK_ID --dry-run
+omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation-id TASK_ID \
+  --expected-content-digest RETURNED_CONTENT_DIGEST
 omagma mail compose --account personal@example.com --to alex@example.org \
   --subject 'A draft' --body-file /absolute/private/body.txt --attach-file /absolute/private/file.txt
 omagma operation read --account personal@example.com --operation-id TASK_ID
@@ -778,12 +821,14 @@ accepted for compatibility.
 | `--draft-id ID`, `--operation-id ID` | Local draft/receipt identities; sends and RSVP require a stable operation ID |
 | `--rsvp-only` | Explicit email-only invitation reply; bypasses the default Accept/Tentative Calendar preflight and save. Its saved policy survives reconciliation |
 | `--to LIST`, `--cc LIST`, `--bcc LIST`, `--subject TEXT` | Outgoing address lists and subject |
-| `--body-file FILE`, `--body-stdin`, `--body TEXT` | UTF-8 source body; file/stdin avoids putting it in argv |
+| `--body-file FILE`, `--body-stdin`, `--body TEXT` | UTF-8 source body; file/stdin avoids putting it in argv. For `mail reply`/`mail forward` it is the note above the quote (top-level `bodyText`); other compose flags are refused there |
+| `--dry-run` | `draft send`/`draft queue` and `mail archive`/`trash`/`restore`/`mark`/`batch`/`spam`/`unspam`: the JSONL `dryRun` plan, nothing sent, staged or relabeled; with supplied draft source (`mail send`, `draft create/update/preview`) the local file plan |
+| `--replace`, `--expected-content-digest DIGEST` | `draft update --replace` allows dropping saved recipients/threading; the digest binds `draft patch`, `draft send` or `draft queue` to a reviewed version |
 | `--format markdown\|plain` | Explicit source interpretation for compose/create/update/direct send/reply/forward or supplied-source preview; new CLI source defaults to plain |
 | `--preserve-formatting` | Reply/reply-all or forward with a read-only formatted original below the editable note |
 | `--original` | Forward the complete original as an `.eml` attachment; conflicts with --preserve-formatting |
 | `--attach-file FILE` (repeatable), `--draft-file FILE` | Regular outgoing files or a structured draft JSON object |
-| `--all` / `--reply-all` | Plan a reply-all draft |
+| `--all` / `--reply-all` | Plan a reply-all draft; `mail reply` only (a forward chooses no recipients) |
 | `--unread` / `--read`, `--starred` / `--unstarred`, `--add-label LABEL`, `--remove-label LABEL` | Explicit mail.mark changes; label flags may repeat |
 | `--name NAME`, `--label-id ID`, `--confirm-name NAME` | Label collection create/rename/color/delete; combine writes with --operation-id |
 | `--background-color HEX`, `--text-color HEX` | Gmail-compatible color pair for labels create/rename/color; obtain values from labels palette |
@@ -802,7 +847,20 @@ accepted for compatibility.
 | `--url HTTP_URL`, `--path FILE` | Link opening, opening an already saved file, attachment import, or a new destination for mail attachment-save; meaning follows the command |
 | `--ui-file FILE`, `--editor-mode auto\|takeover`, `--no-mouse` | TUI preferences/editor/mouse options, not additional CLI business operations |
 
-Use --body-file or --body-stdin to keep content out of argv. --draft-file/--contact-file accept bounded JSON objects; combining --draft-file with compose fields or --attach-file is rejected as conflicting input. One-shot success exits 0; ordinary command errors emit an error response and exit nonzero: 2 for a usage error (unknown option or command, missing value; stderr names the option and the nearest valid one), 3 when the request was rejected (validation, blocked dry run, provider refusal), 4 for missing authorization or capability, 5 when the account, message, draft, label or other target was not found, 6 for UnknownOutcome, and 1 for other failures such as configuration or I/O. JSONL command errors allow the next frame, while output failures may end the process. A live mutation's `UnknownOutcome` survives that exit path. Never put tokens in argv, logs, shell history or agent messages.
+Use --body-file or --body-stdin to keep content out of argv. --draft-file/--contact-file accept bounded JSON objects; combining --draft-file with compose fields or --attach-file is rejected as conflicting input. Every one-shot reply is printed as JSON; the exit status is derived from that reply. For send and RSVP commands (`mail send`, `draft send`, `draft queue`, `queue process`, `queue send-now`, `invitations reply`) `ok:true` alone is not success: the status follows `data.outcome` / `data.state`.
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Success: `ok:true`, and for a send/RSVP an `applied` outcome, a `queued` staging or a sendable dry-run plan |
+| 1 | Other failure, such as configuration or I/O |
+| 2 | Usage error: unknown option or command, missing or malformed option value (including `cli --account`), or a flag on the wrong command; stderr names the option and the nearest valid one |
+| 3 | Rejected or not applied: validation, provider refusal, a blocked dry run, a send/RSVP outcome `rejected`, `blocked` or `preparationStopped`, `status:"stopped"`, or a queue state `canceled`, `preparing` or (after processing) still `queued` |
+| 4 | Missing authorization or capability |
+| 5 | The account, message, draft, label or other target was not found |
+| 6 | Unknown outcome: `UnknownOutcome`, a send/RSVP outcome or queue state `unknown`/`submitting`, a dry run replaying an unknown receipt, or an interrupted write without replay identity (Timeout, Canceled, TransientFailure, NetworkFailure or a reset connection on a write without `operationId`/`undoToken`) |
+| 7 | Transient: the error says `retryable:true` (CacheBusy, RateLimited, VaultBusy, refused connection, or an interruption of a read or of an operationId/undoToken write); repeat later unchanged |
+
+`omagma cli` exits 0 regardless of replies unless `--strict` is given (see the protocol section). JSONL command errors allow the next frame, while output failures may end the process. A live mutation's `UnknownOutcome` survives that exit path. Never put tokens in argv, logs, shell history or agent messages.
 
 For interactive keys see [terminal mail](TERMINAL.md). Developer architecture and
 verification live in [developer references](DEVELOPMENT.md); ordinary use does

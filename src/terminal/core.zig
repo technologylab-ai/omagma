@@ -235,7 +235,14 @@ pub const Session = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const request_limit = @import("send_memory.zig").requestLimit(raw);
-        const request = if (raw.len > request_limit or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = request_limit, .duplicate_field_behavior = .@"error" }) catch null;
+        var duplicate_key = false;
+        const request = if (raw.len > request_limit or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = request_limit, .duplicate_field_behavior = .@"error" }) catch |err| blk: {
+            duplicate_key = err == error.DuplicateField;
+            break :blk null;
+        };
+        // A repeated key could mean either value; name the problem instead of
+        // calling a well-formed object malformed.
+        if (duplicate_key) return failure(out_allocator, .null, "", "InvalidRequest", "The request repeats a JSON key (duplicate key); send each field once");
         if (request == null or request.? != .object) return failure(out_allocator, .null, "", "InvalidRequest", "Expected a bounded JSON object");
         var req = request.?;
         if (cached_only and !@import("client_contract.zig").cachedRequest(req)) return error.CacheUnsupported;
@@ -255,9 +262,11 @@ pub const Session = struct {
         req = @import("cli_contract.zig").normalize(a, req) catch |err| return s.failureFor(out_allocator, a, id, account, req, err);
         @import("cli_view.zig").validate(req) catch |err| return s.failureFor(out_allocator, a, id, account, req, err);
         var resolved_date: ?[]const u8 = null;
-        if (@import("cli_dates.zig").field(j.text(req, "cmd"))) |name| if (j.get(req, name)) |value| if (value == .string and @import("cli_dates.zig").relative(value.string)) {
+        // Calendar dates resolve inside the Calendar command, in the zone
+        // (request timeZone, else the calendar's) that also builds its window.
+        if (@import("cli_dates.zig").preDispatch(j.text(req, "cmd"))) |name| if (j.get(req, name)) |value| if (value == .string and @import("cli_dates.zig").relative(value.string)) {
             const dates = @import("cli_dates.zig");
-            if (try dates.resolve(a, value.string, dates.today(s.io, a, s.env, req, std.Io.Timestamp.now(s.io, .real).toMilliseconds()))) |date| {
+            if (try dates.resolveWith(a, value.string, dates.today(s.io, a, s.env, req, std.Io.Timestamp.now(s.io, .real).toMilliseconds()), dates.weekdayRule(j.text(req, "cmd")))) |date| {
                 req = try j.copyObject(a, req);
                 try req.object.put(a, name, .{ .string = date });
                 resolved_date = date;
@@ -550,7 +559,11 @@ pub const Session = struct {
             if (paths.len == 0 or paths.len > t.Limits.attachments -| draft.attachments.len) return error.TooManyAttachments;
             const method = std.meta.stringToEnum(t.AttachmentDelivery, try j.required(req, "delivery")) orelse return error.InvalidAttachmentDelivery;
             const plan = try @import("attachment_dry_run.zig").selection(s.io, a, address, draft, paths, method);
-            return s.planCapabilities(a, req, plan);
+            var decorated = try s.planCapabilities(a, req, plan);
+            // draftId correlates the plan with the composer's saved draft; the
+            // plan itself always describes the supplied draft source.
+            if (j.get(req, "draftId")) |value| if (value == .string and value.string.len != 0 and decorated == .object) try decorated.object.put(a, "draftId", value);
+            return decorated;
         }
         if (std.mem.eql(u8, cmd, "attachment.discard")) {
             try @import("attachment_blob.zig").discard(&store, try j.required(req, "blobId"));
@@ -604,7 +617,15 @@ pub const Session = struct {
             try store.clearMail();
             return j.value(a, .{ .cleared = true, .draftsPreserved = true, .operationsPreserved = true, .followUpsPreserved = true });
         }
-        if (std.mem.eql(u8, cmd, "operation.list")) return j.value(a, .{ .operations = store.state.operations });
+        if (std.mem.eql(u8, cmd, "operation.list")) {
+            // draftId narrows the list to that draft's operations (the TUI's
+            // receipt check); without it every active operation is returned.
+            const draft_filter = j.text(req, "draftId");
+            if (draft_filter.len == 0) return j.value(a, .{ .operations = store.state.operations });
+            var matching: std.ArrayList(storage.Operation) = .empty;
+            for (store.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, draft_filter)) try matching.append(a, operation);
+            return j.value(a, .{ .operations = matching.items, .draftId = draft_filter });
+        }
         if (std.mem.eql(u8, cmd, "history.operations") or std.mem.eql(u8, cmd, "history.drafts") or std.mem.eql(u8, cmd, "history.queues")) {
             const limit = try j.integer(req, "limit", 50);
             if (limit < 1 or limit > 100) return error.InvalidPageLimit;
@@ -743,6 +764,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "draft.create") or std.mem.eql(u8, cmd, "draft.update")) {
             const acknowledgement_only = try j.boolean(req, "acknowledgementOnly", false);
             const input = j.get(req, "draft") orelse return error.MissingField;
+            if (std.mem.eql(u8, cmd, "draft.update")) try guardReadOnlyDraftFields(a, &store, try store.draft(try j.required(req, "draftId")), address, input);
             if (std.mem.eql(u8, cmd, "draft.update") and !try j.boolean(req, "replace", false)) try guardReplacement(try store.draft(try j.required(req, "draftId")), input);
             var draft = try decodeDraft(a, input);
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "bodyFormat") == null) draft.bodyFormat = (try store.draft(try j.required(req, "draftId"))).bodyFormat;
@@ -896,6 +918,11 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "mail.attachment-save")) return s.saveKnownAttachment(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) {
             try s.capability(a, address, req, "mail-modify");
+            // The same change checks as dryRun and mail.batch: an empty mark,
+            // conflicting or invalid labels are refused before any change.
+            var planning = try j.copyObject(a, req);
+            try planning.object.put(a, "action", .{ .string = if (std.mem.eql(u8, cmd, "mail.mark")) "mark" else cmd["mail.".len..] });
+            _ = try triage.plan(a, planning);
             // A compact receipt is the default; view:"message" keeps the full message.
             const full_message = std.mem.eql(u8, j.text(req, "view"), "message");
             if (!s.options.fixtures) {
@@ -1682,10 +1709,28 @@ pub const Session = struct {
         if (replay) |operation| try result.object.put(a, "replay", try j.value(a, .{ .outcome = operation.outcome, .messageId = operation.messageId }));
         return result;
     }
+    /// Current labels for a dry run, from the same source the real run reads:
+    /// the fixture provider records, or the cache and then a live label read.
+    /// A message the real run could not find fails MessageNotFound here too.
+    fn plannedLabels(s: *Session, a: std.mem.Allocator, store: *storage.Store, source: Value, req: Value, id: []const u8) ![]const []const u8 {
+        if (s.options.fixtures) {
+            var fixture_remote: BatchRemote = .{ .session = s, .source = source };
+            return BatchRemote.labelsFn(&fixture_remote, a, store, id);
+        }
+        if (store.find(id)) |entry| return entry.message.labels;
+        // A read-only provider lookup; never hold the cache lock across it.
+        store.release();
+        var lookup = try j.copyObject(a, req);
+        try lookup.object.put(a, "messageId", .{ .string = id });
+        const value = try s.remote(a, store.state.account, "mail.labels", lookup);
+        return j.decode([]const []const u8, a, j.get(value, "labels") orelse return error.InvalidProviderResponse);
+    }
     fn labelPlan(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
         const cmd = j.text(req, "cmd");
         try s.capability(a, store.state.account, req, "mail-modify");
         const batched = std.mem.eql(u8, cmd, "mail.batch");
+        // The same request checks as the real batch, before any planning.
+        _ = try triage.scope(req);
         var planning = try j.copyObject(a, req);
         if (!batched) try planning.object.put(a, "action", .{ .string = if (std.mem.eql(u8, cmd, "mail.mark")) "mark" else cmd["mail.".len..] });
         var delta = try triage.plan(a, planning);
@@ -1712,7 +1757,7 @@ pub const Session = struct {
         var messages: Value = .{ .array = .init(a) };
         for (ids) |id| {
             var item = try j.value(a, .{ .messageId = id });
-            const current: ?[]const []const u8 = if (store.find(id)) |entry| entry.message.labels else if (s.options.fixtures) (if (try rawFixtureMessage(source, id)) |raw| try fixtureLabels(a, raw) else null) else null;
+            const current: ?[]const []const u8 = try s.plannedLabels(a, store, source, req, id);
             try item.object.put(a, "known", .{ .bool = current != null });
             if (current) |labels| {
                 const after = try triage.apply(a, labels, delta);
@@ -1741,6 +1786,10 @@ pub const Session = struct {
         const draft_id = try j.required(req, "draftId");
         const changes = j.get(req, "set") orelse return error.MissingField;
         if (changes != .object) return error.InvalidRequest;
+        // Returned or recovery-only fields are never patched: the contract
+        // refuses them with their path; this guard keeps every caller safe.
+        for (patch_read_only) |name| if (changes.object.get(name) != null) return error.ReadOnlyField;
+        if (changes.object.get("id")) |id| if (id != .string or !std.mem.eql(u8, id.string, draft_id)) return error.ReadOnlyField;
         const current = try store.draft(draft_id);
         if (current.recoveryFields != null) return error.RecoveryDraftRequiresUpdate;
         const digest = try operationDigest(a, current, store.state.account, null);
@@ -4150,6 +4199,50 @@ fn withNote(a: std.mem.Allocator, draft: *t.Draft, req: Value) !void {
     const separator: []const u8 = if (draft.bodyText.len == 0 or std.mem.startsWith(u8, draft.bodyText, "\n")) "" else "\n\n";
     if (note.len + separator.len + draft.bodyText.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     draft.bodyText = try std.mem.concat(a, u8, &.{ note, separator, draft.bodyText });
+}
+/// Draft fields that draft.patch never accepts in set (cli_contract refuses
+/// the same list before dispatch, naming the field path).
+const patch_read_only = [_][]const u8{ "recoveryFields", "contentDigest", "gmailLink", "summaryCounts" };
+/// Structural JSON equality; object key order is irrelevant.
+fn sameJsonValue(left: Value, right: Value) bool {
+    switch (left) {
+        .object => |map| {
+            if (right != .object or right.object.count() != map.count()) return false;
+            var it = map.iterator();
+            while (it.next()) |field| if (!sameJsonValue(field.value_ptr.*, right.object.get(field.key_ptr.*) orelse return false)) return false;
+            return true;
+        },
+        .array => |list| {
+            if (right != .array or right.array.items.len != list.items.len) return false;
+            for (list.items, right.array.items) |l, r| if (!sameJsonValue(l, r)) return false;
+            return true;
+        },
+        .string => |text| return right == .string and std.mem.eql(u8, text, right.string),
+        .integer => |number| return (right == .integer and right.integer == number) or (right == .float and right.float == @as(f64, @floatFromInt(number))),
+        .float => |number| return (right == .float and right.float == number) or (right == .integer and @as(f64, @floatFromInt(right.integer)) == number),
+        .bool => |flag| return right == .bool and right.bool == flag,
+        .null => return right == .null,
+        .number_string => |text| return right == .number_string and std.mem.eql(u8, text, right.number_string),
+    }
+}
+/// A read draft passed back to draft.update may carry its read-only fields
+/// unchanged. A different contentDigest means the saved draft changed since
+/// that read; a different gmailLink or summaryCounts is a client edit of a
+/// field this command never writes. Both are refused instead of ignored.
+fn guardReadOnlyDraftFields(a: std.mem.Allocator, store: *storage.Store, current: t.Draft, account: []const u8, input: Value) !void {
+    if (input != .object) return;
+    if (j.get(input, "contentDigest")) |digest| if (digest != .null) {
+        const saved = try @import("draft_link.zig").contentDigest(a, current, account);
+        if (digest != .string or !std.mem.eql(u8, digest.string, &saved)) return error.ReviewedDraftChanged;
+    };
+    if (j.get(input, "gmailLink")) |link| if (link != .null) {
+        const saved = if (try @import("operation_history.zig").gmailLink(store, a, current.id)) |value| try j.value(a, value) else Value.null;
+        if (!sameJsonValue(link, saved)) return error.ReadOnlyFieldChanged;
+    };
+    if (j.get(input, "summaryCounts")) |counts| if (counts != .null) {
+        const saved = j.get(try mail_value.borrowed(a, current), "summaryCounts") orelse Value.null;
+        if (!sameJsonValue(counts, saved)) return error.ReadOnlyFieldChanged;
+    };
 }
 /// draft.update replaces editable fields. Refuse a replacement that silently
 /// omits the saved recipients or reply threading; replace:true opts in.

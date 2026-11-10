@@ -88,32 +88,85 @@ fn quoteLine(line: []const u8) bool {
     const trimmed = std.mem.trimStart(u8, line, " \t");
     return trimmed.len != 0 and trimmed[0] == '>';
 }
+fn blank(line: []const u8) bool {
+    return std.mem.trim(u8, line, " \t\r").len == 0;
+}
+/// "On … wrote:" and its common localized forms (reader_tools folds the
+/// English form; replies here may come from any client).
 fn attribution(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
-    return std.mem.endsWith(u8, trimmed, "wrote:") or std.mem.endsWith(u8, trimmed, "schrieb:") or std.mem.endsWith(u8, trimmed, "a écrit :") or std.mem.endsWith(u8, trimmed, "escribió:");
+    if (std.mem.endsWith(u8, trimmed, "wrote:") or std.mem.endsWith(u8, trimmed, "a écrit :") or std.mem.endsWith(u8, trimmed, "a écrit:") or std.mem.endsWith(u8, trimmed, "escribió:")) return true;
+    // German clients name the sender after the verb: "Am …, schrieb Alex <a@…>:".
+    return std.mem.endsWith(u8, trimmed, ":") and (std.mem.indexOf(u8, trimmed, " schrieb ") != null or std.mem.endsWith(u8, trimmed, "schrieb:"));
 }
-/// Plain-text body without reply history: quoted lines, the attribution line
-/// that introduces them, and everything after an Outlook original-message rule.
-pub fn stripQuoted(a: A, text: []const u8) ![]const u8 {
-    var kept: std.ArrayList([]const u8) = .empty;
-    var lines = std.mem.splitScalar(u8, text, '\n');
+fn underscoreRule(line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len < 10) return false;
+    for (trimmed) |byte| if (byte != '_') return false;
+    return true;
+}
+fn headerLine(line: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, line, " \t");
+    for ([_][]const u8{ "From:", "Sent:", "Von:", "Gesendet:", "De :", "De:", "Envoyé :", "Enviado:" }) |name| if (std.ascii.startsWithIgnoreCase(trimmed, name)) return true;
+    return false;
+}
+pub const Stripped = struct { text: []const u8, removed: bool };
+/// Plain-text body without reply history. Quoted lines are removed only when
+/// an attribution line ("On … wrote:") introduces them or when they form the
+/// trailing quoted block; inline replies between quotes stay intact. The text
+/// is cut at "-----Original Message-----", or at an underscore rule that a
+/// From:/Sent: header block follows. removed reports whether anything that
+/// was not whitespace was dropped.
+pub fn stripQuoted(a: A, text: []const u8) !Stripped {
     var all: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| try all.append(a, line);
-    var index: usize = 0;
-    while (index < all.items.len) : (index += 1) {
-        const line = all.items[index];
+    var end = all.items.len;
+    for (all.items, 0..) |line, index| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (eq(trimmed, "-----Original Message-----") or eq(trimmed, "________________________________")) break;
-        if (quoteLine(line)) continue;
-        if (attribution(line)) {
-            var next = index + 1;
-            while (next < all.items.len and std.mem.trim(u8, all.items[next], " \t\r").len == 0) next += 1;
-            if (next < all.items.len and quoteLine(all.items[next])) continue;
+        if (eq(trimmed, "-----Original Message-----")) {
+            end = index;
+            break;
         }
-        try kept.append(a, line);
+        if (underscoreRule(line)) {
+            var next = index + 1;
+            while (next < all.items.len and blank(all.items[next])) next += 1;
+            if (next < all.items.len and headerLine(all.items[next])) {
+                end = index;
+                break;
+            }
+        }
     }
+    var removed = false;
+    for (all.items[end..]) |line| removed = removed or !blank(line);
+    const drop = try a.alloc(bool, end);
+    @memset(drop, false);
+    var index: usize = 0;
+    while (index < end) {
+        if (!quoteLine(all.items[index])) {
+            index += 1;
+            continue;
+        }
+        var stop = index;
+        while (stop < end and (quoteLine(all.items[stop]) or blank(all.items[stop]))) stop += 1;
+        // Blank lines that only trail the block belong to what follows.
+        var last = stop;
+        while (last > index and blank(all.items[last - 1])) last -= 1;
+        var before = index;
+        while (before > 0 and blank(all.items[before - 1])) before -= 1;
+        const introduced = before > 0 and attribution(all.items[before - 1]);
+        const trailing = stop == end;
+        if (introduced or trailing) {
+            for (index..last) |line| drop[line] = true;
+            if (introduced) drop[before - 1] = true;
+            removed = true;
+        }
+        index = stop;
+    }
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (all.items[0..end], drop) |line, dropped| if (!dropped) try kept.append(a, line);
     const joined = try std.mem.join(a, "\n", kept.items);
-    return std.mem.trimEnd(u8, joined, " \t\r\n");
+    return .{ .text = std.mem.trimEnd(u8, joined, " \t\r\n"), .removed = removed };
 }
 fn message(a: A, input: Value, selected: Options) !Value {
     if (input != .object) return input;
@@ -122,12 +175,15 @@ fn message(a: A, input: Value, selected: Options) !Value {
     if (rfc.len != 0 and j.get(input, "rfcMessageId") == null) try out.object.put(a, "rfcMessageId", .{ .string = rfc });
     if (integerField(input, "receivedAt")) |stamp| if (stamp > 0) if (try isoInstant(a, stamp)) |text| try out.object.put(a, "receivedAtIso", .{ .string = text });
     if (!selected.requested()) return out;
+    // Select first: truncation and quote flags describe only returned parts.
+    if (selected.body == .text or selected.body == .none) _ = out.object.orderedRemove("bodyHtml");
+    if (selected.body == .html or selected.body == .none) _ = out.object.orderedRemove("bodyText");
     if (j.get(out, "bodyText")) |value| if (value == .string) {
         var text = value.string;
         if (selected.strip_quoted) {
             const stripped = try stripQuoted(a, text);
-            if (stripped.len != text.len) try out.object.put(a, "quotedStripped", .{ .bool = true });
-            text = stripped;
+            if (stripped.removed) try out.object.put(a, "quotedStripped", .{ .bool = true });
+            text = stripped.text;
         }
         if (selected.max_body_bytes) |limit| if (text.len > limit) {
             try out.object.put(a, "bodyTruncated", .{ .bool = true });
@@ -141,8 +197,6 @@ fn message(a: A, input: Value, selected: Options) !Value {
         try out.object.put(a, "bodyHtmlBytes", .{ .integer = @intCast(value.string.len) });
         try out.object.put(a, "bodyHtml", .{ .string = utf8Prefix(value.string, limit) });
     };
-    if (selected.body == .text or selected.body == .none) _ = out.object.orderedRemove("bodyHtml");
-    if (selected.body == .html or selected.body == .none) _ = out.object.orderedRemove("bodyText");
     if (!selected.attachment_data) if (j.get(out, "attachments")) |files| if (files == .array) {
         var trimmed: Value = .{ .array = .init(a) };
         for (files.array.items) |file| {
@@ -265,13 +319,26 @@ fn mapArray(a: A, data: *Value, key: []const u8, row: *const fn (A, Value) anyer
     for (list.array.items) |item| try out.array.append(try row(a, item));
     try data.object.put(a, key, out);
 }
+/// Requested keys plus every truncation/paging/warning marker present, so a
+/// projection can never make an incomplete value look complete.
 fn project(a: A, input: Value, keep: []const []const u8) !Value {
     if (input != .object) return input;
     var out = j.object(a);
     for (keep) |name| if (j.get(input, name)) |value| try out.object.put(a, name, value);
+    for (@import("cli_api.zig").kept_markers) |name| if (j.get(input, name)) |value| if (signals(name, value)) try out.object.put(a, name, value);
     return out;
 }
-const list_keys = [_][]const u8{ "messages", "events", "contacts", "drafts", "items", "queue", "operations", "entries" };
+/// Whether a marker reports something an agent must see: a true flag (or
+/// complete:false), a nonempty warning or cursor, a size or warning object.
+fn signals(name: []const u8, value: Value) bool {
+    return switch (value) {
+        .bool => |flag| if (eq(name, "complete")) !flag else flag,
+        .string => |text| text.len != 0,
+        .null => false,
+        else => true,
+    };
+}
+const list_keys = [_][]const u8{ "messages", "events", "contacts", "drafts", "items", "queue", "operations", "entries", "accounts", "calendars", "identities", "recipients" };
 
 pub fn shape(a: A, request: Value, data: Value, resolved_date: ?[]const u8) !Value {
     if (data != .object) return data;
@@ -319,7 +386,8 @@ pub fn shape(a: A, request: Value, data: Value, resolved_date: ?[]const u8) !Val
     } else if (eq(command, "draft.queue") or std.mem.startsWith(u8, command, "queue.") or eq(command, "history.queues")) {
         result = try annotate(a, result, 0);
     }
-    if (j.get(request, "fields")) |fields| if (fields == .array) {
+    // Writes and dry runs are refused before dispatch; never reshape one here.
+    if (j.get(request, "fields")) |fields| if (fields == .array and @import("cli_contract.zig").projectionAllowed(request)) {
         const keep = try a.alloc([]const u8, fields.array.items.len);
         for (fields.array.items, keep) |item, *name| name.* = try j.string(item);
         var projected = false;
@@ -423,7 +491,79 @@ test "cli view: quoted reply history is removed without touching ordinary text" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("Hello\n\nSee you", try stripQuoted(a, "Hello\n\nSee you\n"));
-    try std.testing.expectEqualStrings("Short answer", try stripQuoted(a, "Short answer\n\n-----Original Message-----\nFrom: x\n"));
-    try std.testing.expectEqualStrings("I wrote: this stays", try stripQuoted(a, "I wrote: this stays\n> quoted\n"));
+    const plain = try stripQuoted(a, "Hello\n\nSee you\n");
+    try std.testing.expectEqualStrings("Hello\n\nSee you", plain.text);
+    // Trailing whitespace alone is not removed quoted content.
+    try std.testing.expect(!plain.removed);
+    const outlook = try stripQuoted(a, "Short answer\n\n-----Original Message-----\nFrom: x\n");
+    try std.testing.expectEqualStrings("Short answer", outlook.text);
+    try std.testing.expect(outlook.removed);
+    try std.testing.expectEqualStrings("I wrote: this stays", (try stripQuoted(a, "I wrote: this stays\n> quoted\n")).text);
+    // Attribution-introduced history goes, localized forms included.
+    const german = try stripQuoted(a, "Passt.\n\nAm Di., 10. Nov. schrieb Alex:\n> Termin?\n");
+    try std.testing.expectEqualStrings("Passt.", german.text);
+    try std.testing.expect(german.removed);
+}
+test "cli view: inline replies, quoted examples and underscore rules without headers are real content" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Interleaved answers keep the questions they answer.
+    const inline_reply = "> Can you do Thursday?\nYes, at 10.\n> And the agenda?\nAttached.";
+    const kept = try stripQuoted(a, inline_reply);
+    try std.testing.expectEqualStrings(inline_reply, kept.text);
+    try std.testing.expect(!kept.removed);
+    // A signature or form separator is not an Outlook original-message rule.
+    const form = "Please sign here:\n__________________________\nName and date\nThanks";
+    const unchanged = try stripQuoted(a, form);
+    try std.testing.expectEqualStrings(form, unchanged.text);
+    try std.testing.expect(!unchanged.removed);
+    // The same rule followed by a header block starts the original message.
+    const forwarded = try stripQuoted(a, "See below.\n________________________________\nFrom: Alex <alex@example.org>\nSent: Tuesday\nOld text");
+    try std.testing.expectEqualStrings("See below.", forwarded.text);
+    try std.testing.expect(forwarded.removed);
+    // Quoted context in the middle stays; the attributed trailing block goes.
+    const mixed = try stripQuoted(a, "As you said\n> the build is green\nso we ship.\n\nOn Mon, Alex wrote:\n> Ship it?\n> \n");
+    try std.testing.expectEqualStrings("As you said\n> the build is green\nso we ship.", mixed.text);
+    try std.testing.expect(mixed.removed);
+}
+test "cli view: truncation and quote flags describe only the body parts returned" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const data = try parse(a, "{\"id\":\"m\",\"bodyText\":\"short\",\"bodyHtml\":\"<p>a much longer html alternative</p>\"}");
+    const text = try shape(a, try parse(a, "{\"cmd\":\"mail.read\",\"body\":\"text\",\"maxBodyBytes\":10}"), data, null);
+    try std.testing.expectEqualStrings("short", j.text(text, "bodyText"));
+    for ([_][]const u8{ "bodyTruncated", "bodyHtmlBytes", "bodyHtml", "bodyBytes" }) |absent| try std.testing.expect(j.get(text, absent) == null);
+    const html = try shape(a, try parse(a, "{\"cmd\":\"mail.read\",\"body\":\"html\",\"maxBodyBytes\":10}"), data, null);
+    try std.testing.expect(j.get(html, "bodyTruncated").?.bool);
+    try std.testing.expect(j.get(html, "bodyHtmlBytes") != null and j.get(html, "bodyText") == null);
+    const quoted = try parse(a, "{\"id\":\"m\",\"bodyText\":\"Hi\\n\\nOn Mon, Alex wrote:\\n> old\",\"bodyHtml\":\"<p>x</p>\"}");
+    try std.testing.expect(j.get(try shape(a, try parse(a, "{\"cmd\":\"mail.read\",\"body\":\"html\",\"stripQuoted\":true}"), quoted, null), "quotedStripped") == null);
+}
+test "cli view: projections keep truncation, paging and warning markers and never reshape writes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const data = try parse(a, "{\"id\":\"m\",\"bodyText\":\"0123456789abcdef\",\"decodeWarning\":\"UnsupportedCharset\",\"metadataPartial\":true,\"bodyCacheError\":\"BodyTooLarge\"}");
+    const read = try shape(a, try parse(a, "{\"cmd\":\"mail.read\",\"maxBodyBytes\":4,\"stripQuoted\":true,\"fields\":[\"id\"]}"), data, null);
+    try std.testing.expectEqualStrings("m", j.text(read, "id"));
+    for ([_][]const u8{ "bodyTruncated", "bodyBytes", "decodeWarning", "metadataPartial", "bodyCacheError" }) |marker| try std.testing.expect(j.get(read, marker) != null);
+    try std.testing.expect(j.get(read, "bodyText") == null);
+    const page = try parse(a, "{\"messages\":[{\"id\":\"m\",\"subject\":\"s\",\"decodeWarning\":\"x\",\"metadataPartial\":true}],\"nextCursor\":\"L1\",\"partial\":true}");
+    const listed = try shape(a, try parse(a, "{\"cmd\":\"mail.list\",\"fields\":[\"id\"]}"), page, null);
+    const row = j.get(listed, "messages").?.array.items[0];
+    try std.testing.expect(j.get(row, "subject") == null and j.get(row, "decodeWarning") != null and j.get(row, "metadataPartial") != null);
+    try std.testing.expect(j.get(listed, "hasMore").?.bool and j.get(listed, "partial").?.bool);
+    // A receipt is never projected, even if a caller bypassed the contract.
+    const receipt = try parse(a, "{\"outcome\":\"unknown\",\"messageId\":\"\",\"canRetryPreparation\":false}");
+    for ([_][]const u8{
+        "{\"cmd\":\"draft.send\",\"fields\":[\"messageId\"]}",
+        "{\"cmd\":\"mail.send\",\"dryRun\":true,\"fields\":[\"sendable\"]}",
+        "{\"cmd\":\"invitation.inspect\",\"reconcile\":true,\"fields\":[\"summary\"]}",
+    }) |raw| {
+        const shaped = try shape(a, try parse(a, raw), receipt, null);
+        try std.testing.expectEqualStrings("unknown", j.text(shaped, "outcome"));
+        try std.testing.expect(j.get(shaped, "canRetryPreparation") != null);
+    }
 }

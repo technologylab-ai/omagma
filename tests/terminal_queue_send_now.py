@@ -98,7 +98,8 @@ def canceled(binary, directory):
         before = counters(client)
         for command in ("queue.send-now", "queue.process"):
             require(client.request(command, queueId=queued["queueId"]) == receipt, "canceled queue became sendable")
-        require(one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]]) == receipt,
+        # A canceled intent was not sent: the receipt exits 3.
+        require(one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]], status=3) == receipt,
                 "one-shot Send now revived a canceled queue")
         require(counters(client) == before and before[1] == 0
                 and not client.request("operation.list")["operations"], "canceled Send now submitted or journaled mail")
@@ -111,7 +112,8 @@ def unknown(binary, directory):
         with Client(binary, directory / scenario, scenario=scenario) as client:
             source = draft(client, "Uncertain queue cannot send again")
             queued = stage(client, source, "send-now-unknown")
-            receipt = one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]])
+            # An unknown outcome exits 6 even though the receipt is ok:true.
+            receipt = one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]], status=6)
             identity(queued, receipt)
             require(receipt["state"] == "unknown" and receipt["operation"]["outcome"] == "unknown",
                     "uncertain Send now claimed a known outcome")
@@ -120,7 +122,7 @@ def unknown(binary, directory):
             for command in ("queue.send-now", "queue.process"):
                 require(client.request(command, queueId=queued["queueId"]) == receipt,
                         "unknown queue was redispatched by JSONL")
-            require(one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]]) == receipt,
+            require(one_shot(client, "queue", "send-now", ["--queue-id", queued["queueId"]], status=6) == receipt,
                     "unknown queue was redispatched by one-shot Send now")
             client.restart()
             require(client.request("queue.send-now", queueId=queued["queueId"]) == receipt
