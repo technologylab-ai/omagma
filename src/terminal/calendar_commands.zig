@@ -119,14 +119,22 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
 fn pendingValue(service: svc.Service, request: j.Value, host: HostInputs, target: t.Target) !j.Value {
     const operation_id = j.text(request, "operationId");
     if (operation_id.len != 0) return foundValue(service, target, try exactPending(service, host, target, operation_id), "operation", true);
-    const wanted = j.text(request, "eventId");
+    var wanted = j.text(request, "eventId");
+    var series: ?[]const u8 = if (j.get(request, "seriesEventId")) |value| try j.string(value) else null;
     if (wanted.len == 0) {
-        const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
-        return foundValue(service, target, try load(host.context, service.a, target, ""), "creation", true);
+        // Only a series: the writes on that series (the series itself, a
+        // whole-series write, or one of its occurrences).
+        if (series) |known| {
+            if (known.len == 0) return error.InvalidCalendarRequest;
+            wanted = known;
+            series = "";
+        } else {
+            const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
+            return foundValue(service, target, try load(host.context, service.a, target, ""), "creation", true);
+        }
     }
     const store = service.persistence orelse return error.CalendarPersistenceRequired;
     const find = store.pendingFn orelse return error.CalendarPersistenceRequired;
-    var series: ?[]const u8 = if (j.get(request, "seriesEventId")) |value| try j.string(value) else null;
     if (try find(store.context, service.a, target, action.Reach.lookup(wanted, series orelse ""), "")) |found| return foundValue(service, target, found, "event", true);
     var read_error: []const u8 = "";
     if (series == null) {
@@ -172,7 +180,8 @@ fn foundValue(service: svc.Service, target: t.Target, found: ?svc.Pending, relat
     if (value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target)) return error.CalendarReviewMismatch;
     if (!value.review.journaledEvent()) {
         // An invitation's own update: resolved from that invitation, not here.
-        try result.object.put(a, "blockedBy", try j.value(a, .{ .kind = "invitation", .operationId = value.operation.intent.operation_id, .uid = value.operation.intent.identity.uid, .eventId = value.operation.intent.event_id, .recovery = "calendar.reconcile" }));
+        const hash = std.fmt.bytesToHex(value.review.review_hash, .lower);
+        try result.object.put(a, "blockedBy", try j.value(a, .{ .kind = "invitation", .operationId = value.operation.intent.operation_id, .reviewHash = hash[0..], .uid = value.operation.intent.identity.uid, .eventId = value.operation.intent.event_id, .summary = value.review.source.summary, .previous = value.review.previous, .check = "calendar.event-reconcile", .stopTracking = "calendar.event-abandon" }));
         return result;
     }
     try result.object.put(a, "pending", try j.value(a, .{ .review = try eventReviewValue(a, value.review), .relation = relation, .state = "unknown", .attempt = value.operation.attempt, .nextAttempt = value.operation.attempt +| 1, .retryPossible = false, .recoveryReason = "Check Calendar before retrying" }));
@@ -256,7 +265,12 @@ fn validateFields(request: j.Value, command: []const u8) !void {
     if (std.mem.eql(u8, command, "calendar.event-pending")) {
         if (j.get(request, "eventId")) |value| if (value != .null) try t.text(try j.string(value), 1024, false);
         // "" says the event does not repeat; any other value is its series.
-        if (j.get(request, "seriesEventId")) |value| try t.text(try j.string(value), 1024, true);
+        if (j.get(request, "seriesEventId")) |value| {
+            const series = try j.string(value);
+            try t.text(series, 1024, true);
+            // "" means "does not repeat": meaningless without an event.
+            if (series.len == 0 and j.text(request, "eventId").len == 0) return error.InvalidCalendarRequest;
+        }
         if (j.get(request, "operationId")) |value| {
             const id = try j.string(value);
             try t.text(id, 128, false);
@@ -341,7 +355,7 @@ fn executeReview(service: svc.Service, request: j.Value, host: HostInputs, targe
     if (host.loadReceiptFn) |load_receipt| if (try load_receipt(host.context, service.a, target, operation_id)) |receipt| {
         if (!receipt.operation.intent.identity.target.eql(target) or !std.mem.eql(u8, receipt.operation.intent.operation_id, operation_id) or !std.mem.eql(u8, &receipt.review_hash, &hash) or receipt.operation.state == .unknown) return error.CalendarReviewMismatch;
         const ordinary_command = std.mem.eql(u8, command, "calendar.event-apply") or std.mem.eql(u8, command, "calendar.event-reconcile") or std.mem.eql(u8, command, "calendar.event-retry") or std.mem.eql(u8, command, "calendar.event-abandon");
-        if (ordinary_command != receipt.ordinary) return error.CalendarReviewMismatch;
+        if (ordinary_command != receipt.ordinary and !settlesAny(command)) return error.CalendarReviewMismatch;
         const required_kind: ?@TypeOf(receipt.operation.intent.kind) = if (std.mem.eql(u8, command, "calendar.import")) .import_event else if (std.mem.eql(u8, command, "calendar.update")) .update_event else if (std.mem.eql(u8, command, "calendar.cancel")) .cancel_event else null;
         if (required_kind) |kind| if (receipt.operation.intent.kind != kind) return error.CalendarReviewMismatch;
         // Replaying a recorded receipt never writes, dry run or not.
@@ -355,13 +369,21 @@ fn executeReview(service: svc.Service, request: j.Value, host: HostInputs, targe
     const expected_kind: ?@TypeOf(review.intent.kind) = if (std.mem.eql(u8, command, "calendar.import")) .import_event else if (std.mem.eql(u8, command, "calendar.update")) .update_event else if (std.mem.eql(u8, command, "calendar.cancel")) .cancel_event else null;
     if (expected_kind) |kind| if (review.intent.kind != kind) return error.CalendarReviewMismatch;
     const ordinary_command = std.mem.eql(u8, command, "calendar.event-apply") or std.mem.eql(u8, command, "calendar.event-reconcile") or std.mem.eql(u8, command, "calendar.event-retry") or std.mem.eql(u8, command, "calendar.event-abandon");
-    if (ordinary_command != review.journaledEvent()) return error.CalendarReviewMismatch;
+    if (ordinary_command != review.journaledEvent() and !settlesAny(command)) return error.CalendarReviewMismatch;
     const confirmation: svc.Confirmation = .{ .target = target, .operation_id = operation_id, .review_hash = hash };
     if (std.mem.eql(u8, command, "calendar.event-abandon")) return appliedValue(service.a, target, try service.archive(review, confirmation));
     review.calendar = try selectedCalendar(service, target);
     if (dry_run) return dryRunValue(service.a, target, review, try service.check(review, confirmation));
     const result = if (std.mem.eql(u8, command, "calendar.reconcile") or std.mem.eql(u8, command, "calendar.event-reconcile")) try service.reconcile(review) else if (std.mem.eql(u8, command, "calendar.event-retry")) try service.retry(review, confirmation, @intCast(try j.integer(request, "nextAttempt", 0))) else try service.apply(review, confirmation);
     return appliedValue(service.a, target, result);
+}
+
+/// event-reconcile and event-abandon also check or stop tracking an
+/// invitation's own unconfirmed Calendar write, which blocks changes to the
+/// same event: reconcile reads only; abandon is the deliberate way out when
+/// a check can never settle it.
+fn settlesAny(command: []const u8) bool {
+    return std.mem.eql(u8, command, "calendar.event-reconcile") or std.mem.eql(u8, command, "calendar.event-abandon");
 }
 
 pub fn parseReviewHash(raw: []const u8) ![32]u8 {

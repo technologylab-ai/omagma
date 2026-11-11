@@ -599,6 +599,30 @@ test "calendar actions: an edit never overtakes an unconfirmed series write, and
     _ = try h.deleteReview("delete-first", standup_first, null, "event", "none", true);
 }
 
+test "calendar actions: event-pending by a series alone finds the writes on that series, and \"\" alone is refused" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    // An unconfirmed edit of one occurrence of the series.
+    const edit = try h.editReview("edit-second", standup_second, "Standup moved");
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", edit), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    // The series alone finds it (never a creation lookup), reading nothing.
+    const reads = try j.integer(try h.provider(), "reads", -1);
+    const found = try h.pendingFor(.{ .seriesEventId = "fixture-standup" });
+    try std.testing.expectEqualStrings("edit-second", j.text(j.get(j.get(found, "pending").?, "review").?, "operationId"));
+    try std.testing.expect(try j.boolean(found, "seriesChecked", false));
+    try std.testing.expectEqual(reads, try j.integer(try h.provider(), "reads", -1));
+    // Another series has nothing pending.
+    try std.testing.expect(j.get(try h.pendingFor(.{ .seriesEventId = "fixture-office" }), "pending").? == .null);
+    // "" says "does not repeat", which means nothing without an event.
+    try std.testing.expectError(error.InvalidCalendarRequest, h.pendingFor(.{ .seriesEventId = "" }));
+}
+
 test "calendar actions: an identical RSVP retry sends the same conditional answer on the wire" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

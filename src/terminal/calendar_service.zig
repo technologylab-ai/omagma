@@ -558,6 +558,8 @@ pub const Service = struct {
             },
             .review_update, .review_cancel => |previous| blk: {
                 const current = try self.document(planned.calendar, previous.id);
+                // An unconfirmed write to this event or its series comes first.
+                try self.requireNoPending(planned.calendar.target, .{ .events = .{ current.event.id, "" }, .series = current.event.recurring_event_id, .whole_series = if (source.recurrence.len != 0) current.event.id else "" }, operation_id);
                 if (!sameEventIdentity(current.event, source) or current.event.cancelled or current.event.locked or !std.mem.eql(u8, current.event.etag, previous.etag) or current.event.sequence > source.version.sequence) return error.CalendarReviewStale;
                 intent.kind = if (planned.decision == .review_cancel) .cancel_event else .update_event;
                 intent.event_id = current.event.id;
@@ -584,6 +586,8 @@ pub const Service = struct {
             .import_missing, .review_update => try self.prepareReview(planned, operation_id),
             .existing => |previous| blk: {
                 const current = try self.document(planned.calendar, previous.id);
+                // An unconfirmed write to this event or its series comes first.
+                try self.requireNoPending(planned.calendar.target, .{ .events = .{ current.event.id, "" }, .series = current.event.recurring_event_id }, operation_id);
                 if (!sameEventIdentity(current.event, planned.source) or current.event.cancelled or current.event.locked or !std.mem.eql(u8, current.event.etag, previous.etag) or current.event.sequence != planned.source.version.sequence) return error.CalendarReviewStale;
                 var intent: planner.Intent = .{ .operation_id = operation_id, .identity = .{ .target = planned.calendar.target, .uid = planned.source.uid }, .version = planned.source.version, .kind = .update_event, .source_hash = planned.source.source_hash, .payload_hash = @splat(0), .event_id = current.event.id, .expected_etag = current.event.etag };
                 const request = try p.prepareRsvpPatch(self.a, planned.source, intent, current, response);
@@ -703,7 +707,6 @@ pub const Service = struct {
     /// asserts the event was not saved and never issues a provider request.
     pub fn archive(self: Service, review: Review, confirmation: Confirmation) !Applied {
         try self.validateReview(review, confirmation);
-        if (!review.journaledEvent()) return error.CalendarReviewMismatch;
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         const state = try store.load(self.a, review.intent.identity);
         var operation = state.operation orelse return error.CalendarOperationNotFound;
@@ -715,7 +718,7 @@ pub const Service = struct {
         const outcome: []const u8 = if (review.event_action) |prepared| switch (prepared.action) {
             .delete => "The event may already be deleted in Calendar",
             .respond => "Your answer may already be saved in Calendar",
-        } else "The event may still appear in Calendar";
+        } else if (review.journaledEvent()) "The event may still appear in Calendar" else "The invitation's Calendar update may already be in Calendar";
         return .{ .operation = operation, .recovery_reason = outcome };
     }
 

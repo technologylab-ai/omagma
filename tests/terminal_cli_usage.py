@@ -951,6 +951,13 @@ def calendar_actions_contract(runner):
         found = run("calendar", "event-pending", *target, "--event-id", second["id"], *extra)
         require(found["pending"] and found["pending"]["review"]["operationId"] == "series-unknown" and found["seriesChecked"],
                 f"event-pending from another occurrence missed the series delete: {found}")
+    # The series alone finds the writes on it (not a creation lookup); ""
+    # alone ("does not repeat") means nothing and is refused.
+    alone = run("calendar", "event-pending", *target, "--series-event-id", second["recurring_event_id"])
+    require(alone["pending"] and alone["pending"]["review"]["operationId"] == "series-unknown",
+            f"event-pending by the series alone missed its write: {alone}")
+    refused = run("calendar", "event-pending", *target, "--series-event-id", "", status=3, ok=False)
+    require(refused["code"] == "InvalidCalendarRequest", f"an empty series alone was accepted: {refused}")
     result = runner.usage(["calendar", "event", *target, "--event-id", second["id"], "--series-event-id", "x", "--fixtures",
                            *fixture.options(), "--fixture-scenario", "calendar-actions", "--cache-dir", str(cache), "--account", account], "omagma:")
     require(result.returncode == 2 and b"--series-event-id is not valid here" in result.stderr, "--series-event-id outside event-pending was accepted")

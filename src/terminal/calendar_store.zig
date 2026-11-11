@@ -513,6 +513,8 @@ pub const Host = struct {
         if (next_attempt != operation.attempt + 1) return error.InvalidCalendarRetry;
         const review = entry.review orelse return error.CalendarReviewNotFound;
         if (!review.journaledEvent() or !review.intent.eql(intent)) return error.OperationConflict;
+        // Another unconfirmed write that overlaps this one is resolved first.
+        if (related(state, intent.identity.target, svc.reach(review), intent.operation_id) != null) return error.CalendarOperationPending;
         operation.attempt = next_attempt;
         entry.state.operation = operation;
         entry.receipt_reserved = true;

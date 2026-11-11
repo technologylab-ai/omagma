@@ -796,6 +796,54 @@ test "calendar recovery: explicit archive records uncertainty locally frees crea
     _ = try h.run(try ordinaryRequest(a, "allowed-create", false, false));
 }
 
+test "calendar recovery: an invitation's unconfirmed update blocks event writes until event-reconcile or event-abandon settles it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = .{ .a = a, .root = try temporaryRoot(a, tmp), .source = try source(a, 4, false) };
+    const imported = try h.run(try h.executeRequest("calendar.import", try h.run(try h.reviewRequest("import-1"))));
+    const id = j.text(imported, "providerId");
+    const delete_plan = try j.value(a, .{ .cmd = "calendar.event-delete-review", .account = account, .calendarId = account, .eventId = id, .scope = "event", .sendUpdates = "none", .operationId = "delete-plan", .dryRun = true });
+    // Committed but unconfirmed (a check proves it), then never sent (only
+    // a deliberate archive ends it).
+    for ([_][]const u8{ "calendar-lost-response", "calendar-prewrite-unavailable" }, [_][]const u8{ "calendar.event-reconcile", "calendar.event-abandon" }, [_][]const u8{ "applied", "archived" }, 0..) |scenario, settle, outcome, index| {
+        h.source = try source(a, @intCast(5 + index), false);
+        const operation = try std.fmt.allocPrint(a, "update-{d}", .{index});
+        const update = try h.run(try h.reviewRequest(operation));
+        h.options.fixture_scenario = scenario;
+        try std.testing.expectEqualStrings("unknown", j.text(try h.run(try h.executeRequest("calendar.update", update)), "state"));
+        h.options.fixture_scenario = "";
+        // Every write to that event waits.
+        try std.testing.expectError(error.CalendarOperationPending, h.run(delete_plan));
+        // The lookup (by ID or by the event) names it and how it is checked
+        // or deliberately no longer tracked.
+        for ([_]j.Value{ try j.value(a, .{ .cmd = "calendar.event-pending", .account = account, .calendarId = account, .operationId = operation }), try j.value(a, .{ .cmd = "calendar.event-pending", .account = account, .calendarId = account, .eventId = id }) }) |request| {
+            const blocked = j.get(try h.run(request), "blockedBy").?;
+            try std.testing.expectEqualStrings(operation, j.text(blocked, "operationId"));
+            try std.testing.expectEqualStrings(j.text(update, "reviewHash"), j.text(blocked, "reviewHash"));
+            try std.testing.expectEqualStrings("calendar.event-reconcile", j.text(blocked, "check"));
+            try std.testing.expectEqualStrings("calendar.event-abandon", j.text(blocked, "stopTracking"));
+            try std.testing.expect(std.mem.startsWith(u8, j.text(blocked, "summary"), "Synthetic planning version"));
+        }
+        const before = try h.writes();
+        if (index == 1) try std.testing.expectEqualStrings("unknown", j.text(try h.run(try h.executeRequest("calendar.event-reconcile", update)), "state"));
+        try std.testing.expectEqualStrings(outcome, j.text(try h.run(try h.executeRequest(settle, update)), "state"));
+        try std.testing.expectEqual(before, try h.writes());
+        _ = try h.run(delete_plan);
+    }
+    // The reverse, checked already at the invitation's review: an
+    // unconfirmed delete of the event comes before a newer invitation.
+    const seen = j.get(try h.run(try j.value(a, .{ .cmd = "calendar.event", .account = account, .calendarId = account, .eventId = id })), "event").?;
+    const delete = try h.run(try j.value(a, .{ .cmd = "calendar.event-delete-review", .account = account, .calendarId = account, .eventId = id, .expectedEtag = j.text(seen, "etag"), .scope = "event", .sendUpdates = "none", .operationId = "delete-unknown" }));
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    try std.testing.expectEqualStrings("unknown", j.text(try h.run(try h.executeRequest("calendar.event-apply", delete)), "state"));
+    h.options.fixture_scenario = "";
+    h.source = try source(a, 9, false);
+    try std.testing.expectError(error.CalendarOperationPending, h.run(try h.reviewRequest("newer")));
+}
+
 test "calendar recovery: lost response markers survive normalized title changes and later cancellation" {
     for ([_]bool{ false, true }) |cancelled| {
         var tmp = std.testing.tmpDir(.{});
