@@ -117,13 +117,17 @@ def card_and_guide(binary, directory, capture_dir):
                        and "Ctrl+S Review" in terminal.screen.lines()[-2])
         require(terminal.screen.locate("Upgrade available") is None,
                 "upgrade card distracted during composing")
-        # Esc only leaves insert mode; q saves the draft and closes it.
+        # Esc only leaves insert mode; q closes the composer (an untouched
+        # new message keeps no draft).
         terminal.send(b"\x1b")
         terminal.gap(.2)
         terminal.send(b"q")
         wait_card(terminal)
         click(terminal, *point(terminal, "[Dismiss]"))
         terminal.until(lambda: terminal.screen.locate("Upgrade available") is None)
+        # Keys right after leaving the unchanged composer are dropped until
+        # the keyboard has been quiet.
+        terminal.gap(.75)
         # Dismissed notices remain discoverable through the searchable palette.
         terminal.send(b"\x10updates\r")
         wait_guide(terminal)

@@ -487,6 +487,11 @@
         "draftId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "keepQueuedSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Refuse with DraftSendQueued instead of cancelling a queued or paused send for this draft."
         }
       },
       "required": [
@@ -1853,7 +1858,7 @@
       "notes": [
         "Reads a bounded iCalendar source (128KiB). REQUEST, REPLY, PUBLISH, CANCEL and other scheduling notices can be displayed; only an unambiguous REQUEST for a verified attendee can authorize RSVP.",
         "An explicit online inspection may refresh old calendar references or verified aliases. cacheOnly:true uses retained source and identities without network access. Ambiguous display stays read-only.",
-        "Validates organizer, selected account/aliases as attendee, UID, sequence and recurrence information. Returns uid/organizer/attendee/attendeeStatus, start, startDisplay/endDisplay/durationDisplay, location/joinUrl, recurrenceDisplay, allDay and timezoneUnavailable. calendarSyncAvailable reports the local write grant; calendarSyncTarget identifies the primary-calendar policy. The durable calendarSync result is independent of confirmedResponse/responseOutcome.",
+        "Validates organizer, selected account/aliases as attendee, UID, sequence and recurrence information. Returns uid/organizer/attendee/attendeeStatus, start, startDisplay/endDisplay/durationDisplay, location/joinUrl, recurrenceDisplay, allDay and timezoneUnavailable. Only a published event (method publish) adds description (at most 4096 bytes; descriptionTruncated), the reminders and unsupportedReminders a calendar import would copy, and remindersKnown (false when its calendar data cannot be read for import); other methods omit these fields. calendarSyncAvailable reports the local write grant; calendarSyncTarget identifies the primary-calendar policy. The durable calendarSync result is independent of confirmedResponse/responseOutcome.",
         "Ordinary or cache-only inspection does not send RSVP, open links or modify Calendar. Explicit reconcile may continue the previously authorized Calendar save after confirming the sent reply. Inspect timezoneUnavailable and preserve the displayed timezone context.",
         "reconcile:true checks at most eight Sent candidates by the recorded RFC Message-ID and exact RSVP protocol identity. No match remains unknown; it never implies rejection or triggers a resend."
       ],

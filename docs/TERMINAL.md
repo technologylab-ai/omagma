@@ -238,6 +238,53 @@ activates their visible controls.
 
 The native composer shows the saved revision's MIME size. Review displays exact
 bytes, the provider limit, and the size without the original when available.
+
+### Discard a draft
+
+A new message, reply or forward that you leave (`q`, Ctrl+C or exiting Omagma)
+without changing anything keeps no draft: Omagma removes the local draft it
+created when the composer opened and shows "Nothing written · no draft kept".
+The generated quote, attribution line, signature and a recipient prefilled from
+Contacts do not count as changes; typing, a recipient, an attachment, another
+sender, a format or original-inclusion choice does, and that draft is kept as
+before. A draft reopened from Drafts is always kept when you leave it. Before
+removing anything, Omagma checks that the stored draft is still exactly what the
+composer created: if an agent or another program filled it in meanwhile, the
+draft stays and the usual "saved draft changed" choice opens instead.
+
+**Ctrl+X** reviews discarding the current draft from every compose state:
+normal mode, INSERT (Ctrl+X is never text), the compose buttons, the narrow
+full preview and send review. `d` in normal mode and `:discard-draft` open the
+same review, and **[Ctrl+X Discard]** is the last Tab stop below the composer.
+The button and its footer key stay visible at every terminal width: shortened
+to **^X Discard** where space is short, and the button moves to a row of its
+own when needed. The review names the draft (subject or "(no subject)" and the number of
+recipients) and says what is removed: the local draft, its recovery and preview
+copies and the local copies of its attached files; your original files and
+received mail are untouched. `y`, Enter on **[y Discard]** or a click on it
+discards, then returns to the mailbox, reader or Drafts view the composer came
+from with "Draft discarded". **[Esc Cancel]** is focused first; Esc or Enter on
+it keeps the draft and returns to the composer unchanged (`q` too when the
+review was opened outside INSERT). Only Tab and Shift+Tab move between the two
+buttons; arrows, `j`/`k` and Ctrl+N/P do nothing here.
+
+The review confirms only on a still keyboard: the whole review must have been
+on screen, and no key pressed, for a moment (0.6 s; every key, the opening
+Ctrl+X included, starts that moment again), and a refused confirm asks for 2 s
+of quiet before the next one. Text typed on after a stray Ctrl+X, a held or
+repeating `y`, nano's Ctrl+X `y` and the second click of a double click never
+discard; opened from INSERT, other letters only show "Esc keeps the draft · y
+discards it". After a discard, or Back from an unchanged composer, keys are
+dropped until the keyboard has been quiet for a moment, so typed-ahead letters
+never act on the mailbox. A discarded draft cannot be restored; Ctrl+Z does not
+bring it back.
+
+Discard never deletes anything in Gmail. A draft taken back from Gmail keeps its
+Gmail copy in Gmail Drafts, and the review says so. A draft paused in Gmail, a
+send with an unknown outcome and a queued send stay protected: Ctrl+X names the
+reason (take the draft back with `g`, check `:receipt`, or `:cancel-send`
+first) and removes nothing. The same applies to a review opened from the Drafts
+list: a queued or paused send is never cancelled by a discard there either.
 Editing invalidates the count until autosave and measurement finish. The measured
 content is checked again before sending; another process changing the saved
 draft requires a new review. A cancelled or rejected send also requires a fresh
@@ -564,7 +611,8 @@ Contact deletion is not implemented.
 
 `:discard-draft` deliberately reviews removal of the current local draft and
 its recovery/preview copies. Cancel is the safe default. It does not delete a
-Gmail draft or message, and pending/unknown submissions remain protected.
+Gmail draft or message, and pending/unknown submissions remain protected. In the
+composer the same review is **Ctrl+X** (see [Discard a draft](#discard-a-draft)).
 
 ## Invitation replies
 
@@ -905,6 +953,27 @@ duration, location and stated response remain available. UTC and supported
 TZID times use local zoneinfo. An embedded/custom timezone converts only when its rules agree with a known zone for the event; unresolved rules keep their stated wall time and label. All-day end dates are explicitly
 exclusive, and ambiguous/nonexistent local times stay labeled.
 
+A published calendar event (an `.ics` file with `METHOD:PUBLISH` or no
+method and no attendees, such as a bill's due date) shows **I · Details  A ·
+Add**. `I` opens **Calendar event · details**: the title, the date and time
+(all-day dates as days; timed events in local time with the time zone as sent),
+the location, the organizer, or the mail's sender when the file names none, the
+reminders `A` would copy (or that your calendar's defaults apply, and any
+unsupported alarm that would not be copied), the notes (long notes are
+shortened here; the `A` review shows them in full) and what `A` adds: the event
+in your primary calendar, with nothing sent. There is no RSVP for such an event.
+Only an event `A` can add says what `A` adds: a cancelled or damaged event, or
+one sent with additional occurrences, shows its facts without that promise, and
+a damaged one says it can't be added from Omagma.
+
+The invitation card asks for a larger terminal only when it genuinely cannot
+show its account, organizer, outcome and controls, and then names the size it
+needs, for example **Make the terminal at least 80×18 to review this event**
+(narrower than a usable card, it names the width first). The request uses the
+area between the header rows and the footer. Only an invitation you can answer
+adds **No RSVP can be sent at this size**. The `A` review names its required
+size the same way.
+
 Cancellation, publication and RSVP notices also open
 in the invitation drawer, with response controls disabled. Cancelled events do
 not offer Join. Inspection uses retained verified aliases and cached invitation
@@ -981,6 +1050,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+Z / Undo during countdown | Cancel before submission and return to editing |
 | Tab/Shift+Tab, then Enter during countdown | Choose Undo or Send now; Undo is focused initially |
 | :resume-send / :cancel-send | Explicitly handle a recovered paused send |
+| Ctrl+X / d in normal compose / :discard-draft | Review discarding this draft (also in INSERT and send review); `y` discards, Esc keeps it |
 | A in normal compose | Add outgoing attachment |
 | Ctrl+V / :paste-image in editable compose | Paste image: inline at cursor (Markdown body), else attach |
 | L / B | Links / received-file picker |
@@ -993,7 +1063,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | :spam / :unspam | Shared Spam / Not spam actions |
 | :add-contact / :discard-draft | Prefill sender contact / review local draft removal |
 | :save-all DIRECTORY | Save focused-message files to a new private destination set |
-| a / I | Contacts / invitation reply |
+| a / I | Contacts / invitation reply, or a published event's details |
 | T / :theme | Preview and choose the TUI theme |
 | Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit (Escape never quits) |
 

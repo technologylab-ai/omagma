@@ -2176,7 +2176,9 @@ try {
     assert.equal(inputField("Subject", canceledDiscard), "Retained Bea draft", "default Cancel discarded the native draft");
     await act(() => text("d"));
     await act(() => key("Tab", "Tab", 8)); // shared dialog defaults Cancel; previous control is Discard.
+    await pause(800); // Discard confirms only after the keyboard has been still.
     await act(() => key("Enter", "Enter"));
+    await pause(800); // Keys right after a discard are dropped until the keyboard is quiet.
     const afterDiscard = await chooseNativeFolder(2, 2, 2);
     assert(!afterDiscard.includes("Retained Bea draft"), "explicit shared Discard retained the draft");
     assert.equal(sends().length, 0, "local draft retention/discard sent mail");

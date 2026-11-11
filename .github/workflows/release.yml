@@ -253,6 +253,7 @@ jobs:
         run: |
           python3 tests/terminal_compose_actions.py --binary dist/omagma-linux-${{ matrix.arch }}
           python3 tests/terminal_draft_conflict.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_draft_discard.py --binary dist/omagma-linux-${{ matrix.arch }}
           python3 tests/terminal_draft_paging.py --binary dist/omagma-linux-${{ matrix.arch }}
           python3 tests/terminal_quote_policy.py --binary dist/omagma-linux-${{ matrix.arch }}
           python3 tests/terminal_reply_boundaries.py --binary dist/omagma-linux-${{ matrix.arch }}

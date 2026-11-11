@@ -698,7 +698,14 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "draft.list")) {
             const limit = try j.integer(req, "limit", 100);
             if (limit < 1 or limit > 100) return error.InvalidPageLimit;
-            return draft_summary.list(a, store.state.drafts, store.state.draftLinks, j.text(req, "cursor"), @intCast(limit));
+            const listed = try draft_summary.list(a, store.state.drafts, store.state.draftLinks, j.text(req, "cursor"), @intCast(limit));
+            // A draft whose send is queued (or paused) says so, so a list
+            // can refuse to discard it before asking (the bounded queue
+            // adds a few bytes to at most a handful of rows).
+            for ((j.get(listed, "drafts") orelse return listed).array.items) |*row| {
+                store.requireNoQueuedSend(j.text(row.*, "id")) catch try row.object.put(a, "sendQueued", .{ .bool = true });
+            }
+            return listed;
         }
         if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.read")) return @import("draft_gmail_commands.zig").readResponse(a, &store, try store.draft(try j.required(req, "draftId")));
@@ -798,7 +805,10 @@ pub const Session = struct {
             return response;
         }
         if (std.mem.eql(u8, cmd, "draft.discard")) {
-            try store.discardDraft(try j.required(req, "draftId"));
+            const draft_id = try j.required(req, "draftId");
+            // Checked under the same store lock as the removal itself.
+            if (try j.boolean(req, "keepQueuedSend", false)) try store.requireNoQueuedSend(draft_id);
+            try store.discardDraft(draft_id);
             return j.value(a, .{ .discarded = true });
         }
         if (std.mem.eql(u8, cmd, "draft.patch")) return s.patchDraft(a, &store, req);
@@ -1077,7 +1087,17 @@ pub const Session = struct {
                 if (reconcile) try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), reconcileInvitation, .{ s, a, &store, ics, req });
                 if (reconcile) try s.resumeInvitationCalendar(a, &store, ics, req);
                 const response_status = try confirmedInvitationResponse(a, &store, ics, address, aliases);
-                return j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable, .organizerName = invite.organizer_name.slice(), .defects = try invitation.Defect.list(a, invite.defects) });
+                var inspected = try j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable, .organizerName = invite.organizer_name.slice(), .defects = try invitation.Defect.list(a, invite.defects) });
+                // Only a published event carries its notes and reminders.
+                if (invite.method == .publish) {
+                    const published = publishedDetails(a, ics, address, aliases);
+                    try inspected.object.put(a, "description", .{ .string = published.description });
+                    try inspected.object.put(a, "descriptionTruncated", .{ .bool = published.truncated });
+                    try inspected.object.put(a, "reminders", try j.value(a, published.reminders));
+                    try inspected.object.put(a, "unsupportedReminders", .{ .integer = @intCast(published.unsupported) });
+                    try inspected.object.put(a, "remindersKnown", .{ .bool = published.known });
+                }
+                return inspected;
             }
             if (std.mem.eql(u8, (try confirmedInvitationResponse(a, &store, ics, address, aliases)).outcome, "unknown")) return error.UnknownOutcome;
             const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
@@ -1172,6 +1192,31 @@ pub const Session = struct {
             }
             return error.OperationNotFound;
         }
+    }
+    /// Display-only notes and reminders of a published event for its `I`
+    /// details, read by the same import parser the `A` review uses. The notes are
+    /// bounded at a character boundary; the review shows them in full. Anything
+    /// that parser refuses simply has no notes or reminders here.
+    const PublishedDetails = struct {
+        description: []const u8 = "",
+        truncated: bool = false,
+        reminders: []const @import("calendar_types.zig").Reminder = &.{},
+        unsupported: usize = 0,
+        known: bool = false,
+    };
+    const published_description_bytes = 4096;
+    fn publishedDetails(a: std.mem.Allocator, ics: []const u8, address: []const u8, aliases: []const []const u8) PublishedDetails {
+        const parsed = @import("calendar_invitation.zig").parseForCalendar(a, ics, address, aliases) catch return .{};
+        if (parsed.method != .publish) return .{};
+        var description = std.mem.trim(u8, parsed.description, " \t\r\n");
+        var truncated = false;
+        if (description.len > published_description_bytes) {
+            var end: usize = published_description_bytes;
+            while (end > 0 and (description[end] & 0xc0) == 0x80) end -= 1;
+            description = description[0..end];
+            truncated = true;
+        }
+        return .{ .description = description, .truncated = truncated, .reminders = parsed.reminders, .unsupported = parsed.unsupported_reminders, .known = true };
     }
     fn cachedAliases(a: std.mem.Allocator, store: *const storage.Store) ![]const []const u8 {
         const result = try a.alloc([]const u8, store.state.identities.len);
@@ -7260,4 +7305,61 @@ test "meet notes: outer deadline after a simulated provider commit retains uncer
     defer arena.deinit();
     const request = try j.value(arena.allocator(), .{ .cmd = "calendar.meet-event-apply" });
     try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(request, observed));
+}
+
+test "invitation inspect: a published event's notes are bounded at a character boundary with its reminders" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ics: std.ArrayList(u8) = .empty;
+    try ics.appendSlice(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:notes@example.test\r\nDTSTAMP:20261109T071718Z\r\nDTSTART;VALUE=DATE:20261123\r\nSUMMARY:Fictional bill\r\nDESCRIPTION:x");
+    // 3000 two-byte characters, folded at character boundaries, after one
+    // ASCII byte: the 4096-byte bound falls inside a character.
+    for (0..100) |_| {
+        try ics.appendSlice(a, "\r\n ");
+        for (0..30) |_| try ics.appendSlice(a, "é");
+    }
+    try ics.appendSlice(a, "\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    const details = Session.publishedDetails(a, ics.items, "self@example.test", &.{});
+    try std.testing.expect(details.known and details.truncated);
+    try std.testing.expectEqual(@as(usize, 4095), details.description.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(details.description));
+    try std.testing.expectEqual(@as(usize, 1), details.reminders.len);
+    try std.testing.expectEqual(@as(u32, 15), details.reminders[0].minutes);
+    // An invitation (REQUEST) is not a published event: nothing is added.
+    const request = try std.mem.replaceOwned(u8, a, ics.items, "METHOD:PUBLISH", "METHOD:REQUEST");
+    try std.testing.expect(!Session.publishedDetails(a, request, "self@example.test", &.{}).known);
+}
+
+test "draft discard: keepQueuedSend refuses a queued send instead of cancelling it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/queued-discard", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const created = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Queued", .bodyText = "Queued note" } }));
+    const id = j.text(created, "id");
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = "queued-discard", .delaySeconds = 30 }));
+    try std.testing.expectError(error.DraftSendQueued, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id, .keepQueuedSend = true })));
+    const queue = j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.list", .account = account })), "queue").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), queue.len);
+    try std.testing.expectEqualStrings("queued", j.text(queue[0], "state"));
+    const rows = j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    // The list names the queued send, so a list can refuse before asking.
+    try std.testing.expect(j.get(rows[0], "sendQueued").?.bool);
+    // Without the flag the documented behaviour stays: the queued send is
+    // cancelled and the draft removed.
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id }));
+    try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 }
