@@ -618,7 +618,7 @@ Enter and mouse clicks. Narrow terminals use a compact presentation, with
 all-day dates kept separate from timed appointments. While the next range
 loads, the previous one stays on screen, dimmed and labelled.
 
-Agenda and Day rows read `A 09:00–10:00  1h   Title · Place`: the source letter
+Agenda rows read `A 09:00–10:00  1h   Title · Place`: the source letter
 (when several calendars are shown), time, duration, then title and place.
 Accounts appear on rows only when several accounts are shown. Day headers say
 `Today · Tue 10 Nov` and `Tomorrow · Wed 11 Nov`; past events are dimmed and
@@ -635,15 +635,53 @@ the stable code remains in Help. Time that Google shares only as busy shows as
 first, then returns to the Calendar page you opened it from. The Back control
 also supports mouse, Tab and Enter.
 
-In Week, extra height reveals up to four event titles per hour. `+N` lists the
-other events in that exact hour; **Space · Show all** lists events sharing the
-selected event's visible rows. The chooser shows exact dates, time zones,
-calendar and account; Enter selects and reveals, then ordinary Enter opens the
-chosen event. Esc returns to the same context. The optional `g`, then `p`
-Priority calendar influences the display order after non-declined events and
-starts in the current hour. Source letters and `*` remain readable without
-colour. A deliberate reveal pins only its chosen hour or all-day date, so a long
-routine cannot hide new starts in other hours.
+### Day and Week
+
+Day shows one wide column and Week seven Monday-first day columns over one
+time axis (three columns on 60–103-column terminals, as the header says;
+narrower, Week falls back to the list above with a notice). Every column is
+dated. Each timed event is a block: its top is the start and its height the
+duration, and short or zero-length events still get one readable row; when a
+row covers more than the event's start (an hour per row on small terminals),
+the block names its start (`13:30`, or `:30` when narrow). A block shows its
+title (wrapped when it is tall), then the time and the place when there is
+room, filled with its calendar's theme colour and led by the calendar's
+letter when several are shown. Overlapping events share their day side by
+side; when a column has no room for another lane, `+N` counts the rest and
+lists that exact hour. No event is left out of view without a `+N` that
+counts it. Events that cross midnight appear on both days. All-day events,
+and timed events lasting a day or more, are bars in a band above the grid
+spanning their days (`◂`/`▸` when they continue outside the range, with the
+times of a timed one when they fit); the band always keeps a row, and a row
+below the bars says `+N more` where a day has more than fit. A terminal too
+short for the grid shows the list with a notice instead.
+
+Rows are half an hour once ten hours fit (finer on tall terminals, one hour on
+small ones). The working day, 08:00–18:00, is shown first; the grid then
+scrolls only as far as the selected event needs, and `Ctrl+E`/`Ctrl+Y` move it
+an hour later/earlier until the selection changes (also across a resize).
+`↑`/`↓` beside the time
+axis, and `↑N`/`↓N` in a day's header, show what lies outside it. Today's
+header is highlighted, a red line marks the current time (its clock replaces
+the hour label), and weekends are shaded slightly differently.
+
+`j`/`k` move through events chronologically; the selected event takes its
+calendar's full colour (reverse video without colour). When its day is
+crowded it is drawn on top, and what it covers is counted by `+N` where it
+starts. A click selects and opens an event. Accepted events have a solid bar,
+tentative ones a dashed bar, unanswered ones a dotted bar and no fill, and
+declined ones a dotted bar, no fill and a struck-through title; time shared
+only as busy is hatched. The title always starts with `~`, `?` or `×` for
+those states, also where the calendar's letter takes the bar's place. Past
+events are dimmed.
+
+**Space · Show all** lists the events sharing the selected event's rows (the
+whole day when it is scrolled out of view, which also brings it back), and
+the row below the grid names one of them when there is one. The chooser shows exact dates, time
+zones, calendar and account; Enter selects and reveals, then ordinary Enter
+opens the chosen event. Esc returns to the same context. The optional `g`,
+then `p` Priority calendar takes the free lane first among non-declined events
+that start together. Source letters and `*` remain readable without colour.
 
 ### Create and edit meetings
 
