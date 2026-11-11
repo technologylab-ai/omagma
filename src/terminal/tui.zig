@@ -378,7 +378,7 @@ fn hintPriority(segment: []const u8) u8 {
     if (same(segment, "Enter Read")) return 9;
     const ranks = [_]struct { rank: u8, keys: []const []const u8 }{
         .{ .rank = 10, .keys = &.{ "j/k", "?", "q", "Esc", "Esc/q", "n/Esc/q", "Enter", "y", "Ctrl+S", "i", "f" } },
-        .{ .rank = 9, .keys = &.{ "x", "D", "c", "/", "^V" } },
+        .{ .rank = 9, .keys = &.{ "x", "D", "c", "/", "^V", "Ctrl+X" } },
         .{ .rank = 8, .keys = &.{ "r/R", "r", "Tab", "J/K", "h/l", "z/q", "n/N", "+", "-", "l/Esc/q", "Tab/Shift+Tab" } },
         .{ .rank = 7, .keys = &.{ "\\", "Ctrl+Z", "Space" } },
         .{ .rank = 2, .keys = &.{ "T", "Ctrl+T", "Ctrl+G", "1–3", "Ctrl+D/U", "Ctrl+A/E", "v", "o", "e", "V", "L", "B", "H", "Q", "S", "I", "b", "Ctrl+R", "Ctrl+N/P" } },
@@ -499,6 +499,23 @@ fn readerViewKey(key: Key) bool {
 }
 fn plural(count: usize, one: []const u8, many: []const u8) []const u8 {
     return if (count == 1) one else many;
+}
+/// The discard review accepts y only after it has been on screen this long,
+/// and not again until the keyboard was quiet this long after a refusal.
+const discard_settle_ms: i64 = 600;
+const discard_quiet_ms: i64 = 2000;
+/// Addresses in one composer recipient field (frame allocator). Unfinished
+/// text still counts its comma-separated entries, so the review never says
+/// "no recipients" for a draft that has some.
+fn composeRecipientCount(a: Allocator, raw: []const u8) usize {
+    if (std.mem.trim(u8, raw, " \t\r\n,").len == 0) return 0;
+    if (recipients.parseOutgoing(a, raw)) |parsed| return parsed.len else |_| {}
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, raw, ',');
+    while (parts.next()) |part| {
+        if (std.mem.trim(u8, part, " \t\r\n").len > 0) count += 1;
+    }
+    return count;
 }
 
 /// Triage feedback names its action from the submitted mail.batch request.
@@ -904,8 +921,9 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":receipt", .action = "Inspect the current draft's operation receipts" },
     .{ .keys = "p in a protected draft", .action = "Open the saved draft's HTML preview; no edit, upload or resend", .requires = .open_urls },
     .{ .keys = "q in normal mode", .action = "Save the draft and go back; Esc only leaves insertion" },
-    .{ .keys = "d in normal compose", .action = "Review discarding this draft; Cancel keeps it" },
+    .{ .keys = "Ctrl+X · d in normal compose", .action = "Review discarding this draft, also while typing and in send review; y or [y Discard] removes the local draft, Esc keeps it. Nothing in Gmail is deleted" },
     .{ .keys = "Ctrl+C", .action = "Cancel work; idle drafts save/back, native mailbox quits" },
+    .{ .action = "Leaving a new message, reply or forward you have not changed keeps no draft. A draft reopened from Drafts is kept." },
     .{ .action = "Draft changes autosave locally after a short pause.", .requires = .durable_drafts },
     .{ .action = "Drafts are retained in this session; the Drafts mailbox reopens them. Reload or disconnect discards them.", .requires = .session_drafts },
     .{ .action = "Unconfirmed sends protect their drafts. Check Sent in Gmail and acknowledge the result before a new review.", .requires = .session_drafts },
@@ -1329,6 +1347,11 @@ const Compose = struct {
     attachment_return_insert: bool = false,
     revision: u64 = 0,
     saved_revision: u64 = 0,
+    /// The revision right after this session generated a new, reply or
+    /// forward draft (quote, attribution, signature, a chosen contact).
+    /// Leaving at exactly this revision keeps no draft. Null for a reopened
+    /// or recovered draft, which is never removed without confirmation.
+    pristine_revision: ?u64 = null,
     completion_selected: usize = 0,
     signature: Field = .{},
     signature_custom: bool = false,
@@ -1568,6 +1591,10 @@ const Job = struct {
     recovery_return_to_mail: bool = false,
     recovery_from_autosave: bool = false,
     save_copy: bool = false,
+    /// draft.discard for an untouched composer's Back, not an explicit Discard.
+    discard_untouched: bool = false,
+    /// This Back saves an untouched draft whose removal was refused.
+    discard_fallback: bool = false,
     reload_conflict: bool = false,
     reload_revision: u64 = 0,
     /// A selected native draft/send command: its job_arena is OS-backed and
@@ -2189,6 +2216,10 @@ const App = struct {
     compose: Compose = .{},
     compose_active: bool = false,
     compose_intent: PendingCompose = .none,
+    /// When the open discard review starts accepting y, and the last y it
+    /// refused (see confirmDiscardKey).
+    discard_armed_ms: i64 = std.math.maxInt(i64),
+    discard_refused_ms: ?i64 = null,
     file_browser: file_dialog.State = .{},
     file_focus: FileFocus = .path,
     file_browser_error: Field = .{},
@@ -4736,6 +4767,7 @@ const App = struct {
             if (self.ux_overlay == .gmail_draft) self.dismissGmailDraft() else self.closeUx();
             return;
         }
+        if (self.ux_overlay == .discard and key.matches('y', .{})) return self.confirmDiscardKey();
         const rows = self.uxCount();
         if (tabDirection(key)) |backwards| {
             for (0..4) |_| {
@@ -4783,7 +4815,7 @@ const App = struct {
         if (self.uxInput()) {
             try self.editLine(inner, 0, prompt, &self.ux_query, self.ux_focus == 0, if (self.ux_focus == 0) .selected else .text);
             self.mouseRows(inner, 0, 1, .dialog_action, 10);
-        } else try self.line(inner, 0, if (self.ux_overlay == .draft_conflict) "Keep local text or load the saved version" else if (self.ux_overlay == .scope) "Choose what mail actions affect" else "Review the pinned target before confirming", .subject);
+        } else try self.line(inner, 0, if (self.ux_overlay == .draft_conflict) "Keep local text or load the saved version" else if (self.ux_overlay == .scope) "Choose what mail actions affect" else if (self.ux_overlay == .discard) "Discard this draft? It can't be restored." else "Review the pinned target before confirming", .subject);
         try self.line(inner, 1, try self.fitLine(inner, self.ux_account.value(), inner.width), .muted);
         self.ux_height = inner.height -| 5;
         const count = self.uxCount();
@@ -4796,13 +4828,13 @@ const App = struct {
             try self.line(inner, position - first_position + 2, try self.fitLine(inner, label, inner.width), if (position == self.ux_selected) (if (self.ux_focus == 1) .selected else .subject) else .text);
             self.mouseRows(inner, position - first_position + 2, 1, .dialog_action, position + 100);
         }
-        const primary = if (self.ux_overlay == .draft_conflict) "[Use choice]" else if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
+        const primary = if (self.ux_overlay == .draft_conflict) "[Use choice]" else if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[y Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
         if (inner.height >= 6) if (self.uxAt(self.ux_selected)) |selected_row| {
             try self.line(inner, inner.height - 3, try self.fitLine(inner, selected_row.detail, inner.width), .muted);
         };
         const x = try self.actionButton(inner, inner.height - 2, 0, primary, self.ux_focus == 2, count > 0 or !self.uxFilter(), .dialog_action, 12);
-        _ = try self.actionButton(inner, inner.height - 2, x, if (self.ux_overlay == .discard or self.ux_overlay == .triage_review) "[Cancel]" else "[Back]", self.ux_focus == 3, true, .dialog_action, 13);
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, if (self.uxFilter()) "Type filter · Ctrl+N/P Choose · Tab Controls · Enter · Esc Back" else "Tab Controls · Enter Activate · Esc Back", inner.width), .muted);
+        _ = try self.actionButton(inner, inner.height - 2, x, if (self.ux_overlay == .discard) "[Esc Cancel]" else if (self.ux_overlay == .triage_review) "[Cancel]" else "[Back]", self.ux_focus == 3, true, .dialog_action, 13);
+        try self.line(inner, inner.height - 1, try self.fitLine(inner, if (self.uxFilter()) "Type filter · Ctrl+N/P Choose · Tab Controls · Enter · Esc Back" else if (self.ux_overlay == .discard) "Tab Controls · Enter Activate · y Discard · Esc Keep draft" else "Tab Controls · Enter Activate · Esc Back", inner.width), .muted);
     }
     fn runExtendedAction(self: *App, action: action_palette.Id) !void {
         switch (action) {
@@ -4835,9 +4867,14 @@ const App = struct {
                 try self.useContactAddress(value);
             },
             .discard => {
-                if (self.compose_active and self.compose.unknown_outcome) return error.UnknownOutcome;
+                const draft = try self.allocator.dupe(u8, self.ux_target.value());
+                defer self.allocator.free(draft);
+                if (self.compose_active and same(self.compose.id.value(), draft)) if (self.discardRefusal()) |why| {
+                    self.say(true, "{s}", .{why});
+                    return;
+                };
                 self.preemptReadOnly();
-                try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = self.ux_target.value() });
+                _ = try self.startDraftDiscard(draft, false);
             },
             .triage_review => {
                 const request = try std.json.parseFromSliceLeaky(Value, self.frame.allocator(), self.pending_triage.value(), .{});
@@ -4866,14 +4903,124 @@ const App = struct {
         self.picker = false;
         try self.editContact(value);
     }
+    /// Why the open composer's draft must stay, or null when Discard may
+    /// remove it. Each reason says what to do instead; nothing is removed.
+    fn discardRefusal(self: *const App) ?[]const u8 {
+        if (self.compose.unknown_outcome) return "Draft kept · its send outcome is unknown · :receipt checks Sent before anything is removed";
+        if (self.compose.gmailPaused()) return "Draft kept · it is paused in Gmail · g takes it back before it can be discarded";
+        if (self.grace_active or self.grace_recovery) return "Draft kept · a send is queued for it · :cancel-send first, then discard";
+        if (self.job.future != null and !readOnlyJob(self.job.kind)) return "Draft kept · wait for the current draft operation, then discard";
+        return null;
+    }
+    /// One confirmation names the draft and says exactly what goes. Focus
+    /// starts on Cancel; y works only once the dialog has been on screen.
     fn openDiscardDraft(self: *App) !void {
-        const draft = if (self.compose_active) self.compose.id.value() else if (self.drafts_list) self.messageId() else return error.DraftRequired;
+        const composing = self.compose_active;
+        const draft = if (composing) self.compose.id.value() else if (self.drafts_list) self.messageId() else return error.DraftRequired;
         if (draft.len == 0) return error.DraftRequired;
-        if (self.compose_active and self.compose.unknown_outcome) return error.UnknownOutcome;
-        try self.beginUx(.discard, " Discard local draft · emails are kept ");
+        if (composing) if (self.discardRefusal()) |why| {
+            self.say(true, "{s}", .{why});
+            return;
+        };
+        const a = self.frame.allocator();
+        var subject: []const u8 = "";
+        var recipient_count: usize = 0;
+        var file_count: usize = 0;
+        if (composing) {
+            subject = self.compose.fields[3].value();
+            for (self.compose.fields[0..3]) |*field| recipient_count += composeRecipientCount(a, field.value());
+            file_count = self.compose.attachments.len;
+        } else if (self.selectedMessage()) |message| {
+            subject = text(get(message, "subject"));
+            const counts = get(message, "summaryCounts");
+            if (counts != .null) {
+                recipient_count = @intCast(@max(0, integer(get(counts, "to")) +| integer(get(counts, "cc")) +| integer(get(counts, "bcc"))));
+                file_count = @intCast(@max(0, integer(get(counts, "attachments"))));
+            } else {
+                recipient_count = items(get(message, "to")).len + items(get(message, "cc")).len + items(get(message, "bcc")).len;
+                file_count = items(get(message, "attachments")).len;
+            }
+        }
+        // Discard removes local state only. A taken-back Gmail copy stays.
+        const gmail_copy = composing and self.gmailCopyWarning();
+        const label = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (subject.len > 0) subject else "(no subject)", if (recipient_count == 0) @as([]const u8, "no recipients") else try std.fmt.allocPrint(a, "{d} {s}", .{ recipient_count, plural(recipient_count, "recipient", "recipients") }) });
+        const detail: []const u8 = if (gmail_copy) "Removes only the local draft · its Gmail copy stays in Gmail Drafts" else if (file_count > 0) try std.fmt.allocPrint(a, "Removes this local draft and its {d} attached file {s} · Gmail unchanged", .{ file_count, plural(file_count, "copy", "copies") }) else "Removes this local draft · nothing is sent or changed in Gmail";
+        try self.beginUx(.discard, " Discard local draft ");
         try self.ux_target.set(self.allocator, draft);
-        const subject = if (self.compose_active) self.compose.fields[3].value() else if (self.selectedMessage()) |message| text(get(message, "subject")) else "";
-        try self.uxRow(.{ .label = if (subject.len > 0) subject else "(no subject)", .detail = "Cancel keeps this draft; Discard removes only the local draft" });
+        try self.uxRow(.{ .label = label, .detail = detail });
+        self.discard_armed_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| discard_settle_ms;
+        self.discard_refused_ms = null;
+    }
+    /// y discards only a dialog that has been on screen for a moment; a key
+    /// typed ahead or held down never does. Enter on the focused [y Discard]
+    /// button (reached deliberately with Tab) and a click act at once.
+    fn confirmDiscardKey(self: *App) !void {
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        const quiet = if (self.discard_refused_ms) |at| now -| at < discard_quiet_ms else false;
+        if (now < self.discard_armed_ms or quiet) {
+            self.discard_refused_ms = now;
+            self.discard_armed_ms = @max(self.discard_armed_ms, now +| discard_settle_ms);
+            self.say(true, "Draft kept · let go, look, then press y once more", .{});
+            return;
+        }
+        self.ux_focus = 2;
+        try self.activateUx();
+    }
+    /// The one draft.discard write, shared by Discard and an untouched Back.
+    fn startDraftDiscard(self: *App, draft: []const u8, untouched: bool) !bool {
+        if (self.job.future != null) {
+            self.say(true, "Draft kept · wait for the current operation, then discard", .{});
+            return false;
+        }
+        try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = draft });
+        try self.job.draft_target.set(draft);
+        self.job.discard_untouched = untouched;
+        return true;
+    }
+    /// This session generated the draft (new, reply or forward) and nothing
+    /// changed since: no typed text, recipient, file, sender, format or quote
+    /// choice. Reopened, recovered, Gmail-linked, queued and sent-or-uncertain
+    /// drafts never count.
+    fn composeUntouched(self: *const App) bool {
+        const baseline = self.compose.pristine_revision orelse return false;
+        return self.compose_active and self.compose.new_draft and baseline == self.compose.revision and
+            self.compose.id.value().len > 0 and !self.compose.unknown_outcome and !self.compose.gmailPaused() and
+            self.compose.gmail_link == null and !self.compose.saved_changed and self.compose.operation_id.value().len == 0 and
+            !self.grace_active and !self.grace_recovery and self.pending_imports.items.len == 0 and !self.clipboard_paste.active;
+    }
+    /// Back (q, Ctrl+C) from an untouched composer removes the draft its
+    /// opening created and returns to the mailbox like a saved Back.
+    fn abandonUntouchedDraft(self: *App) !void {
+        self.preemptReadOnly();
+        self.cancelAutosaveTimer();
+        self.autosave_due = false;
+        const draft = try self.allocator.dupe(u8, self.compose.id.value());
+        defer self.allocator.free(draft);
+        _ = try self.startDraftDiscard(draft, true);
+    }
+    /// The unused draft could not be removed: keep it exactly as Back always
+    /// did, and say why the draft is still there.
+    fn keepUntouchedDraft(self: *App, draft: []const u8) !void {
+        if (!self.compose_active or !same(self.compose.id.value(), draft)) return;
+        self.compose.pristine_revision = null;
+        try self.saveDraft(.save_back);
+        if (self.job.future != null and self.job.kind == .save_back) self.job.discard_fallback = true;
+    }
+    /// Exit (signal or end of input) with an untouched composer keeps no
+    /// draft either. A failed removal falls back to the usual save.
+    fn discardUntouchedAtExit(self: *App) bool {
+        if (browser_target or !self.composeUntouched()) return false;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const request = encodeJobRequest(a, .{ .account = self.account(), .cmd = "draft.discard", .draftId = self.compose.id.value() }, false) catch return false;
+        const response = self.client.call(a, request) catch return false;
+        if (response.len > response_limit) return false;
+        const envelope = std.json.parseFromSliceLeaky(Value, a, response, .{ .allocate = .alloc_if_needed, .max_value_len = response_limit }) catch return false;
+        if (get(envelope, "ok") != .bool or !truth(get(envelope, "ok"))) return false;
+        self.compose.pristine_revision = null;
+        self.compose_active = false;
+        return true;
     }
     fn navigateUnread(self: *App, next: bool) !void {
         if (self.mode == .command) self.mode = .browse;
@@ -6714,6 +6861,10 @@ const App = struct {
             if (self.page_loading and self.page_loading_account == self.job.account_index and self.page_loading_generation == self.job.generation) self.completePageLoad();
             if (self.job.kind == .triage_scope) self.triage_waiting = false;
         } else if (self.job.failure) |err| {
+            if (self.job.kind == .draft_discard and self.job.discard_untouched and err != error.Canceled) {
+                const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
+                return self.keepUntouchedDraft(target);
+            }
             if (err == error.ArchivedDraftReadOnly and try self.recoverSettledDraft(self.job.kind)) return;
             if (err == error.ReviewedDraftChanged and self.job.kind == .grace_stage and self.compose_active and self.job.account_index == self.account_index and self.job.generation == self.generation and same(self.job.draft_target.slice(), self.compose.id.value())) {
                 self.savedDraftChanged();
@@ -6966,6 +7117,10 @@ const App = struct {
                     return;
                 }
                 if (same(self.status_error_code[0..self.status_error_len], "ArchivedDraftReadOnly") and try self.recoverSettledDraft(kind)) return;
+                if (kind == .draft_discard and self.job.discard_untouched) {
+                    const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
+                    return self.keepUntouchedDraft(target);
+                }
                 if (kind == .follow_up_write and same(self.status_error_code[0..self.status_error_len], "FollowUpChanged")) {
                     self.loadFollowUps() catch {};
                     self.sayError("FollowUpChanged");
@@ -7076,20 +7231,30 @@ const App = struct {
                 try self.revealUnreadTarget(target);
             },
             .draft_discard => {
+                // A refused removal was handled with the envelope above.
+                const untouched = self.job.discard_untouched;
+                const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
                 _ = try self.data(self.job_arena.allocator(), response);
-                if (self.compose_active and same(self.compose.id.value(), self.ux_target.value())) {
+                if (self.compose_active and same(self.compose.id.value(), target)) {
+                    // Leave exactly like a saved Back: the mailbox, reader or
+                    // Drafts view the composer was opened from.
+                    const gmail_copy = self.gmailCopyWarning();
                     self.cancelAutosaveTimer();
+                    self.autosave_due = false;
                     self.clearGraceRecovery();
-                    self.clearComposePreview();
+                    self.mode = .browse;
+                    self.closeComposer();
                     self.compose.deinit(self.allocator);
                     self.compose = .{};
-                    self.compose_active = false;
-                    self.invalidateComposerState();
+                    if (self.folder == 2) self.pending_list = true;
+                    try self.resumeMailboxReader();
+                    self.say(false, "{s}", .{if (untouched) @as([]const u8, "Nothing written · no draft kept") else if (gmail_copy) "Draft discarded · its Gmail copy stays in Gmail Drafts" else "Draft discarded"});
+                    return;
                 }
                 self.mode = .browse;
                 self.generation +%= 1;
                 _ = try self.loadCachedList("");
-                self.say(false, "Local draft discarded · email kept", .{});
+                self.say(false, "Draft discarded", .{});
             },
             .attachment_import => {
                 if (self.clipboard_paste.active and (!self.clipboardContextCurrent() or self.mode != .compose)) return;
@@ -7367,6 +7532,8 @@ const App = struct {
                         try self.setComposeSignature(signature_in);
                         try self.composerChanged();
                     }
+                    // Everything above was generated, not written by the user.
+                    self.compose.pristine_revision = self.compose.revision;
                 }
                 self.say(false, "Draft retained · i Edit · e $EDITOR · Ctrl+S Review send", .{});
                 if (kind == .draft_read) {
@@ -7381,11 +7548,14 @@ const App = struct {
                     try self.senderRows();
                 }
                 if (self.compose_active and self.compose.new_draft and self.compose.revision == 0 and !self.compose.unknown_outcome) {
+                    // A late generated signature keeps an untouched draft untouched.
+                    const untouched = self.compose.pristine_revision == @as(?u64, 0);
                     for (self.identities) |identity| if (std.ascii.eqlIgnoreCase(text(get(identity, "address")), self.compose.from.value())) {
                         const signature_in = text(get(identity, "signature"));
                         if (signature_in.len > 0) {
                             try self.setComposeSignature(signature_in);
                             try self.composerChanged();
+                            if (untouched) self.compose.pristine_revision = self.compose.revision;
                         }
                         break;
                     };
@@ -7507,6 +7677,8 @@ const App = struct {
                     const exit_code = self.editor_exit.?;
                     self.editor_exit = null;
                     self.sayEditorResult(exit_code);
+                } else if (kind == .save_back and self.job.discard_fallback) {
+                    self.say(true, "Draft kept in Drafts · the unused draft could not be removed", .{});
                 } else self.say(false, "{s}", .{if (kind == .save_review) (if (self.deliveryBlocksSend()) "Review send · Esc Return to draft" else "Review send · y Send · Esc Return to draft") else if (self.capabilities.durable_drafts) "Draft saved locally" else "Draft saved in this tab · reload/disconnect discards it"});
                 if (kind == .save_review) self.compose_preview_scroll = 0;
                 if (kind == .save_back and self.folder == 2) self.pending_list = true;
@@ -9101,6 +9273,8 @@ const App = struct {
         std.mem.swap(?std.heap.ArenaAllocator, &self.compose.gmail_arena, &staged_arena);
         self.compose.gmail_link = staged_link;
         self.compose.gmail_guard_unknown = false;
+        // A recovered copy preserves the user's edits; leaving never removes it.
+        self.compose.pristine_revision = null;
         self.compose.operation_id.deinit(self.allocator);
         self.compose.operation_error.deinit(self.allocator);
         self.gmail_draft_outcome.deinit(self.allocator);
@@ -9218,6 +9392,8 @@ const App = struct {
             } else self.markUnknown(.send);
             return;
         }
+        // Nothing written since it opened: Back keeps no draft.
+        if (kind == .save_back and self.composeUntouched()) return self.abandonUntouchedDraft();
         if (kind == .save_review) {
             try self.validateComposeReview();
             self.requireComposePreview() catch |err| {
@@ -9256,6 +9432,7 @@ const App = struct {
     }
     fn persistDraftAtExit(self: *App) !void {
         if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome or self.compose.gmailPaused()) return;
+        if (self.discardUntouchedAtExit()) return;
         // Only the local save/recovery acknowledgement matters at exit. Do
         // not launch fresh size measurements or unrelated background reads.
         self.exit_persistence = true;
@@ -10101,6 +10278,7 @@ const App = struct {
     fn composeControlEnabled(self: *const App, index: usize) bool {
         if (index == self.compose.attachments.len + 4) return self.compose_action_mask & 1 != 0;
         if (index == self.compose.attachments.len + 5) return self.compose_action_mask & 2 != 0;
+        if (index == self.compose.attachments.len + 8) return self.compose_action_mask & 4 != 0;
         if (index == self.compose.attachments.len + 6) return self.compose_original_drawn and self.originalPolicyMutable();
         if (index == self.compose.attachments.len + 7) return self.compose_fold_drawn;
         if (self.compose.unknown_outcome) return false;
@@ -10115,9 +10293,11 @@ const App = struct {
         if (index == self.compose.attachments.len + 6) return self.compose_original_drawn and self.originalPolicyUnlocked();
         if (index == self.compose.attachments.len + 4) return self.compose_action_drawn & 1 != 0;
         if (index == self.compose.attachments.len + 5) return self.compose_action_drawn & 2 != 0;
+        if (index == self.compose.attachments.len + 8) return self.compose_action_drawn & 4 != 0;
         return self.composeControlEnabled(index);
     }
     // Keep stable control IDs while placing source controls before the footer.
+    // [Ctrl+X Discard] (base + 8) is last, after Preview in browser and Gmail.
     fn composeControlOrder(self: *const App, index: usize) usize {
         const base = self.compose.attachments.len;
         if (index == base + 4 or index == base + 5) return index + 2;
@@ -10125,7 +10305,7 @@ const App = struct {
         return index;
     }
     fn adjacentComposeControl(self: *const App, from: usize, backwards: bool) ?usize {
-        const count = self.compose.attachments.len + 8;
+        const count = self.compose.attachments.len + 9;
         var index = self.composeControlOrder(from);
         while (true) {
             if (backwards) {
@@ -10141,7 +10321,7 @@ const App = struct {
     }
     fn focusComposeAttachments(self: *App, cursor: usize) void {
         if (!self.compose.attachment_focus) self.compose.attachment_return_insert = self.compose.insert_mode;
-        const wanted = @min(cursor, self.compose.attachments.len + 7);
+        const wanted = @min(cursor, self.compose.attachments.len + 8);
         self.compose_secondary = false;
         self.compose.attachment_focus = true;
         self.compose.attachment_cursor = if (self.composeControlFocusable(wanted)) wanted else self.adjacentComposeControl(wanted, false) orelse self.adjacentComposeControl(wanted, true) orelse wanted;
@@ -10153,7 +10333,7 @@ const App = struct {
         self.compose.insert_mode = restore_insert and self.compose.attachment_return_insert;
     }
     fn onComposeAttachmentKey(self: *App, key: Key) !void {
-        const count = self.compose.attachments.len + 7;
+        const count = self.compose.attachments.len + 8;
         self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
         if (self.compose_secondary and !self.composeSecondaryAvailable(self.compose.attachment_cursor)) self.compose_secondary = false;
         if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
@@ -10198,6 +10378,7 @@ const App = struct {
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 7 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.toggleOriginalFold();
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 4 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.previewComposeInBrowser();
         if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 5 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.openGmailDraft();
+        if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 8 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.openDiscardDraft();
         if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('n', .{ .ctrl = true })) self.compose.attachment_cursor = self.adjacentComposeControl(self.compose.attachment_cursor, false) orelse self.compose.attachment_cursor else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('p', .{ .ctrl = true })) self.compose.attachment_cursor = self.adjacentComposeControl(self.compose.attachment_cursor, true) orelse self.compose.attachment_cursor else if (key.matches('A', .{}) or key.matches('a', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == 0)) try self.promptAttachment() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 1) try self.toggleComposeFormat() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 2) self.cycleComposePreview() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 3) try self.cycleComposeIdentity() else if (self.compose.attachment_cursor > 0 and self.compose.attachment_cursor <= self.compose.attachments.len and (key.matches(Key.enter, .{}) or key.matches('x', .{}))) try self.detachAttachment(self.compose.attachment_cursor - 1);
     }
     fn detachAttachment(self: *App, index: usize) !void {
@@ -12082,6 +12263,11 @@ const App = struct {
                 if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = 3 + index else self.focusComposeAttachments(self.compose.attachments.len + 4 + index);
                 if (index == 0) try self.previewComposeInBrowser() else try self.openGmailDraft();
             },
+            .compose_discard => {
+                if (self.mode != .compose or wheel != null or self.compose_action_mask & 4 == 0) return;
+                if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = 7 else self.focusComposeAttachments(self.compose.attachments.len + 8);
+                try self.openDiscardDraft();
+            },
             .compose_original_policy, .compose_original_fold => {
                 if ((self.mode != .compose and self.mode != .review) or wheel != null) return;
                 const policy = hit.kind == .compose_original_policy;
@@ -12221,7 +12407,7 @@ const App = struct {
         self.dialog_focus.ensure(.preview, 0);
         if (tabDirection(key)) |backwards| {
             self.dialog_focus.index = previewControlOrder(self.dialog_focus.index);
-            self.dialog_focus.move(backwards, 7, 0b111 | (@as(u8, if (self.compose_original_drawn and self.originalPolicyUnlocked()) 1 else 0) << 3) | (@as(u8, if (self.compose_fold_drawn) 1 else 0) << 4) | (self.compose_action_drawn << 5));
+            self.dialog_focus.move(backwards, 8, 0b111 | (@as(u8, if (self.compose_original_drawn and self.originalPolicyUnlocked()) 1 else 0) << 3) | (@as(u8, if (self.compose_fold_drawn) 1 else 0) << 4) | (self.compose_action_drawn << 5));
             self.dialog_focus.index = previewControlOrder(self.dialog_focus.index);
         } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 5) {
             try self.setOriginalIncluded(!self.compose.include_original, true);
@@ -12231,6 +12417,8 @@ const App = struct {
             try self.previewComposeInBrowser();
         } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 4 and self.compose_action_mask & 2 != 0) {
             try self.openGmailDraft();
+        } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 7 and self.compose_action_mask & 4 != 0) {
+            try self.openDiscardDraft();
         } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) self.compose_preview_full = false else if (key.matches('p', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) self.cycleComposePreview() else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('d', .{ .ctrl = true })) {
             self.dialog_focus.index = 0;
             self.scrollReader(true, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
@@ -12256,7 +12444,7 @@ const App = struct {
             if (self.compose_preview_full and !self.compose.unknown_outcome and self.vx.window().width < 90) return self.onComposePreviewKey(key);
             if (self.compose.attachment_focus and (tabDirection(key) != null or key.matches(Key.enter, .{}) or key.matches(Key.escape, .{}) or key.matches('q', .{}))) return self.onComposeAttachmentKey(key);
             if (tabDirection(key)) |backwards| {
-                const first = if (backwards) self.adjacentComposeControl(self.compose.attachments.len + 8, true) else self.adjacentComposeControl(self.compose.attachments.len, false);
+                const first = if (backwards) self.adjacentComposeControl(self.compose.attachments.len + 9, true) else self.adjacentComposeControl(self.compose.attachments.len, false);
                 if (first) |index| self.focusComposeAttachments(index);
                 return;
             }
@@ -12391,7 +12579,7 @@ const App = struct {
                 self.compose_secondary = self.compose.attachment_cursor == 0 and self.uploadAllAvailable();
             } else self.compose.selected += 1;
         } else if (key.matches(Key.tab, .{ .shift = true })) {
-            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 5) else self.compose.selected -= 1;
+            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 8) else self.compose.selected -= 1;
         } else if (self.compose.insert_mode) {
             const matches = self.composeCompletions();
             if (self.compose.selected < 3 and matches.len == 0 and (key.matches('n', .{ .ctrl = true }) or key.matches('p', .{ .ctrl = true }))) {
@@ -12756,6 +12944,9 @@ const App = struct {
             try self.openHelp();
             return;
         }
+        // Ctrl+X reviews discarding the draft from every compose state,
+        // INSERT included (letters stay text there), and from send review.
+        if (key.matches('x', .{ .ctrl = true }) and self.compose_active and (self.mode == .compose or self.mode == .review)) return self.openDiscardDraft();
         if (self.mode == .compose) return self.onComposeKey(key);
         if (self.mode == .review or self.mode == .trash_confirm or self.mode == .invitation) return self.onConfirmationKey(key);
         if (self.mode == .contact_edit) {
@@ -15179,9 +15370,20 @@ const App = struct {
         if (two_rows) x = 0;
         if (show_gmail and x + gmail_label.len <= win.width) {
             const focused = if (narrow_preview) self.dialog_focus.context == .preview and self.dialog_focus.index == 4 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 5;
-            _ = try self.actionButton(win, gmail_row, x, gmail_label, focused, enabled, .compose_gmail, 0);
+            x = try self.actionButton(win, gmail_row, x, gmail_label, focused, enabled, .compose_gmail, 0);
             self.compose_action_drawn |= 2;
             if (enabled) self.compose_action_mask |= 2;
+        }
+        // Discard is last in Tab order, after the draft's other actions. It
+        // is the same in INSERT: Ctrl+X is never text. A protected or queued
+        // draft has no Discard; Ctrl+X explains why instead.
+        const show_discard = !self.compose.unknown_outcome and !self.compose.gmailPaused() and !self.grace_active and !self.grace_recovery;
+        const discard_label: []const u8 = if (x + "[Ctrl+X Discard]".len <= win.width) "[Ctrl+X Discard]" else "[^X Discard]";
+        if (show_discard and x + discard_label.len <= win.width) {
+            const focused = if (narrow_preview) self.dialog_focus.context == .preview and self.dialog_focus.index == 7 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 8;
+            _ = try self.actionButton(win, gmail_row, x, discard_label, focused, enabled, .compose_discard, 0);
+            self.compose_action_drawn |= 4;
+            if (enabled) self.compose_action_mask |= 4;
         }
         return rows;
     }
@@ -15419,15 +15621,15 @@ const App = struct {
     fn contextHints(self: *const App) []const u8 {
         if (self.ux_overlay == .gmail_draft) return " Tab / j/k Choose · Enter Activate · Ctrl+D/U Details · Esc Back";
         if (self.ux_overlay == .follow_up) return " Tab Controls · j/k Presets · Enter Choose · Ctrl+S Save date · Esc Cancel";
+        if (self.ux_overlay == .discard) return " Tab Controls · Enter Activate · y Discard · Esc Keep draft";
         if (self.follow_ups_list and self.mode == .browse and self.ux_overlay == .none and self.focus != .reader) return " j/k Choose · Enter Open mail · b Change date · d Done · Ctrl+R Reload · q Back · ? Help";
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.mode == .label_manager) return if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text";
         if (browser_target) {
-            if (self.ux_overlay == .discard) return " Tab Controls · Enter Discard/Cancel · Esc Keep draft";
             if (self.ux_overlay == .contact_addresses) return " Type filter · Ctrl+N/P Choose · Tab Controls · Enter Use · Esc Back";
             return switch (self.mode) {
-                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · recovery draft retained" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
-                .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
+                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · recovery draft retained" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review · Ctrl+X Discard" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close · Ctrl+X Discard" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · Ctrl+X Discard · q is text" else " i Edit · a Contacts · Ctrl+X Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
+                .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft · Ctrl+X Discard",
                 .contacts => " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back",
                 .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Ctrl+G Gmail · Enter Search cached subset · Esc Back" else " Ctrl+G Cache · Enter Search Gmail · Esc Back",
                 .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Back",
@@ -15447,14 +15649,14 @@ const App = struct {
         if (self.reader_overlay == .attachments) return " Tab Controls · Enter Activate · j/k Choose · s Save · o Save & open · Esc/q Back";
         if (self.reader_overlay == .links) return " j/k Choose URL  Enter Open in account profile  Esc/q Back";
         if (self.mode == .browse and self.ux_overlay == .none and !self.label_picker and (self.focus == .reader or self.expanded)) return if (self.expanded) " V Select · e Editor · j/k Scroll · J/K Mail · r/R Reply · f Forward · m Labels · L Links · B Files · o Gmail · v Layout · ? Help · q Shrink" else " V Select · e Editor · j/k Scroll · J/K Mail · r/R Reply · f Forward · m Labels · L Links · B Files · o Gmail · v Layout · ? Help · q List";
-        if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Half · Esc/q Source";
-        if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review";
+        if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Half · Esc/q Source · Ctrl+X Discard";
+        if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review · Ctrl+X Discard";
         return switch (self.mode) {
             .contacts => if (!self.capabilities.contacts_write) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else if (self.canPasteImage()) " INSERT · ^V image · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help" else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
-            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
+            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal · Ctrl+X Discard" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal · Ctrl+X Discard") else if (self.canPasteImage()) " INSERT · ^V image · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · Ctrl+X Discard · q is text" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · Ctrl+X Discard · q is text") else if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Ctrl+X Discard · Tab · q Back · ? Help" else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Ctrl+X Discard · Tab · q Back · ? Help",
+            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else if (self.deliveryBlocksSend()) " Tab Controls · Enter Activate · j/k Scroll · Esc/q Draft · Ctrl+X Discard" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft · Ctrl+X Discard",
             .theme => " j/k Preview · Tab Controls · Enter Activate · Ctrl+S Apply · Esc/q Cancel",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Back",
             .trash_confirm => " Tab Controls · y Move to Trash · n/Esc/q Cancel · Enter Activate",
@@ -15570,7 +15772,7 @@ const App = struct {
         if (browser_target) {
             if (width >= 100 or self.ux_overlay != .none or self.label_picker or self.mode == .label_manager or self.mode == .trash_confirm) return self.contextHints();
             return switch (self.mode) {
-                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
+                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body · Ctrl+X Discard" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close · Ctrl+X Discard" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · Ctrl+X Discard" else " i Edit · a Contacts · Ctrl+X Discard · Ctrl+S Review · q Back",
                 .review => if (self.deliveryBlocksSend()) " Tab · Enter Activate · j/k Scroll · Esc Back" else " Tab · Enter Activate · y Send · Esc Back",
                 .contacts => " Enter Choose · / Search · Ctrl+R Refresh · q Back",
                 .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Search · \\ Gmail · ? Help",
@@ -15589,15 +15791,15 @@ const App = struct {
         if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep · Esc Clear · q is text" else "/ Find · n/N Match · Esc/q Back";
         // Mailbox footers are priority-fitted by fittedHints, not width tiers.
         if (self.mode == .attachment) return " Tab Controls · Ctrl+F Complete · Enter Attach · Esc Back · Ctrl+U Clear";
-        if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview · j/k Scroll · q Back" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back";
-        if (self.mode == .compose and self.compose.attachment_focus) return if (width < 90) " Tab Buttons · Enter Activate · x Remove · A Add · Esc Body" else self.contextHints();
+        if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview · j/k Scroll · q Back · Ctrl+X Discard" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back · Ctrl+X Discard" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back · Ctrl+X Discard";
+        if (self.mode == .compose and self.compose.attachment_focus) return if (width < 90) " Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+X Discard" else self.contextHints();
         if (self.mode == .compose and !self.compose.insert_mode and !self.compose.unknown_outcome) {
-            if (width < 50) return if (self.canPasteImage()) "^V image · Ctrl+S Review · ? Help" else "e Editor · Ctrl+S Review · ? Help";
-            if (width < 80) return if (self.canPasteImage()) " ^V image  A Files  Ctrl+S Review  q Back  ? Help" else " e Editor  A Files  Ctrl+S Review  q Back  ? Help";
-            if (width < 100) return if (self.canPasteImage()) " i Edit · ^V image · A Files · p Preview · Ctrl+S Review · q Back · ? Help" else " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · q Back · ? Help";
-            if (width < 145) return if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back" else " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
+            if (width < 50) return if (self.canPasteImage()) "^V image · Ctrl+S Review · Ctrl+X Discard · ? Help" else "e Editor · Ctrl+S Review · Ctrl+X Discard · ? Help";
+            if (width < 80) return if (self.canPasteImage()) " ^V image  A Files  Ctrl+S Review  Ctrl+X Discard  q Back  ? Help" else " e Editor  A Files  Ctrl+S Review  Ctrl+X Discard  q Back  ? Help";
+            if (width < 100) return if (self.canPasteImage()) " i Edit · ^V image · A Files · p Preview · Ctrl+S Review · Ctrl+X Discard · q Back · ? Help" else " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · Ctrl+X Discard · q Back · ? Help";
+            if (width < 145) return if (self.canPasteImage()) " i Edit · e $EDITOR · ^V image · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · Ctrl+X Discard · q Back" else " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · Ctrl+X Discard · q Back · Tab Controls";
         }
-        if (self.mode == .compose and self.compose.insert_mode and width < 80) return if (self.canPasteImage()) " INSERT · ^V image · Esc Normal · Tab Field · q is text" else " INSERT · Esc Normal · Tab Field · q is text";
+        if (self.mode == .compose and self.compose.insert_mode and width < 80) return if (self.canPasteImage()) " INSERT · ^V image · Esc Normal · Tab Field · Ctrl+X Discard · q is text" else " INSERT · Esc Normal · Tab Field · Ctrl+X Discard · q is text";
         return self.contextHints();
     }
     fn drawThemePicker(self: *App, win: vaxis.Window) !void {
@@ -26710,12 +26912,14 @@ test "compose actions: complete labels and keyboard focus survive narrow split a
         defer a.free(rendered);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "[P Preview in browser]") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, "[g Continue in Gmail]") != null);
-        try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
+        // Discard keeps its key even when the terminal needs the short label.
+        try std.testing.expect(std.mem.indexOf(u8, rendered, if (size[0] < 40) "[^X Discard]" else "[Ctrl+X Discard]") != null);
+        try std.testing.expectEqual(@as(u8, 7), app.compose_action_mask);
         var buttons: usize = 0;
         var body_height: usize = 0;
         for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
             if (hit.kind == .compose_field and hit.index == 4) body_height = hit.rect.height;
-            if (hit.kind != .compose_browser_preview and hit.kind != .compose_gmail) continue;
+            if (hit.kind != .compose_browser_preview and hit.kind != .compose_gmail and hit.kind != .compose_discard) continue;
             buttons += 1;
             try std.testing.expect(hit.rect.x + hit.rect.width <= size[0]);
             try std.testing.expect(hit.rect.y + hit.rect.height <= size[1] - 2);
@@ -26724,10 +26928,11 @@ test "compose actions: complete labels and keyboard focus survive narrow split a
                 try std.testing.expect(other.rect.y + other.rect.height <= hit.rect.y);
             }
         }
-        try std.testing.expectEqual(@as(usize, 2), buttons);
+        try std.testing.expectEqual(@as(usize, 3), buttons);
         try std.testing.expect(body_height >= 5);
         // Body → [Upload all] → [Add A] → each file's delivery button then
-        // [x] → format/preview/Alias → the new actions, then the text fields.
+        // [x] → format/preview/Alias → the new actions → Discard, then the
+        // text fields.
         const Step = struct { cursor: usize, secondary: bool };
         var steps: std.ArrayList(Step) = .empty;
         defer steps.deinit(a);
@@ -26738,6 +26943,7 @@ test "compose actions: complete labels and keyboard focus survive narrow split a
             try steps.append(a, .{ .cursor = row, .secondary = false });
         }
         for (app.compose.attachments.len + 1..app.compose.attachments.len + 6) |control| try steps.append(a, .{ .cursor = control, .secondary = false });
+        try steps.append(a, .{ .cursor = app.compose.attachments.len + 8, .secondary = false });
         for (steps.items) |step| {
             try app.onComposeKey(.{ .codepoint = Key.tab });
             try std.testing.expect(app.compose.attachment_focus);
@@ -26763,13 +26969,15 @@ test "compose actions: complete labels and keyboard focus survive narrow split a
             app.mouse_hits.clear();
             vx.screen.clear();
             try app.composeDraw(win);
-            try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
-            for (1..5) |index| {
+            try std.testing.expectEqual(@as(u8, 7), app.compose_action_mask);
+            for ([_]usize{ 1, 2, 3, 4, 7 }) |index| {
                 try app.onComposeKey(.{ .codepoint = Key.tab });
                 try std.testing.expectEqual(index, app.dialog_focus.index);
             }
             try app.onComposeKey(.{ .codepoint = Key.tab });
             try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+            try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(@as(usize, 7), app.dialog_focus.index);
             try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
             try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
         }
@@ -26913,7 +27121,7 @@ test "compose actions: keys mouse and Enter recover unfinished recipients before
         app.mouse_hits.clear();
         try app.composeDraw(vx.window());
         try std.testing.expectEqual(@as(u8, 0), app.compose_action_mask);
-        try std.testing.expectEqual(@as(u8, 3), app.compose_action_drawn);
+        try std.testing.expectEqual(@as(u8, 7), app.compose_action_drawn);
         for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .compose_browser_preview and hit.kind != .compose_gmail);
         if (activation == .enter or activation == .mouse) try std.testing.expect(app.compose.attachment_focus and app.compose.attachment_cursor == 4);
         if (activation == .preview_enter) try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
@@ -26938,7 +27146,7 @@ test "compose actions: keys mouse and Enter recover unfinished recipients before
             defer app.job.future = null;
             app.mouse_hits.clear();
             try app.composeDraw(vx.window());
-            try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
+            try std.testing.expectEqual(@as(u8, 7), app.compose_action_mask);
             var autosave_actions: usize = 0;
             for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
                 if (hit.kind == .compose_browser_preview or hit.kind == .compose_gmail) autosave_actions += 1;
@@ -29090,7 +29298,8 @@ test "status polish: compact header retains account and Mock while preview hints
     try std.testing.expectEqual(@as(usize, 0), positionAfter(win, shown).row);
     app.mode = .compose;
     const hints = app.fittedHints(100);
-    for ([_][]const u8{ "A Attach", "Ctrl+S Review", "q Back", "p Preview", "Ctrl+T Format", "Tab Controls" }) |literal| try std.testing.expect(std.mem.indexOf(u8, hints, literal) != null);
+    // Discard outranks the format hint; the format button stays in the composer.
+    for ([_][]const u8{ "A Attach", "Ctrl+S Review", "Ctrl+X Discard", "q Back", "p Preview", "Tab Controls" }) |literal| try std.testing.expect(std.mem.indexOf(u8, hints, literal) != null);
 }
 
 test "status polish: two-row mail cards use the final row without a trailing gap" {
@@ -30678,6 +30887,285 @@ test "local UI: overlay paste inserts literal text and cannot confirm draft disc
     try std.testing.expectEqual(UxOverlay.find, app.ux_overlay);
     try std.testing.expectEqualStrings("q     ", app.ux_query.value());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+/// Synthetic draft store for the discard tests: it records removals and
+/// saves; operation and queue lookups are empty; anything else is refused.
+const DiscardTestTransport = struct {
+    discards: usize = 0,
+    saves: usize = 0,
+    reject_discard: bool = false,
+    fn call(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSlice(Value, a, raw, .{});
+        defer request.deinit();
+        const cmd = text(get(request.value, "cmd"));
+        if (same(cmd, "draft.discard")) {
+            try std.testing.expectEqualStrings("fresh-draft", text(get(request.value, "draftId")));
+            self.discards += 1;
+            if (self.reject_discard) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"StorageUnavailable\"}}");
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"discarded\":true}}");
+        }
+        if (same(cmd, "draft.update") or same(cmd, "draft.recovery-save")) {
+            self.saves += 1;
+            return std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{{\"id\":\"{s}\"}}}}", .{text(get(request.value, "draftId"))});
+        }
+        if (same(cmd, "operation.list")) return a.dupe(u8, "{\"ok\":true,\"data\":{\"operations\":[]}}");
+        if (same(cmd, "queue.list")) return a.dupe(u8, "{\"ok\":true,\"data\":{\"queue\":[]}}");
+        return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"FixtureOnly\"}}");
+    }
+};
+const DiscardTestRig = struct {
+    tty: vaxis.Tty = undefined,
+    vx: vaxis.Vaxis = undefined,
+    loop: Loop = undefined,
+    transport: DiscardTestTransport = .{},
+    factory: CacheTestClient = .{},
+    app: App = undefined,
+    const fresh = "{\"ok\":true,\"data\":{\"id\":\"fresh-draft\",\"subject\":\"\",\"bodyText\":\"\",\"bodyFormat\":\"markdown\"}}";
+    const reply = "{\"ok\":true,\"data\":{\"id\":\"fresh-draft\",\"to\":[{\"address\":\"sender@example.test\",\"name\":\"Fixture Sender\"}],\"subject\":\"Re: Fixture plan\",\"bodyText\":\"\\n\\nOn Monday, Fixture Sender wrote:\\n> Fictional quoted line\",\"threadId\":\"thread-1\",\"inReplyTo\":\"<source@example.test>\",\"bodyFormat\":\"markdown\"}}";
+    fn create(a: Allocator, signature: bool) !*DiscardTestRig {
+        const rig = try a.create(DiscardTestRig);
+        errdefer a.destroy(rig);
+        rig.* = .{};
+        rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = 120, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+        rig.loop.init(std.testing.io, a, &rig.tty, &rig.vx);
+        rig.app = rig.factory.app(a);
+        rig.app.loop = &rig.loop;
+        rig.app.vx = &rig.vx;
+        rig.app.client = .{ .ctx = &rig.transport, .callFn = DiscardTestTransport.call };
+        rig.app.capabilities.background_recipients = false;
+        rig.app.accounts = items(try std.json.parseFromSliceLeaky(Value, rig.app.account_arena.allocator(), if (signature) "[{\"address\":\"personal@example.test\",\"signature\":\"Fixture signature\",\"capabilities\":[\"mail-drafts\"]}]" else "[{\"address\":\"personal@example.test\",\"capabilities\":[\"mail-drafts\"]}]", .{}));
+        return rig;
+    }
+    fn destroy(rig: *DiscardTestRig, a: Allocator) void {
+        rig.app.deinit();
+        rig.loop.deinit();
+        rig.vx.screen.deinit(a);
+        a.destroy(rig);
+    }
+    /// Complete every queued job; a refused background read is not a failure.
+    fn drain(rig: *DiscardTestRig) !void {
+        var rounds: usize = 0;
+        while (rig.app.job.future) |*future| : (rounds += 1) {
+            if (rounds == 16) return error.JobsDidNotSettle;
+            future.await(rig.app.io);
+            rig.app.finish() catch |err| if (err != error.OperationRejected) return err;
+        }
+    }
+    fn status(rig: *DiscardTestRig) []const u8 {
+        return rig.app.status[0..rig.app.status_len];
+    }
+};
+
+test "draft discard: Back from an untouched composer keeps no draft while edited, reopened and Gmail-linked drafts stay" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Case = enum { new_untouched, reply_untouched, late_signature, typed_body, typed_recipient, reopened, gmail_linked, removal_refused };
+    for (std.enums.values(Case)) |case| {
+        const rig = try DiscardTestRig.create(a, case != .late_signature);
+        defer rig.destroy(a);
+        const app = &rig.app;
+        rig.transport.reject_discard = case == .removal_refused;
+        app.compose_intent = if (case == .reply_untouched) .reply else .new;
+        try app.apply(if (case == .reopened) .draft_read else .compose, if (case == .reply_untouched) DiscardTestRig.reply else DiscardTestRig.fresh);
+        try rig.drain();
+        try std.testing.expect(app.compose_active and app.mode == .compose);
+        switch (case) {
+            // A generated signature arriving after the composer opened is
+            // still generated content: the draft stays untouched.
+            .late_signature => {
+                try std.testing.expectEqual(@as(?u64, 0), app.compose.pristine_revision);
+                try app.apply(.identities, "{\"ok\":true,\"data\":{\"identities\":[{\"address\":\"personal@example.test\",\"signature\":\"Late fixture signature\"}]}}");
+                try std.testing.expect(std.mem.indexOf(u8, app.compose.fields[4].value(), "Late fixture signature") != null);
+                try std.testing.expectEqual(@as(?u64, 1), app.compose.pristine_revision);
+            },
+            .typed_body, .typed_recipient => {
+                app.compose.selected = if (case == .typed_body) 4 else 0;
+                try app.onKey(.{ .codepoint = 'i', .text = "i" });
+                try app.onKey(.{ .codepoint = 'H', .text = "H" });
+                try app.onKey(.{ .codepoint = Key.escape });
+                try std.testing.expect(!app.composeUntouched());
+            },
+            .reopened => {
+                try std.testing.expect(!app.compose.new_draft and app.compose.pristine_revision == null and !app.compose.unknown_outcome);
+                try std.testing.expect(!app.composeUntouched());
+            },
+            .gmail_linked => {
+                app.compose.gmail_link = .{ .draftId = "fresh-draft", .phase = .linked, .remoteDraftId = "remote-draft", .remoteMessageId = "remote-message", .attemptMessageId = "<attempt@example.test>", .uploadedDigest = "0000000000000000000000000000000000000000000000000000000000000000", .paused = false };
+                try std.testing.expect(!app.composeUntouched());
+            },
+            else => try std.testing.expect(app.composeUntouched()),
+        }
+        // q in normal mode, or Ctrl+C, is Back.
+        if (case == .reply_untouched) try app.onKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } }) else try app.onKey(.{ .codepoint = 'q', .text = "q" });
+        try rig.drain();
+        try std.testing.expect(!app.compose_active and app.mode == .browse);
+        switch (case) {
+            .new_untouched, .reply_untouched, .late_signature => {
+                try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.saves);
+                try std.testing.expectEqualStrings("Nothing written · no draft kept", rig.status());
+            },
+            .removal_refused => {
+                // The refused removal falls back to the previous Back: saved.
+                try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+                try std.testing.expectEqual(@as(usize, 1), rig.transport.saves);
+                try std.testing.expectEqualStrings("Draft kept in Drafts · the unused draft could not be removed", rig.status());
+            },
+            else => {
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.discards);
+                try std.testing.expectEqual(@as(usize, 1), rig.transport.saves);
+                try std.testing.expectEqualStrings("Draft saved locally", rig.status());
+            },
+        }
+    }
+}
+
+test "draft discard: Ctrl+X reviews from INSERT and send review, y waits for a settled dialog, protected drafts explain why they stay" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const rig = try DiscardTestRig.create(a, true);
+    defer rig.destroy(a);
+    const app = &rig.app;
+    app.compose_intent = .new;
+    try app.apply(.compose, DiscardTestRig.fresh);
+    try rig.drain();
+    app.compose.selected = 3;
+    try app.onKey(.{ .codepoint = 'i', .text = "i" });
+    try app.onKey(.{ .codepoint = 'P', .text = "P" });
+    try app.onKey(.{ .codepoint = 'l', .text = "l" });
+    app.compose.selected = 0;
+    for ("ana@example.test, bo@example.test") |byte| try app.onKey(.{ .codepoint = byte, .text = &.{byte} });
+    try std.testing.expect(app.compose.insert_mode);
+    const before = try a.dupe(u8, app.compose.fields[0].value());
+    defer a.free(before);
+    // Ctrl+X is never text: INSERT keeps its fields and opens the review.
+    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
+    try std.testing.expectEqualStrings(before, app.compose.fields[0].value());
+    try std.testing.expectEqualStrings("Pl · 2 recipients", app.ux_rows.items[0].label);
+    try std.testing.expectEqualStrings("Removes this local draft · nothing is sent or changed in Gmail", app.ux_rows.items[0].detail);
+    try std.testing.expectEqual(@as(usize, 3), app.ux_focus); // Cancel
+    {
+        var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 30, .screen = &screen };
+        try app.drawUx(win);
+        const shown = try helpTestScreenText(a, &screen);
+        defer a.free(shown);
+        for ([_][]const u8{ "Discard local draft", "Discard this draft? It can't be restored.", "Pl · 2 recipients", "[y Discard]", "[Esc Cancel]", "y Discard · Esc Keep draft" }) |expected| {
+            if (std.mem.indexOf(u8, shown, expected) == null) {
+                std.debug.print("\nMissing discard review text '{s}':\n{s}\n", .{ expected, shown });
+                return error.MissingDiscardReviewText;
+            }
+        }
+    }
+    // A y typed ahead (the dialog has not been on screen long) never discards.
+    try app.onKey(.{ .codepoint = 'y', .text = "y" });
+    try std.testing.expect(app.job.future == null and app.ux_overlay == .discard);
+    try std.testing.expect(std.mem.indexOf(u8, rig.status(), "press y once more") != null);
+    // A repeated y inside the quiet time is refused as well.
+    app.discard_armed_ms = 0;
+    try app.onKey(.{ .codepoint = 'y', .text = "y" });
+    try std.testing.expect(app.job.future == null and app.ux_overlay == .discard);
+    // Enter on the default [Cancel], then Esc, keep everything.
+    try app.onKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(app.ux_overlay == .none and app.compose_active and app.compose.insert_mode);
+    try std.testing.expectEqualStrings(before, app.compose.fields[0].value());
+    try std.testing.expectEqual(@as(usize, 0), rig.transport.discards);
+    // Protected drafts stay; Ctrl+X says why and opens nothing.
+    const Protected = enum { unknown, paused, queued };
+    for (std.enums.values(Protected)) |protected| {
+        switch (protected) {
+            .unknown => app.compose.unknown_outcome = true,
+            .paused => app.compose.gmail_guard_unknown = true,
+            .queued => app.grace_recovery = true,
+        }
+        try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+        try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+        try std.testing.expect(std.mem.startsWith(u8, rig.status(), "Draft kept · "));
+        try std.testing.expect(std.mem.indexOf(u8, rig.status(), switch (protected) {
+            .unknown => "send outcome is unknown",
+            .paused => "paused in Gmail",
+            .queued => ":cancel-send first",
+        }) != null);
+        app.compose.unknown_outcome = false;
+        app.compose.gmail_guard_unknown = false;
+        app.grace_recovery = false;
+    }
+    // From send review: a settled y discards and returns to the mailbox.
+    app.compose.insert_mode = false;
+    app.mode = .review;
+    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
+    app.discard_armed_ms = 0;
+    try app.onKey(.{ .codepoint = 'y', .text = "y" });
+    try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
+    try rig.drain();
+    try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+    try std.testing.expectEqual(@as(usize, 0), rig.transport.saves);
+    try std.testing.expect(!app.compose_active and app.mode == .browse and app.ux_overlay == .none);
+    try std.testing.expectEqualStrings("Draft discarded", rig.status());
+}
+
+test "draft discard: composer Discard button is last in Tab order, works in INSERT and by mouse" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |mouse| {
+        const rig = try DiscardTestRig.create(a, false);
+        defer rig.destroy(a);
+        const app = &rig.app;
+        app.compose_intent = .new;
+        try app.apply(.compose, DiscardTestRig.fresh);
+        try rig.drain();
+        app.compose.selected = 4;
+        try app.onKey(.{ .codepoint = 'i', .text = "i" });
+        try app.onKey(.{ .codepoint = 'W', .text = "W" });
+        const win = rig.vx.window().child(.{ .y_off = 2, .height = rig.vx.screen.height - 4 });
+        app.mouse_hits.clear();
+        try app.composeDraw(win);
+        const rendered = try markdownTestScreenText(a, &rig.vx.screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "[Ctrl+X Discard]") != null);
+        try std.testing.expectEqual(@as(u8, 7), app.compose_action_mask);
+        if (mouse) {
+            const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .compose_discard) break hit;
+            } else return error.MissingDiscardButton;
+            try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+        } else {
+            // Shift+Tab from the first field reaches Discard first.
+            app.compose.selected = 0;
+            try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expect(app.compose.attachment_focus);
+            try std.testing.expectEqual(app.compose.attachments.len + 8, app.compose.attachment_cursor);
+            try app.onKey(.{ .codepoint = Key.enter });
+        }
+        try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
+        try std.testing.expectEqualStrings("(no subject) · no recipients", app.ux_rows.items[0].label);
+        // Shift+Tab from Cancel reaches [y Discard]; Enter on it discards.
+        try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(@as(usize, 2), app.ux_focus);
+        try app.onKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
+        try rig.drain();
+        try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+        try std.testing.expect(!app.compose_active and app.mode == .browse);
+        try std.testing.expectEqualStrings("Draft discarded", rig.status());
+    }
+}
+
+test "draft discard: recipient counts include unfinished entries" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(usize, 0), composeRecipientCount(a, " , "));
+    try std.testing.expectEqual(@as(usize, 2), composeRecipientCount(a, "\"Doe, Ana\" <ana@example.test>, bo@example.test"));
+    try std.testing.expectEqual(@as(usize, 2), composeRecipientCount(a, "unfinished <, bo@example.test"));
 }
 
 test "local UI: send receipt consumers acknowledge only after safe application and protect allocation failures" {

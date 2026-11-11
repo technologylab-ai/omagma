@@ -499,9 +499,9 @@ def exercise(terminal, action):
         terminal.gap()
         result = terminal.finish()
         with Client(terminal.binary, terminal.directory) as client:
-            drafts = client.request("draft.list")["drafts"]
-            require(len(drafts) == 1 and not client.request("draft.read", draftId=drafts[0]["id"])["attachments"],
-                    "refused FIFO changed the draft attachments")
+            # A refused file changes nothing, so Back from this otherwise
+            # untouched composer keeps no draft at all.
+            require(client.request("draft.list")["drafts"] == [], "refused FIFO changed the draft")
         result.update(fifoRefused=True, refusalSeconds=round(elapsed, 6))
         return result
     if action == "fifo-editor-readback":

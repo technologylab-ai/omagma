@@ -238,6 +238,36 @@ activates their visible controls.
 
 The native composer shows the saved revision's MIME size. Review displays exact
 bytes, the provider limit, and the size without the original when available.
+
+### Discard a draft
+
+A new message, reply or forward that you leave (`q`, Ctrl+C or exiting Omagma)
+without changing anything keeps no draft: Omagma removes the local draft it
+created when the composer opened and shows "Nothing written · no draft kept".
+The generated quote, attribution line, signature and a recipient prefilled from
+Contacts do not count as changes; typing, a recipient, an attachment, another
+sender, a format or original-inclusion choice does, and that draft is kept as
+before. A draft reopened from Drafts is always kept when you leave it.
+
+**Ctrl+X** reviews discarding the current draft from every compose state:
+normal mode, INSERT (Ctrl+X is never text), the compose buttons, the narrow
+full preview and send review. `d` in normal mode and `:discard-draft` open the
+same review, and **[Ctrl+X Discard]** is the last Tab stop below the composer.
+The review names the draft (subject or "(no subject)" and the number of
+recipients) and says what is removed: the local draft, its recovery and preview
+copies and the local copies of its attached files; your original files and
+received mail are untouched. `y` or Enter on **[y Discard]** discards, then
+returns to the mailbox, reader or Drafts view the composer came from with
+"Draft discarded". **[Esc Cancel]** is focused first; Esc, `q` or Enter on it
+keeps the draft and returns to the composer unchanged. `y` acts only after the
+review has been on screen for a moment, so a key typed ahead or held down never
+discards. A discarded draft cannot be restored; Ctrl+Z does not bring it back.
+
+Discard never deletes anything in Gmail. A draft taken back from Gmail keeps its
+Gmail copy in Gmail Drafts, and the review says so. A draft paused in Gmail, a
+send with an unknown outcome and a queued send stay protected: Ctrl+X names the
+reason (take the draft back with `g`, check `:receipt`, or `:cancel-send`
+first) and removes nothing.
 Editing invalidates the count until autosave and measurement finish. The measured
 content is checked again before sending; another process changing the saved
 draft requires a new review. A cancelled or rejected send also requires a fresh
@@ -564,7 +594,8 @@ Contact deletion is not implemented.
 
 `:discard-draft` deliberately reviews removal of the current local draft and
 its recovery/preview copies. Cancel is the safe default. It does not delete a
-Gmail draft or message, and pending/unknown submissions remain protected.
+Gmail draft or message, and pending/unknown submissions remain protected. In the
+composer the same review is **Ctrl+X** (see [Discard a draft](#discard-a-draft)).
 
 ## Invitation replies
 
@@ -980,6 +1011,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+Z / Undo during countdown | Cancel before submission and return to editing |
 | Tab/Shift+Tab, then Enter during countdown | Choose Undo or Send now; Undo is focused initially |
 | :resume-send / :cancel-send | Explicitly handle a recovered paused send |
+| Ctrl+X / d in normal compose / :discard-draft | Review discarding this draft (also in INSERT and send review); `y` discards, Esc keeps it |
 | A in normal compose | Add outgoing attachment |
 | Ctrl+V / :paste-image in editable compose | Paste image: inline at cursor (Markdown body), else attach |
 | L / B | Links / received-file picker |

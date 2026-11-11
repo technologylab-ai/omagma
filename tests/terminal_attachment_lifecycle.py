@@ -1361,6 +1361,13 @@ def tui_forward(binary, directory):
                 wait_compose()
             require("OutOfMemory" not in terminal.text() and "AttachmentNotFound" not in terminal.text(),
                     "contextual forward reached compose with a hidden failure")
+            # Back from an untouched forward keeps no draft. Type and erase one
+            # recipient letter so Back saves this forward through the TUI.
+            stage = "edit, then restore, the forward's recipients"
+            terminal.send(b"ix")
+            terminal.until(lambda: "To: x" in terminal.text())
+            terminal.send(b"\x7f\x1b")
+            terminal.until(lambda: "To: x" not in terminal.text() and "INSERT" not in terminal.screen.lines()[-2])
             stage = "close and reopen the saved forward"
             terminal.finish()
         except Exception:

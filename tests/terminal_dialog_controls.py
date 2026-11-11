@@ -187,6 +187,7 @@ def contacts_alias_and_send(binary, directory):
         terminal.until(lambda: "Contacts ·" not in terminal.text())
         terminal.send(b"c")
         terminal.until(lambda: "Subject:" in terminal.text() and "[f Alias]" in terminal.text())
+        focus(terminal, BACKTAB, "[Ctrl+X Discard]")
         focus(terminal, BACKTAB, "[g Continue in Gmail]")
         focus(terminal, BACKTAB, "[P Preview in browser]")
         focus(terminal, BACKTAB, "[f Alias]")
@@ -199,6 +200,8 @@ def contacts_alias_and_send(binary, directory):
         terminal.until(lambda: "From: alias@example.test" in terminal.text() and "Choose sender" not in terminal.text())
         focus(terminal, TAB, "[P Preview in browser]")
         focus(terminal, TAB, "[g Continue in Gmail]")
+        # [Ctrl+X Discard] is the last control; Tab again returns to To.
+        focus(terminal, TAB, "[Ctrl+X Discard]")
         terminal.send(TAB + b"irecipient@example.test\t\t\tKeyboard-only send\tThis is a fixture body.")
         terminal.send(b"\x1b")
         terminal.gap(.06)
