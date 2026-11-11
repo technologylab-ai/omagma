@@ -218,13 +218,16 @@ def truth_case(binary, root, cancelled=False, unsupported=False):
         terminal.send(b"I")
         terminal.until(lambda: "Calendar event · details" in terminal.text() and "[Esc Close]" in terminal.text())
         terminal.gap(.2)
+        top = terminal.text()
         terminal.send(b"G")
         terminal.gap(.3)
-        shown = terminal.text()
+        shown = top + "\n" + terminal.text()
         if cancelled:
             require("Event cancelled · nothing to add" in shown and "shortened here" in shown, "cancelled card lost its facts")
-            for refused in ("A shows the complete notes", "A adds it", "[A Add to calendar]"):
+            for refused in ("A shows the complete notes", "A adds it", "[A Add to calendar]", "Reminder · "):
                 require(refused not in shown, f"cancelled card promised what A cannot do: {refused}")
+            # Without A nothing fires: the reminder is only the email's data.
+            require("In the email: reminder" in shown, "cancelled card dropped the email's reminder data")
         if unsupported:
             # The sentence wraps inside the card, beside the mailbox columns.
             lines = terminal.screen.lines()
