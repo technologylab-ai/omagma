@@ -303,7 +303,10 @@ const Server = struct {
         // Only these background reads yield to their caller's disconnect.
         // Admitted draft/provider mutations keep their independent completion
         // and unknown-outcome behavior even if the requesting client goes away.
-        if (meta.cancel_disconnect or std.mem.eql(u8, meta.command, "draft.measure") or std.mem.eql(u8, meta.command, "draft.preview") or std.mem.eql(u8, meta.command, "draft.delivery-plan") or std.mem.eql(u8, meta.command, "draft.selection-plan") or std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
+        // Waiting for browser consent also ends when its requester goes away
+        // (a TUI Cancel or an interrupted CLI): the listener closes and
+        // nothing is stored, rather than holding the lane for 180 seconds.
+        if (meta.cancel_disconnect or std.mem.eql(u8, meta.command, "auth.authorize") or std.mem.eql(u8, meta.command, "draft.measure") or std.mem.eql(u8, meta.command, "draft.preview") or std.mem.eql(u8, meta.command, "draft.delivery-plan") or std.mem.eql(u8, meta.command, "draft.selection-plan") or std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
             try select.concurrent(.read_peer, waitReadPeer, .{ self.io, stream });
         while (true) switch (try select.await()) {
             .operation => |result| {

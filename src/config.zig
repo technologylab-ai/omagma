@@ -16,9 +16,10 @@ pub const Config = struct {
     pub fn credentials(self: *const Config) @import("keyring.zig").Settings {
         return .{ .kind = self.credential_store, .directory = self.credential_directory.slice(), .provider = self.runtime_provider };
     }
+    pub const default_chrome = if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable";
     pub fn defaults(self: *Config, home: []const u8) !void {
         self.* = .{};
-        try self.chrome.set(if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable");
+        try self.chrome.set(default_chrome);
         var path: [4096]u8 = undefined;
         try self.chrome_data.set(try std.fmt.bufPrint(&path, if (@import("builtin").os.tag == .macos) "{s}/Library/Application Support/Google/Chrome" else "{s}/.config/google-chrome", .{home}));
         const defs = .{ .{ "personal@example.com", "Profile 3", true }, .{ "work@example.com", "Profile 1", true }, .{ "optional@example.com", "Profile 2", false } };

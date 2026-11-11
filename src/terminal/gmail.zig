@@ -9,6 +9,7 @@ const oauth = @import("../oauth.zig");
 const keyring = @import("../keyring.zig");
 const Config = @import("../config.zig").Config;
 const auth = @import("auth.zig");
+const auth_diagnostic = @import("auth_diagnostic.zig");
 const types = @import("types.zig");
 const j = @import("json.zig");
 const mime = @import("mime.zig");
@@ -89,9 +90,14 @@ const Network = struct {
         const started = sessionNow(self.client.io);
         if (self.cache) |cache| self.cache_lease = try cache.begin(self.cache_index, self.cache_binding.?, started);
         errdefer self.invalidate();
-        const token = try oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes);
+        const token = oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes) catch |err| {
+            // Keep Google's sanitized reason for reconnect guidance/status.
+            if (err == error.InvalidGrant) auth_diagnostic.recordFailure(self.verified_account, oauth.takeTokenError(), std.Io.Timestamp.now(self.client.io, .real).toMilliseconds());
+            return err;
+        };
         const profile = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, token.access_token, null, self.response);
         try oauth.verifyProfile(profile.status, profile.body, self.verified_account);
+        auth_diagnostic.recordSuccess(self.verified_account);
         if (self.cache) |cache| _ = try cache.publishVerified(self.cache_lease.?, self.verified_account, token.access_token, started, token.expires_in, sessionNow(self.client.io));
         self.access = token.access_token;
     }

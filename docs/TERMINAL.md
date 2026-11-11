@@ -948,6 +948,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | / / \ | Search cache / Gmail |
 | Ctrl+P in mailbox / :actions | Discover account/view actions |
 | :updates / Ctrl+P Updates | Release status, upgrade guide and daily/manual checks |
+| Ctrl+O / :reconnect [account] | Reconnect an expired Google sign-in (also from Calendar's Not shown row); Enter starts consent, Esc cancels |
 | :find TEXT, n/N, Escape | Current-message find, next/previous match, done |
 | n / N, :next-unread / :previous-unread | Adjacent unread cached mail in the current view (when no find is active) |
 | g i / g s / g d / g a / g t | Go to Inbox / Sent / Drafts / All Mail / Trash |
@@ -1038,6 +1039,41 @@ The development Calendar features use the optional grants described in
 [Calendar permissions](CALENDAR-PERMISSIONS.md). A Console scope change alone
 does not replace an account's existing token. Restart an open TUI after
 authorizing its updated grant.
+
+### Reconnect an expired sign-in
+
+When Google refuses an account's stored sign-in (`InvalidGrant`: a Workspace
+re-authentication policy, revoked access, a password change or a Testing-mode
+project's seven-day limit), the account's status row says
+`Google sign-in expired · Ctrl+O Reconnect`, and Calendar's warning row names
+the account: `Not shown: <account> · Google sign-in expired · Ctrl+O Reconnect ·
+all other calendars are complete`. Cached mail stays readable.
+
+Press **Ctrl+O** (mailbox or Calendar), choose **Reconnect Google sign-in** in
+Ctrl+P, or run `:reconnect` / `:reconnect <account>`. The dialog reads the
+account's recorded grant and shows Google's reason (for example
+`Google said: "reauth related error (invalid_rapt)"`) and the permissions that
+will be kept. It is modal; Tab/Shift+Tab move between its buttons and Enter
+activates the focused one.
+
+**Enter** on **Reconnect** runs the same authorization as
+`omagma terminal-auth authorize` for that account only, with exactly its
+recorded capabilities: Google consent opens in the account's configured Chrome
+profile and the dialog shows `Waiting for Google consent in Chrome · Esc
+Cancel`. Approve as that account. On success the dialog closes, the new
+credential is stored in the selected credential store, and the account's mail
+(and, from Calendar, its calendars) refresh in the same TUI.
+
+Esc cancels the wait and closes the local callback listener. Declining in
+Google, signing in as another Google account, unchecking a requested
+permission, or three minutes without an answer store nothing; the dialog says
+which and offers **Try again** (another explicit consent). Reconnect never
+broadens or narrows access; use `terminal-auth authorize` to change
+permissions. Codes, PKCE values, state values and tokens are never shown,
+logged or passed on any command line by Omagma; the consent URL itself, as for
+`terminal-auth authorize`, is handed to the configured Chrome. See
+[account setup](SETUP.md#reconnect-an-expired-sign-in-from-the-tui) for the
+`lastRefreshError` status field.
 
 You can use your own accounts after consent, including sending a first message to yourself. Agent actions still need your task authorization. A dedicated test mailbox is a development qualification tool, not an installation requirement.
 

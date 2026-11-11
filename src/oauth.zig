@@ -14,6 +14,106 @@ pub const DesktopClient = struct {
     }
 };
 pub const TokenResult = struct { access_token: []const u8, expires_in: u32 };
+/// Google's token-endpoint refusal reduced to a bounded diagnostic. Only the
+/// machine vocabulary of `error`/`error_subtype` and a sanitized
+/// `error_description` survive; the response body itself is never retained,
+/// and anything shaped like a credential, code or identifier is redacted.
+pub const TokenError = struct {
+    status: u16 = 0,
+    code: b.Text(48) = .{},
+    subtype: b.Text(48) = .{},
+    description: b.Text(160) = .{},
+    pub fn present(self: *const TokenError) bool {
+        return self.code.len != 0;
+    }
+    /// Stable classification for people and agents. Google uses the same
+    /// "expired or revoked" text for revoked access, a password change and a
+    /// Testing-mode project's seven-day grant limit; it cannot be narrowed.
+    pub fn kind(self: *const TokenError) []const u8 {
+        if (std.mem.eql(u8, self.subtype.slice(), "invalid_rapt")) return "reauthenticationRequired";
+        if (std.ascii.findIgnoreCase(self.description.slice(), "expired or revoked") != null) return "expiredOrRevoked";
+        if (std.mem.eql(u8, self.code.slice(), "invalid_grant")) return "invalidGrant";
+        return "other";
+    }
+    pub fn fromJson(status: u16, value: std.json.Value) TokenError {
+        var result: TokenError = .{ .status = status };
+        if (b.optional(value, "error")) |v| if (v == .string) machineWord(&result.code, v.string);
+        if (b.optional(value, "error_subtype")) |v| if (v == .string) machineWord(&result.subtype, v.string);
+        if (b.optional(value, "error_description")) |v| if (v == .string) prose(&result.description, v.string);
+        return result;
+    }
+};
+fn machineWord(out: *b.Text(48), raw: []const u8) void {
+    if (raw.len == 0 or raw.len > 48) return;
+    for (raw) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_') return;
+    out.set(raw) catch {};
+}
+fn tokenAlphabet(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~+/=", c) != null;
+}
+/// Printable ASCII prose with single spaces. Descriptions are sentences, so
+/// any 20+ character run of token-alphabet bytes can only be an echoed
+/// credential, authorization code or identifier: it is replaced, never kept.
+fn prose(out: *b.Text(160), raw: []const u8) void {
+    var buffer: [160]u8 = undefined;
+    var n: usize = 0;
+    var index: usize = 0;
+    var truncated = false;
+    while (index < raw.len) {
+        const c = raw[index];
+        if (tokenAlphabet(c)) {
+            var end = index;
+            while (end < raw.len and tokenAlphabet(raw[end])) end += 1;
+            const word = if (end - index >= 20) "[redacted]" else raw[index..end];
+            if (n + word.len > buffer.len - 3) {
+                truncated = true;
+                break;
+            }
+            @memcpy(buffer[n..][0..word.len], word);
+            n += word.len;
+            index = end;
+            continue;
+        }
+        if (n >= buffer.len - 3) {
+            truncated = true;
+            break;
+        }
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            if (n > 0 and buffer[n - 1] != ' ') {
+                buffer[n] = ' ';
+                n += 1;
+            }
+        } else if (c > 32 and c < 127) {
+            buffer[n] = c;
+            n += 1;
+        }
+        index += 1;
+    }
+    while (n > 0 and buffer[n - 1] == ' ') n -= 1;
+    if (truncated) {
+        @memcpy(buffer[n..][0..3], "...");
+        n += 3;
+    }
+    out.set(buffer[0..n]) catch {};
+    std.crypto.secureZero(u8, &buffer);
+}
+/// One network worker owns token exchanges; the lock only guards a reader on
+/// another thread. The value is a sanitized diagnostic, never token material.
+var token_error_lock: std.atomic.Mutex = .unlocked;
+var token_error: TokenError = .{};
+fn publishTokenError(value: TokenError) void {
+    while (!token_error_lock.tryLock()) std.atomic.spinLoopHint();
+    defer token_error_lock.unlock();
+    token_error = value;
+}
+/// The most recent token-endpoint refusal in this process, cleared on read.
+pub fn takeTokenError() TokenError {
+    while (!token_error_lock.tryLock()) std.atomic.spinLoopHint();
+    defer token_error_lock.unlock();
+    const value = token_error;
+    token_error = .{};
+    return value;
+}
 var json_workspace: [64 * 1024]u8 align(16) = undefined;
 var token_body: [limits.token_response]u8 = undefined;
 var form_buffer: [32 * 1024]u8 = undefined;
@@ -110,9 +210,11 @@ pub fn parseTokensScoped(status: u16, data: []const u8, out_access: []u8, out_re
     const parsed = try b.parse(fixed.allocator(), data);
     defer parsed.deinit();
     if (status != 200) {
+        publishTokenError(.fromJson(status, parsed.value));
         if (b.optional(parsed.value, "error")) |v| if (v == .string and std.mem.eql(u8, v.string, "invalid_grant")) return error.InvalidGrant;
         return error.TokenExchangeFailed;
     }
+    publishTokenError(.{});
     if (!std.ascii.eqlIgnoreCase(try b.string(try b.field(parsed.value, "token_type")), "Bearer")) return error.InvalidTokenType;
     const access = try b.string(try b.field(parsed.value, "access_token"));
     try tokenValid(access);
@@ -290,48 +392,48 @@ pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profi
     try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null, credentials);
 }
 pub const TerminalCredential = struct { grant_id: []const u8, capture: ?*b.Text(limits.secret) = null };
-pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential, credentials: keyring.Settings) !void {
-    try validateScopeSet(scopes);
-    if (terminal == null and (scopes.len != 1 or !std.mem.eql(u8, scopes[0], readonly_scope))) return error.UnexpectedScope;
-    try b.address(address);
-    try b.profile(profile);
-    defer {
-        auth_desktop.wipe();
-        std.crypto.secureZero(u8, &auth_access);
-        std.crypto.secureZero(u8, &auth_refresh);
-        std.crypto.secureZero(u8, &auth_code);
-        std.crypto.secureZero(u8, &auth_url);
-        std.crypto.secureZero(u8, &auth_header);
-        std.crypto.secureZero(u8, &form_buffer);
-        std.crypto.secureZero(u8, &token_body);
+/// Unit-test-only consent page. Production always launches the configured
+/// browser; no runtime option, environment variable or production
+/// declaration can replace it or observe the consent URL.
+pub const TestBrowser = if (@import("builtin").is_test) struct {
+    pub var open: ?*const fn (std.Io, []const u8) anyerror!void = null;
+} else struct {};
+/// PKCE verifier and redirect for one consent. The verifier never leaves this
+/// process: only its S256 challenge is placed in the consent URL.
+const Flow = struct {
+    verifier: [43]u8 = undefined,
+    redirect_storage: [128]u8 = undefined,
+    redirect: []const u8 = "",
+    fn wipe(self: *Flow) void {
+        std.crypto.secureZero(u8, &self.verifier);
     }
-    try loadDesktopWithSettings(io, client_file, &auth_desktop, credentials);
+};
+/// Shared consent: a loopback listener, PKCE, state, the browser launch in the
+/// account's profile and one strictly verified callback. The returned code
+/// lives in auth_code; the listener is closed on every return path.
+fn consent(io: std.Io, flow: *Flow, client_id: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, wait: std.Io.Clock.Duration) ![]const u8 {
     const loopback = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try loopback.listen(io, .{ .kernel_backlog = 2 });
-    var listener_closed = false;
-    defer if (!listener_closed) listener.deinit(io);
-    var redirect_storage: [128]u8 = undefined;
-    const redirect = try std.fmt.bufPrint(&redirect_storage, "http://127.0.0.1:{d}/oauth2/callback", .{listener.socket.address.getPort()});
+    defer listener.deinit(io);
+    flow.redirect = try std.fmt.bufPrint(&flow.redirect_storage, "http://127.0.0.1:{d}/oauth2/callback", .{listener.socket.address.getPort()});
     var random: [32]u8 = undefined;
-    var verifier: [43]u8 = undefined;
     var state: [43]u8 = undefined;
     var challenge: [43]u8 = undefined;
     defer {
         std.crypto.secureZero(u8, &random);
-        std.crypto.secureZero(u8, &verifier);
         std.crypto.secureZero(u8, &state);
     }
     try io.randomSecure(&random);
-    _ = std.base64.url_safe_no_pad.Encoder.encode(&verifier, &random);
-    pkceChallenge(&verifier, &challenge);
+    _ = std.base64.url_safe_no_pad.Encoder.encode(&flow.verifier, &random);
+    pkceChallenge(&flow.verifier, &challenge);
     try io.randomSecure(&random);
     _ = std.base64.url_safe_no_pad.Encoder.encode(&state, &random);
     var url = std.Io.Writer.fixed(&auth_url);
     try url.writeAll("https://accounts.google.com/o/oauth2/v2/auth?");
     // formField counts the URL prefix, so write the first field explicitly.
     try url.writeAll("client_id=");
-    try percent(&url, auth_desktop.client_id.slice());
-    try formField(&url, "redirect_uri", redirect);
+    try percent(&url, client_id);
+    try formField(&url, "redirect_uri", flow.redirect);
     try formField(&url, "response_type", "code");
     var scope_bytes: [1024]u8 = undefined;
     var scope_writer = std.Io.Writer.fixed(&scope_bytes);
@@ -348,19 +450,39 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     try formField(&url, "login_hint", address);
     var profile_arg: [160]u8 = undefined;
     const arg = try std.fmt.bufPrint(&profile_arg, "--profile-directory={s}", .{profile});
-    try platform.launchDetached(io, &.{ chrome, arg, url.buffered() });
+    if (comptime @import("builtin").is_test) {
+        if (TestBrowser.open) |open| try open(io, url.buffered()) else try platform.launchDetached(io, &.{ chrome, arg, url.buffered() });
+    } else try platform.launchDetached(io, &.{ chrome, arg, url.buffered() });
     var callback: Callback = .{ .expected_state = &state };
-    const code = try platform.deadline(io, platform.seconds(limits.auth_seconds), acceptCallback, .{ io, &listener, &callback });
-    listener.deinit(io);
-    listener_closed = true;
+    return try platform.deadline(io, wait, acceptCallback, .{ io, &listener, &callback });
+}
+pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential, credentials: keyring.Settings) !void {
+    try validateScopeSet(scopes);
+    if (terminal == null and (scopes.len != 1 or !std.mem.eql(u8, scopes[0], readonly_scope))) return error.UnexpectedScope;
+    try b.address(address);
+    try b.profile(profile);
+    defer {
+        auth_desktop.wipe();
+        std.crypto.secureZero(u8, &auth_access);
+        std.crypto.secureZero(u8, &auth_refresh);
+        std.crypto.secureZero(u8, &auth_code);
+        std.crypto.secureZero(u8, &auth_url);
+        std.crypto.secureZero(u8, &auth_header);
+        std.crypto.secureZero(u8, &form_buffer);
+        std.crypto.secureZero(u8, &token_body);
+    }
+    try loadDesktopWithSettings(io, client_file, &auth_desktop, credentials);
+    var flow: Flow = .{};
+    defer flow.wipe();
+    const code = try consent(io, &flow, auth_desktop.client_id.slice(), address, profile, chrome, scopes, platform.seconds(limits.auth_seconds));
     var client = try http.Client.init(io);
     defer client.deinit();
     var form = std.Io.Writer.fixed(&form_buffer);
     try formField(&form, "client_id", auth_desktop.client_id.slice());
     try formField(&form, "client_secret", auth_desktop.client_secret.slice());
     try formField(&form, "code", code);
-    try formField(&form, "code_verifier", &verifier);
-    try formField(&form, "redirect_uri", redirect);
+    try formField(&form, "code_verifier", &flow.verifier);
+    try formField(&form, "redirect_uri", flow.redirect);
     try formField(&form, "grant_type", "authorization_code");
     const token_response = try client.request("https://oauth2.googleapis.com/token", .POST, null, form.buffered(), &token_body);
     const tokens = try parseTokensScoped(token_response.status, token_response.body, &auth_access, &auth_refresh, scopes);
@@ -370,6 +492,46 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     if (terminal) |credential| {
         if (credential.capture) |capture| try capture.set(refresh_token) else try keyring.storeTerminal(io, credentials, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token);
     } else try keyring.store(io, credentials, address, auth_desktop.client_id.slice(), refresh_token);
+}
+
+/// Synthetic registration identity for --fixtures consent only.
+pub const fixture_client_id = "omagma-fixture-consent.apps.googleusercontent.com";
+/// --fixtures only: the same listener, PKCE, state, browser launch and
+/// callback as authorizeScoped, then a synthetic exchange that contacts no
+/// token endpoint and stores nothing. The synthetic consent page answers with
+/// `fixture.<S256 challenge>.<base64url(signed-in address)>`, standing in for
+/// Google's PKCE check and the Gmail profile identity, which is then verified
+/// exactly as a real profile response.
+pub fn authorizeFixture(io: std.Io, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, wait: std.Io.Clock.Duration) !void {
+    try validateScopeSet(scopes);
+    try b.address(address);
+    try b.profile(profile);
+    defer {
+        std.crypto.secureZero(u8, &auth_code);
+        std.crypto.secureZero(u8, &auth_url);
+        std.crypto.secureZero(u8, &auth_header);
+    }
+    var flow: Flow = .{};
+    defer flow.wipe();
+    const code = try consent(io, &flow, fixture_client_id, address, profile, chrome, scopes, wait);
+    try fixtureExchange(code, &flow.verifier, address);
+}
+fn fixtureExchange(code: []const u8, verifier: []const u8, address: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, code, '.');
+    if (!std.mem.eql(u8, parts.next() orelse "", "fixture")) return error.InvalidGrant;
+    const challenge = parts.next() orelse return error.InvalidGrant;
+    const encoded = parts.next() orelse return error.InvalidGrant;
+    if (parts.next() != null or challenge.len != 43) return error.InvalidGrant;
+    var expected: [43]u8 = undefined;
+    pkceChallenge(verifier, &expected);
+    if (!std.crypto.timing_safe.eql([43]u8, expected, challenge[0..43].*)) return error.InvalidGrant;
+    var identity: [limits.max_address]u8 = undefined;
+    const size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded) catch return error.InvalidGrant;
+    if (size == 0 or size > identity.len) return error.InvalidGrant;
+    std.base64.url_safe_no_pad.Decoder.decode(identity[0..size], encoded) catch return error.InvalidGrant;
+    b.address(identity[0..size]) catch return error.WrongAccount;
+    var profile_json: [limits.max_address + 32]u8 = undefined;
+    try verifyIdentity(try std.fmt.bufPrint(&profile_json, "{{\"emailAddress\":\"{s}\"}}", .{identity[0..size]}), address);
 }
 fn acceptCallback(io: std.Io, listener: *std.Io.net.Server, callback: *Callback) anyerror![]const u8 {
     for (0..2) |_| {
@@ -502,7 +664,7 @@ fn syntheticCallback(io: std.Io, address: std.Io.net.IpAddress, head: []const u8
 }
 
 // Static reservations exclude caller-provided tokens and response storage.
-pub const reservation_bytes = @sizeOf(@TypeOf(json_workspace)) + @sizeOf(@TypeOf(token_body)) + @sizeOf(@TypeOf(form_buffer)) + @sizeOf(@TypeOf(desktop_body)) + @sizeOf(@TypeOf(auth_access)) + @sizeOf(@TypeOf(auth_refresh)) + @sizeOf(@TypeOf(auth_code)) + @sizeOf(@TypeOf(auth_url)) + @sizeOf(@TypeOf(auth_header)) + @sizeOf(DesktopClient) + 64;
+pub const reservation_bytes = @sizeOf(@TypeOf(json_workspace)) + @sizeOf(@TypeOf(token_body)) + @sizeOf(@TypeOf(form_buffer)) + @sizeOf(@TypeOf(desktop_body)) + @sizeOf(@TypeOf(auth_access)) + @sizeOf(@TypeOf(auth_refresh)) + @sizeOf(@TypeOf(auth_code)) + @sizeOf(@TypeOf(auth_url)) + @sizeOf(@TypeOf(auth_header)) + @sizeOf(DesktopClient) + @sizeOf(TokenError) + 64;
 
 test "desktop client and token scope/capacity failures are explicit" {
     var desktop: DesktopClient = .{};

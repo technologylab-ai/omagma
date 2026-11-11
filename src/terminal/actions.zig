@@ -45,6 +45,7 @@ pub const Id = enum {
     help,
     theme,
     updates,
+    reconnect,
 };
 pub const Context = struct {
     mail: bool = false,
@@ -120,6 +121,7 @@ pub const entries = [_]Entry{
     .{ .id = .help, .name = "Help", .detail = "Search shortcuts and descriptions", .keys = "?" },
     .{ .id = .theme, .name = "Theme", .detail = "Preview Omagma or Follow Omarchy", .keys = "T" },
     .{ .id = .updates, .name = "Updates", .detail = "Check releases and see upgrade instructions for this installation", .keys = ":updates" },
+    .{ .id = .reconnect, .name = "Reconnect Google sign-in", .detail = "Renew this account's expired sign-in in its Chrome profile with the same permissions", .keys = "Ctrl+O / :reconnect" },
 };
 
 /// Command-prompt names for palette actions: ":archive" runs Archive.

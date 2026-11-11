@@ -289,12 +289,23 @@ pub const Session = struct {
             // Internal cached callers own a cancelable lifetime. Keep the
             // cancellation signal out of protocol normalization for that path.
             if (cached_only and err == error.Canceled) return err;
+            if (err == error.InvalidGrant) s.keepRefusal(a, req, account);
             return s.failureFor(out_allocator, a, id, account, req, reconciliationFailure(req, err));
         };
         // Requested views only reshape an already committed result; a shaping
         // failure returns the complete result instead of hiding a mutation.
         const shaped = @import("cli_view.zig").shape(a, req, data, resolved_date) catch data;
         return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, shaped);
+    }
+    /// Google refused this account's stored sign-in. A plaintext store keeps
+    /// the sanitized reason beside its grant registry for later status reads;
+    /// the vault and fixtures keep it in this process only. Best-effort.
+    fn keepRefusal(s: *Session, a: std.mem.Allocator, req: Value, account: []const u8) void {
+        if (s.options.fixtures or s.config.credential_store == .vault or account.len == 0) return;
+        const grant_file = j.text(req, "grantFile");
+        if (grant_file.len == 0) return;
+        const diagnostics = @import("auth_diagnostic.zig");
+        diagnostics.persist(s.io, a, diagnostics.sidecarPath(a, grant_file) catch return, account) catch {};
     }
     /// Error frame with field-level guidance from the request contract. Any
     /// failure to explain falls back to the plain stable code and sentence.
@@ -369,6 +380,10 @@ pub const Session = struct {
             error.CredentialStorageAccessDenied => "The OS or sandbox denied access to the configured private credential files",
             error.KeyringUnavailable => "The selected system credential store is unavailable in this process session; use an unlocked session or explicitly migrate to file storage",
             error.UnknownAccount => "Choose an explicitly configured account",
+            error.ReconnectRequiresGrant => "This account has no recorded terminal grant to renew; authorize it with an explicit capability list instead",
+            error.ReconnectCapabilitiesChanged => "Reconnect renews the recorded grant only: request exactly its recorded capabilities",
+            error.GrantChanged => "The recorded grant changed since it was read; read auth.status again before reconnecting",
+            error.AuthorizationDenied => "Google consent was declined; nothing was changed",
             error.FollowUpMetadataUnavailableOffline => "Message metadata is no longer cached; reconnect to create this follow-up. Existing reminders remain available offline.",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",
@@ -512,10 +527,7 @@ pub const Session = struct {
         try recipients.validateAddress(address);
         if ((j.text(req, "beforeMessageId").len != 0 or j.text(req, "afterMessageId").len != 0) and !try j.boolean(req, "cacheOnly", false) and !(std.mem.eql(u8, cmd, "mail.thread") and try j.boolean(req, "progressive", false))) return error.CacheWindowRequiresCached;
         if (std.mem.startsWith(u8, cmd, "auth.")) {
-            if (s.options.fixtures) {
-                if (!std.mem.eql(u8, cmd, "auth.status")) return error.FixtureOnly;
-                return j.value(a, .{ .configured = true, .fixture = true });
-            }
+            if (s.options.fixtures) return @import("auth.zig").runFixture(s.io, a, &s.config, s.options, s.cache_root, req);
             const result = try @import("auth.zig").run(s.io, a, &s.config, s.env, req);
             if (!std.mem.eql(u8, cmd, "auth.status")) if (s.config.runtime_access_cache) |cache| cache.invalidateAccount(index);
             return result;
@@ -2649,6 +2661,9 @@ pub const Session = struct {
     }
     fn fixture(s: *Session, a: std.mem.Allocator, address: []const u8) !Value {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
+        // Every synthetic provider read refuses an expired sign-in, as Google's
+        // token endpoint would; cached reads never come through here.
+        if (try @import("fixture_auth.zig").expired(s.io, a, s.options, &s.config, s.cache_root, address)) return @import("fixture_auth.zig").refuse(s.io, a, address);
         if (s.options.fixture_root) |root| {
             const key = if (std.mem.eql(u8, address, "personal@example.com")) "personal" else if (std.mem.eql(u8, address, "work@example.com")) "work" else if (std.mem.eql(u8, address, "optional@example.com")) "optional" else return error.FixtureAccountRequired;
             const directory = try std.Io.Dir.cwd().openDir(s.io, root, .{});
