@@ -936,6 +936,22 @@ duration, location and stated response remain available. UTC and supported
 TZID times use local zoneinfo. An embedded/custom timezone converts only when its rules agree with a known zone for the event; unresolved rules keep their stated wall time and label. All-day end dates are explicitly
 exclusive, and ambiguous/nonexistent local times stay labeled.
 
+A published calendar event (an `.ics` file with `METHOD:PUBLISH` or no
+method and no attendees, such as a bill's due date) shows **I · Details  A ·
+Add**. `I` opens **Calendar event · details**: the title, the date and time
+(all-day dates as days; timed events in local time with the time zone as sent),
+the location, the organizer, or the mail's sender when the file names none, the
+reminders `A` would copy (or that your calendar's defaults apply, and any
+unsupported alarm that would not be copied), the notes (long notes are
+shortened here; the `A` review shows them in full) and what `A` adds: the event
+in your primary calendar, with nothing sent. There is no RSVP for such an event.
+
+The invitation card asks for a larger terminal only when it genuinely cannot
+show its account, organizer, outcome and controls, and then names the size it
+needs, for example **Make the terminal at least 80×18 to review this event**.
+Only an invitation you can answer adds **No RSVP can be sent at this size**.
+The `A` review names its required size the same way.
+
 Cancellation, publication and RSVP notices also open
 in the invitation drawer, with response controls disabled. Cancelled events do
 not offer Join. Inspection uses retained verified aliases and cached invitation
@@ -1024,7 +1040,7 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | :spam / :unspam | Shared Spam / Not spam actions |
 | :add-contact / :discard-draft | Prefill sender contact / review local draft removal |
 | :save-all DIRECTORY | Save focused-message files to a new private destination set |
-| a / I | Contacts / invitation reply |
+| a / I | Contacts / invitation reply, or a published event's details |
 | T / :theme | Preview and choose the TUI theme |
 | Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit (Escape never quits) |
 

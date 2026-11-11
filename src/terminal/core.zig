@@ -1055,7 +1055,8 @@ pub const Session = struct {
                 if (reconcile) try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), reconcileInvitation, .{ s, a, &store, ics, req });
                 if (reconcile) try s.resumeInvitationCalendar(a, &store, ics, req);
                 const response_status = try confirmedInvitationResponse(a, &store, ics, address, aliases);
-                return j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable, .organizerName = invite.organizer_name.slice(), .defects = try invitation.Defect.list(a, invite.defects) });
+                const published = if (invite.method == .publish) publishedDetails(a, ics, address, aliases) else PublishedDetails{};
+                return j.value(a, .{ .description = published.description, .descriptionTruncated = published.truncated, .reminders = published.reminders, .unsupportedReminders = published.unsupported, .remindersKnown = published.known, .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .attendeeCount = invite.attendee_count, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable, .organizerName = invite.organizer_name.slice(), .defects = try invitation.Defect.list(a, invite.defects) });
             }
             if (std.mem.eql(u8, (try confirmedInvitationResponse(a, &store, ics, address, aliases)).outcome, "unknown")) return error.UnknownOutcome;
             const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
@@ -1150,6 +1151,31 @@ pub const Session = struct {
             }
             return error.OperationNotFound;
         }
+    }
+    /// Display-only notes and reminders of a published event for its `I`
+    /// details, read by the same import parser the `A` review uses. The notes are
+    /// bounded at a character boundary; the review shows them in full. Anything
+    /// that parser refuses simply has no notes or reminders here.
+    const PublishedDetails = struct {
+        description: []const u8 = "",
+        truncated: bool = false,
+        reminders: []const @import("calendar_types.zig").Reminder = &.{},
+        unsupported: usize = 0,
+        known: bool = false,
+    };
+    const published_description_bytes = 4096;
+    fn publishedDetails(a: std.mem.Allocator, ics: []const u8, address: []const u8, aliases: []const []const u8) PublishedDetails {
+        const parsed = @import("calendar_invitation.zig").parseForCalendar(a, ics, address, aliases) catch return .{};
+        if (parsed.method != .publish) return .{};
+        var description = std.mem.trim(u8, parsed.description, " \t\r\n");
+        var truncated = false;
+        if (description.len > published_description_bytes) {
+            var end: usize = published_description_bytes;
+            while (end > 0 and (description[end] & 0xc0) == 0x80) end -= 1;
+            description = description[0..end];
+            truncated = true;
+        }
+        return .{ .description = description, .truncated = truncated, .reminders = parsed.reminders, .unsupported = parsed.unsupported_reminders, .known = true };
     }
     fn cachedAliases(a: std.mem.Allocator, store: *const storage.Store) ![]const []const u8 {
         const result = try a.alloc([]const u8, store.state.identities.len);
@@ -7235,4 +7261,28 @@ test "meet notes: outer deadline after a simulated provider commit retains uncer
     defer arena.deinit();
     const request = try j.value(arena.allocator(), .{ .cmd = "calendar.meet-event-apply" });
     try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(request, observed));
+}
+
+test "invitation inspect: a published event's notes are bounded at a character boundary with its reminders" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ics: std.ArrayList(u8) = .empty;
+    try ics.appendSlice(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:notes@example.test\r\nDTSTAMP:20261109T071718Z\r\nDTSTART;VALUE=DATE:20261123\r\nSUMMARY:Fictional bill\r\nDESCRIPTION:x");
+    // 3000 two-byte characters, folded at character boundaries, after one
+    // ASCII byte: the 4096-byte bound falls inside a character.
+    for (0..100) |_| {
+        try ics.appendSlice(a, "\r\n ");
+        for (0..30) |_| try ics.appendSlice(a, "é");
+    }
+    try ics.appendSlice(a, "\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    const details = Session.publishedDetails(a, ics.items, "self@example.test", &.{});
+    try std.testing.expect(details.known and details.truncated);
+    try std.testing.expectEqual(@as(usize, 4095), details.description.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(details.description));
+    try std.testing.expectEqual(@as(usize, 1), details.reminders.len);
+    try std.testing.expectEqual(@as(u32, 15), details.reminders[0].minutes);
+    // An invitation (REQUEST) is not a published event: nothing is added.
+    const request = try std.mem.replaceOwned(u8, a, ics.items, "METHOD:PUBLISH", "METHOD:REQUEST");
+    try std.testing.expect(!Session.publishedDetails(a, request, "self@example.test", &.{}).known);
 }

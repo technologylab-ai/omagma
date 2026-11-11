@@ -153,6 +153,51 @@ def tui_case(binary, root, captures=None, unsupported=False, ordinary=False, lon
 
 
 
+def details_case(binary, root, ordinary=False):
+    """I on a published event shows its details in usual terminals and an
+    honest, sized request only in a genuinely small one; nothing is written."""
+    fixture, directory = setup(binary, root, ordinary=ordinary)
+    sender = "Sent by · Example Utility <billing@example.test>" if ordinary else "From · billing@example.test"
+    expected = (TITLE, "Mon 23 Nov 2026", "all day", "Account · " + ACCOUNTS[0], sender,
+                "A adds it to your primary calendar", "Reminder · 36 hours before",
+                "Notes · Your fictional utility payment is due.", "[A Add to calendar]")
+    for columns, rows in ((80, 24), (100, 30), (160, 45)):
+        terminal = MouseTerminal(binary, directory, extra=fixture.options(), columns=columns, rows=rows, screen_type=CalendarScreen,
+                                 environment={"TZ": "Europe/Vienna", "NO_COLOR": None, "COLORTERM": "truecolor"})
+        try:
+            terminal.until(lambda: TITLE in terminal.text())
+            terminal.gap(.2)
+            terminal.send(b"I")
+            terminal.until(lambda: "Calendar event · details" in terminal.text() and "[Esc Close]" in terminal.text())
+            terminal.gap(.2)
+            shown = terminal.text()
+            for refusal in ("Resize", "RSVP identity", "Make the terminal", "No RSVP can"):
+                require(refusal not in shown, f"{columns}x{rows}: published event details asked to resize: {refusal}")
+            for value in expected:
+                require(value in shown, f"{columns}x{rows}: published event details omitted {value!r}")
+            if columns == 100:
+                # Genuinely small: the card names the size it needs, says
+                # nothing of an RSVP, and returns when the terminal grows.
+                terminal.resize(40, 12)
+                terminal.until(lambda: "Make the terminal at least 40×" in terminal.text())
+                require("RSVP" not in terminal.text(), "published event too-small notice mentioned an RSVP")
+                terminal.resize(columns, rows)
+                terminal.until(lambda: "Notes · Your fictional utility payment is due." in terminal.text())
+                require("Make the terminal" not in terminal.text(), "details stayed hidden after growing the terminal")
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "Calendar event · details" not in terminal.text())
+            # Viewing details opens no Calendar and sends nothing.
+            with Client(binary, directory, extra=fixture.options()) as client:
+                require(client.request("cache.stats")["fixtureSends"] == 0, "viewing published event details sent mail")
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+    print("PASS published Calendar details:", "ordinary" if ordinary else "PUBLISH", "80x24 100x30 160x45 and 40x12")
+
+
 def legacy_case(binary, old_binary, root):
     fixture, directory = setup(binary, root, prime=False)
     with Client(old_binary, directory, extra=fixture.options()) as old:
@@ -184,6 +229,8 @@ def main():
         cli_case(binary, root / "ordinary", ordinary=True)
         cli_case(binary, root / "unknown", lost=True)
         cli_case(binary, root / "unsupported", unsupported=True)
+        details_case(binary, root / "publish-details")
+        details_case(binary, root / "ordinary-details", ordinary=True)
         tui_case(binary, root / "publish-tui", args.captures)
         tui_case(binary, root / "ordinary-tui", args.captures, ordinary=True)
         tui_case(binary, root / "unsupported-tui", args.captures, unsupported=True)

@@ -139,7 +139,7 @@ def tui_case(binary, directory, mono=False, lost=False, rejected=False, long_not
         # A too-small viewport cannot submit, including after a previously full review.
         terminal.resize(40, 12)
         terminal.gap(.2)
-        terminal.until(lambda: "Make the window larger" in terminal.text())
+        terminal.until(lambda: "Make the terminal at least" in terminal.text())
         terminal.send(b"y\r")
         terminal.gap(.1)
         check_provider(binary, directory, fixture, 0)
@@ -194,7 +194,7 @@ def tui_case(binary, directory, mono=False, lost=False, rejected=False, long_not
             capture(terminal, captures, "added-" + tag)
             terminal.resize(40, 12)
             terminal.gap(.2)
-            terminal.until(lambda: "Make the window larger" in terminal.text() and "[Esc Close]" in terminal.text())
+            terminal.until(lambda: "Make the terminal at least" in terminal.text() and "[Esc Close]" in terminal.text())
             require("[Esc Cancel]" not in terminal.text() and "[y Add appointment]" not in terminal.text(), "small completed card implies undo or another Add")
             terminal.send(b"y")
             terminal.gap(.1)

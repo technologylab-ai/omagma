@@ -883,7 +883,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Tab / Shift+Tab · Enter in label manager", .action = "Reach every label control; / filters; Ctrl+R refreshes or checks the receipt", .requires = .mail_changes },
     .{ .keys = "Space · + / - · Ctrl+S in labels", .action = "Stage checked or mixed labels; Apply submits all staged changes; Cancel keeps labels", .requires = .mail_changes },
     .{ .keys = "c Color in Manage labels", .action = "Choose a custom label's Gmail-compatible background and text colors", .requires = .mail_changes },
-    .{ .keys = "I", .action = "Review a calendar invitation reply", .requires = .invitations },
+    .{ .keys = "I", .action = "Review a calendar invitation reply, or a published event's details: time, reminders, notes and what A adds", .requires = .invitations },
     .{ .keys = "Ctrl+R", .action = "Refresh mail" },
     .{ .keys = "Ctrl+L", .action = "Reload theme and redraw the screen" },
     .{ .section = "CONTACTS" },
@@ -2198,6 +2198,17 @@ const App = struct {
     invitation_attendee_status: @import("../bounded.zig").Text(32) = .{},
     invitation_all_day: bool = false,
     invitation_timezone_unavailable: bool = false,
+    /// A published event's notes (bounded by the backend) and the reminders
+    /// A would copy; known only when the import parser could read the file.
+    invitation_description: @import("../bounded.zig").Text(4096) = .{},
+    invitation_description_truncated: bool = false,
+    invitation_reminders: [5]u32 = @splat(0),
+    invitation_reminder_count: u8 = 0,
+    invitation_unsupported_reminders: u32 = 0,
+    invitation_reminders_known: bool = false,
+    /// The smallest terminal the open invitation card needs, or zero.
+    invitation_needed_cols: u16 = 0,
+    invitation_needed_rows: u16 = 0,
     attachment_destination: Field = .{},
     attachment_expected_size: usize = 0,
     generation: u64 = 0,
@@ -7700,7 +7711,7 @@ const App = struct {
                 self.invitation_confirm_ready = false;
                 self.mode = .invitation;
                 self.dialog_focus.reset(.invitation, 0);
-                self.say(false, "{s}", .{if (self.invitation_response_unknown) "RSVP not confirmed · C Check Sent · no automatic resend" else if (self.invitationCalendarUnknown()) "RSVP confirmed · Calendar not confirmed · C Check status" else if (self.invitation_confirmed_status.len > 0) "Previous RSVP confirmed · review before changing your response" else if (self.invitation_review.canRespond()) "Review RSVP · a Accept · t Tentative · d Decline · Esc Cancel" else "Calendar notice · Esc Back"});
+                self.say(false, "{s}", .{if (self.invitation_response_unknown) "RSVP not confirmed · C Check Sent · no automatic resend" else if (self.invitationCalendarUnknown()) "RSVP confirmed · Calendar not confirmed · C Check status" else if (self.invitation_confirmed_status.len > 0) "Previous RSVP confirmed · review before changing your response" else if (self.invitation_review.canRespond()) "Review RSVP · a Accept · t Tentative · d Decline · Esc Cancel" else if (self.invitation_review.method == .publish and self.invitationCalendarAllowed() and !browser_target) "Calendar event · A adds it to your calendar · Esc Back" else "Calendar notice · Esc Back"});
             },
             .send, .invitation => {
                 const result = self.data(self.job_arena.allocator(), response) catch |err| {
@@ -12717,7 +12728,7 @@ const App = struct {
             if (!self.invitation_review.canRespond() or self.invitation_response_unknown or (!self.invitation_calendar_blocked and self.invitationCalendarUnknown())) return;
             const status = if (rsvp_only) self.invitation_pending_status.slice() else if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
             if (!self.invitation_confirm_ready) {
-                self.say(true, "Resize to review RSVP identity before confirmation", .{});
+                if (self.invitation_needed_rows > 0) self.say(true, "Nothing sent · make the terminal at least {d}×{d} to review this invitation", .{ self.invitation_needed_cols, self.invitation_needed_rows }) else self.say(true, "Nothing sent · the invitation is not fully shown yet", .{});
                 return;
             }
             if (!rsvp_only and !key.matches(Key.enter, .{}) and !self.invitation_letters_armed) {
@@ -16135,6 +16146,39 @@ const App = struct {
         self.invitation_all_day = truth(get(result, "allDay"));
         self.invitation_timezone_unavailable = truth(get(result, "timezoneUnavailable"));
         self.invitation_details = false;
+        const description = text(get(result, "description"));
+        var end: usize = @min(description.len, self.invitation_description.bytes.len);
+        while (end > 0 and end < description.len and (description[end] & 0xc0) == 0x80) end -= 1;
+        self.invitation_description.set(description[0..end]) catch self.invitation_description.display(description[0..end]);
+        self.invitation_description_truncated = truth(get(result, "descriptionTruncated")) or end < description.len;
+        self.invitation_reminder_count = 0;
+        for (items(get(result, "reminders"))) |reminder| {
+            const minutes = get(reminder, "minutes");
+            if (self.invitation_reminder_count == self.invitation_reminders.len or minutes != .integer or minutes.integer < 0 or minutes.integer > std.math.maxInt(u32)) continue;
+            self.invitation_reminders[self.invitation_reminder_count] = @intCast(minutes.integer);
+            self.invitation_reminder_count += 1;
+        }
+        self.invitation_unsupported_reminders = @intCast(std.math.clamp(integer(get(result, "unsupportedReminders")), 0, std.math.maxInt(u32)));
+        self.invitation_reminders_known = truth(get(result, "remindersKnown"));
+    }
+    /// The mail's own sender, for an event file that names no organizer.
+    fn invitationMailSender(self: *App, a: Allocator) ![]const u8 {
+        const id = self.invitation_inspected_id.value();
+        if (!same(self.invitation_inspected_account.value(), self.account())) return "";
+        var found: ?Value = null;
+        for (self.thread) |candidate| if (same(text(get(candidate, "id")), id)) {
+            found = candidate;
+            break;
+        };
+        if (found == null) for (self.messages) |candidate| if (same(text(get(candidate, "id")), id)) {
+            found = candidate;
+            break;
+        };
+        const sender = get(found orelse return "", "from");
+        const name = text(get(sender, "name"));
+        const address = text(get(sender, "address"));
+        if (address.len == 0) return name;
+        return if (name.len > 0) try std.fmt.allocPrint(a, "{s} <{s}>", .{ name, address }) else address;
     }
     fn loadInvitationCalendarSync(self: *App, result: Value) !void {
         self.invitation_calendar_can_retry = truth(get(result, "canRetry"));
@@ -16280,7 +16324,11 @@ const App = struct {
         try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Account · {s}", .{self.invitation_inspected_account.value()}), .tone = .sender });
         if (self.invitation_review.attendee.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Attendee · {s}", .{self.invitation_review.attendee.slice()}), .tone = .text });
         const organizer_text = try calendar_text.organizerText(a, self.invitation_review.organizer.slice(), self.invitation_review.organizer_name.slice(), self.invitation_review.defects & invitation.Defect.organizer != 0);
-        if (organizer_text.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (published) @as([]const u8, "From") else "Organizer", organizer_text }), .tone = .muted });
+        if (organizer_text.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (published) @as([]const u8, "From") else "Organizer", organizer_text }), .tone = .muted }) else if (published) {
+            // An event file may name no organizer; say who mailed it.
+            const sender = try self.invitationMailSender(a);
+            if (sender.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Sent by · {s}", .{sender}), .tone = .muted });
+        }
         if (self.invitation_review.defects != 0) {
             try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Can't answer from Omagma · this invitation is damaged: {s}", .{try calendar_text.damageReasons(a, self.invitation_review.defects)}), .tone = .warning });
             try pinned.append(a, .{ .text = if (reader_tools.safeUrl(self.invitation_join_url.slice())) "Nothing was sent. r Reply by email · g Open in Gmail" else "Nothing was sent. r Reply by email · o Open in Gmail", .tone = .warning });
@@ -16318,6 +16366,16 @@ const App = struct {
         if (!published) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Invitation says · {s}", .{response}), .tone = .muted });
         if (self.invitation_review.recurrence_id.len > 0) try details.append(a, .{ .text = "Repeating event · this occurrence · v Details", .tone = .muted }) else if (self.invitation_recurrence_display.len > 0) try details.append(a, .{ .text = "Repeating event · v Details", .tone = .muted });
         if (self.invitation_timezone_unavailable) try details.append(a, .{ .text = "Timezone shown as sent · local conversion unavailable", .tone = .offline });
+        if (published and self.invitation_reminders_known) {
+            // The same reminders A copies, and the same disclosure.
+            for (self.invitation_reminders[0..self.invitation_reminder_count]) |minutes| try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Reminder · {s}", .{try reminderText(a, minutes)}) });
+            if (self.invitation_reminder_count == 0 and self.invitation_unsupported_reminders == 0) try details.append(a, .{ .text = "Reminder · your calendar's default reminders", .tone = .muted });
+            if (self.invitation_unsupported_reminders > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "⚠ {d} unsupported reminder{s} in this file won't be added", .{ self.invitation_unsupported_reminders, if (self.invitation_unsupported_reminders == 1) @as([]const u8, "") else "s" }), .tone = .warning });
+        }
+        if (published and self.invitation_description.len > 0) {
+            const notes = try calendar_ui.descriptionText(a, self.invitation_description.slice(), self.invitation_join_url.slice());
+            if (notes.len > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Notes · {s}{s}", .{ notes, if (self.invitation_description_truncated) @as([]const u8, "\n… A shows the complete notes") else "" }) });
+        }
         if (self.invitation_details) {
             try details.append(a, .{ .text = "\nPROTOCOL", .tone = .muted });
             try details.append(a, .{ .text = try std.fmt.allocPrint(a, "UID: {s}\nSequence: {d}\nRecurrence: {s}\nRecurrence ID: {s}", .{ self.invitation_review.uid.slice(), self.invitation_review.sequence, self.invitation_recurrence_display.slice(), self.invitation_review.recurrence_id.slice() }), .tone = .muted });
@@ -16348,12 +16406,24 @@ const App = struct {
         const inner = bordered.child(.{ .x_off = inset, .width = bordered.width -| inset * 2 });
         const heading = if (self.invitation_review.canRespond()) " Meeting · review reply " else if (published) " Calendar event · details " else " Calendar notice · details ";
         if (border > 0) try self.line(area.child(.{ .x_off = 2, .width = width -| 4, .height = 1 }), 0, heading, .sender);
-        // Every identity and outcome fence is visible before any reply is enabled.
-        if (inner.width < 30 or fixed_rows + 1 > inner.height) {
+        // Every identity and outcome fence is visible before any reply is
+        // enabled. Details need one visible row only when there are details:
+        // the card is sized to its content, so demanding a row that a
+        // detail-free published event never has made every such event
+        // "too small" in any terminal.
+        const needed_inner = fixed_rows + @min(detail_rows, 1);
+        self.invitation_needed_cols = 0;
+        self.invitation_needed_rows = 0;
+        if (inner.width < 30 or needed_inner > inner.height) {
             self.invitation_height = 0;
-            _ = try self.flow(inner.child(.{ .height = inner.height -| 1 }), "Resize to review RSVP identity.\nNo RSVP can be submitted at this size.", 0, 0);
+            // The rows are measured at this width; a narrower card wraps more.
+            self.invitation_needed_cols = if (inner.width < 30) 34 else @min(win.width, 90);
+            self.invitation_needed_rows = @intCast(@min(needed_inner + border * 2 + 2, std.math.maxInt(u16)));
+            const what: []const u8 = if (self.invitation_review.canRespond()) "this invitation" else if (published) "this event" else "this calendar notice";
+            const consequence: []const u8 = if (self.invitation_review.canRespond()) "\nNo RSVP can be sent at this size." else "";
+            _ = try self.flowTone(inner.child(.{ .height = inner.height -| 1 }), try std.fmt.allocPrint(a, "Make the terminal at least {d}×{d} to review {s}.{s}", .{ self.invitation_needed_cols, self.invitation_needed_rows, what, consequence }), 0, 0, .warning);
             self.dialog_focus.index = 0;
-            _ = try self.actionButton(inner, inner.height -| 1, 0, "[Cancel]", true, self.job.future == null, .dialog_action, 0);
+            _ = try self.actionButton(inner, inner.height -| 1, 0, "[Esc Close]", true, self.job.future == null, .dialog_action, 0);
             return;
         }
         try self.line(inner.child(.{ .width = title_width }), 0, try self.fitLine(inner, if (title.len > 0) title else "Untitled event", title_width), .subject);
@@ -19356,7 +19426,8 @@ const App = struct {
         if (inner.width < 30 or fixed + @as(usize, if (lines > 0) 1 else 0) > inner.height) {
             self.calendar.review_ready = false;
             self.calendar.booking_height = 0;
-            _ = try self.flowTone(inner.child(.{ .height = inner.height -| 1 }), if (published) "Make the window larger to review this event." else "Make the window larger to review this appointment.", 0, 0, .warning);
+            const needed_rows = fixed + @as(usize, if (lines > 0) 1 else 0) + border * 2 + 2;
+            _ = try self.flowTone(inner.child(.{ .height = inner.height -| 1 }), try std.fmt.allocPrint(a, "Make the terminal at least {d}×{d} to review this {s}.", .{ if (inner.width < 30) @as(u16, 34) else @min(win.width, 90), needed_rows, if (published) @as([]const u8, "event") else "appointment" }), 0, 0, .warning);
             if (state == .adding and inner.height > 1) _ = try self.actionButton(inner, inner.height - 2, 0, add_label, false, false, .dialog_action, 10);
             const closing = self.calendar.outcome.len > 0 or self.calendar.unknown or state == .adding;
             _ = try self.actionButton(inner, inner.height -| 1, 0, if (closing) @as([]const u8, "[Esc Close]") else "[Esc Cancel]", self.calendar.focus == 0, !self.calendarBookingWriting(), .dialog_action, 0);
@@ -32361,6 +32432,104 @@ test "invitation UX: themed card pins identity and uncertain outcomes above scro
     try app.invitationDraw(win);
     try std.testing.expect(!app.invitation_confirm_ready);
     try std.testing.expectEqual(@as(u8, 1), app.invitationControlMask());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+/// Draws the inspected invitation card into a fresh screen of this size and
+/// returns its text (caller frees).
+fn invitationCardText(app: *App, a: Allocator, cols: u16, rows: u16) ![]u8 {
+    var screen = try vaxis.Screen.init(a, .{ .cols = cols, .rows = rows, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = cols, .height = rows, .screen = &screen };
+    try app.invitationDraw(win);
+    return helpTestScreenText(a, &screen);
+}
+
+test "invitation UX: a published event without detail rows shows its details at usual sizes, not a resize request" {
+    const a = std.testing.allocator;
+    // The reported case: an all-day reminder file with no location, end time,
+    // notes or reminders the card can list. Each variant is a neighbouring
+    // path with the same card: plain, cancelled and damaged events, a real
+    // invitation with RSVP and its cancellation.
+    const Variant = struct { name: []const u8, json: []const u8, title: []const u8, attendee: []const u8 = "", rsvp: bool = false };
+    const variants = [_]Variant{
+        .{ .name = "published", .title = "Calendar event · details", .json = "{\"method\":\"publish\",\"canReply\":false,\"attendeeCount\":0,\"startDisplay\":\"2026-11-23 (all day)\",\"durationDisplay\":\"1 day\",\"allDay\":true,\"organizerName\":\"Example Utility\"}" },
+        .{ .name = "cancelled", .title = "Calendar event · details", .json = "{\"method\":\"publish\",\"canReply\":false,\"attendeeCount\":0,\"cancelled\":true,\"startDisplay\":\"2026-11-23 (all day)\",\"durationDisplay\":\"1 day\",\"allDay\":true}" },
+        .{ .name = "damaged", .title = "Calendar event · details", .json = "{\"method\":\"publish\",\"canReply\":false,\"attendeeCount\":0,\"startDisplay\":\"2026-11-23 (all day)\",\"durationDisplay\":\"1 day\",\"allDay\":true,\"defects\":[\"organizer\"]}" },
+        .{ .name = "request", .title = "Meeting · review reply", .attendee = "personal@example.test", .rsvp = true, .json = "{\"method\":\"request\",\"canReply\":true,\"attendeeCount\":1,\"startDisplay\":\"2026-11-23 10:00 CET\",\"durationDisplay\":\"1h\"}" },
+        .{ .name = "cancel", .title = "Calendar notice · details", .attendee = "personal@example.test", .json = "{\"method\":\"cancel\",\"canReply\":false,\"attendeeCount\":1,\"cancelled\":true,\"startDisplay\":\"2026-11-23 10:00 CET\",\"durationDisplay\":\"1h\"}" },
+    };
+    for (variants) |variant| {
+        var client: CacheTestClient = .{};
+        var app = client.app(a);
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        try app.invitation_inspected_account.set(a, "personal@example.test");
+        try app.invitation_inspected_id.set(a, "published-payment");
+        try app.invitation_review.summary.set("Utility payment due");
+        try app.invitation_review.start.set("20261123");
+        try app.invitation_review.organizer.set("billing@example.test");
+        try app.invitation_review.attendee.set(variant.attendee);
+        try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), variant.json));
+        for ([_][2]u16{ .{ 80, 24 }, .{ 100, 30 }, .{ 160, 45 } }) |size| {
+            const shown = try invitationCardText(&app, a, size[0], size[1]);
+            defer a.free(shown);
+            errdefer std.debug.print("\n{s} at {d}x{d}:\n{s}\n", .{ variant.name, size[0], size[1], shown });
+            try std.testing.expect(app.invitation_confirm_ready);
+            try std.testing.expectEqual(@as(u16, 0), app.invitation_needed_rows);
+            for ([_][]const u8{ "Resize", "Make the terminal", "RSVP identity" }) |refusal| try std.testing.expect(std.mem.indexOf(u8, shown, refusal) == null);
+            for ([_][]const u8{ variant.title, "Utility payment due", "Account · personal@example.test" }) |expected| try std.testing.expect(std.mem.indexOf(u8, shown, expected) != null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, if (variant.rsvp) "[a Accept]" else "[Esc Close]") != null);
+        }
+        // A genuinely small terminal says so, names the size it needs, and
+        // speaks of an RSVP only where there is one.
+        const small = try invitationCardText(&app, a, 40, 10);
+        defer a.free(small);
+        errdefer std.debug.print("\n{s} at 40x10:\n{s}\n", .{ variant.name, small });
+        try std.testing.expect(!app.invitation_confirm_ready);
+        try std.testing.expect(app.invitation_needed_rows > 10 and app.invitation_needed_cols == 40);
+        const needed = try std.fmt.allocPrint(a, "Make the terminal at least 40×{d}", .{app.invitation_needed_rows});
+        defer a.free(needed);
+        try std.testing.expect(std.mem.indexOf(u8, small, needed) != null);
+        try std.testing.expectEqual(variant.rsvp, std.mem.indexOf(u8, small, "No RSVP can be sent") != null);
+        try std.testing.expect(std.mem.indexOf(u8, small, "Resize to review RSVP identity") == null);
+        // At exactly the named size the card is complete.
+        const enough = try invitationCardText(&app, a, 40, app.invitation_needed_rows);
+        defer a.free(enough);
+        try std.testing.expect(app.invitation_confirm_ready);
+    }
+}
+
+test "invitation UX: a published event's details list its time, sender, reminders, notes and what A adds" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.invitation_inspected_account.set(a, "personal@example.test");
+    try app.invitation_inspected_id.set(a, "published-payment");
+    try app.invitation_review.summary.set("Utility payment due");
+    try app.invitation_review.start.set("20261123");
+    // An event file without ORGANIZER: the card names who mailed it.
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"published-payment\",\"subject\":\"Utility payment due\",\"from\":{\"name\":\"Example Utility\",\"address\":\"billing@example.test\"}}]", .{}));
+    try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"publish\",\"canReply\":false,\"attendeeCount\":0,\"startDisplay\":\"2026-11-23 (all day)\",\"durationDisplay\":\"1 day\",\"allDay\":true,\"description\":\"Your fictional utility payment is due.\\nReference: EXAMPLE-42\",\"descriptionTruncated\":true,\"reminders\":[{\"minutes\":2160}],\"unsupportedReminders\":1,\"remindersKnown\":true}"));
+    const shown = try invitationCardText(&app, a, 100, 30);
+    defer a.free(shown);
+    errdefer std.debug.print("\n{s}\n", .{shown});
+    try std.testing.expect(app.invitation_confirm_ready);
+    for ([_][]const u8{ "Mon 23 Nov 2026", "all day", "Sent by · Example Utility <billing@example.test>", "A adds it to your primary calendar", "nothing is sent", "Reminder · 36 hours before", "1 unsupported reminder in this file won't be added", "Notes · Your fictional utility payment is due.", "Reference: EXAMPLE-42", "A shows the complete notes", "[A Add to calendar]" }) |expected| {
+        if (std.mem.indexOf(u8, shown, expected) == null) {
+            std.debug.print("\nMissing published details text '{s}'\n", .{expected});
+            return error.MissingPublishedDetails;
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, shown, "RSVP identity") == null);
+    // Without reminders in the file, the calendar's defaults apply.
+    try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"publish\",\"canReply\":false,\"attendeeCount\":0,\"startDisplay\":\"2026-11-23 (all day)\",\"durationDisplay\":\"1 day\",\"allDay\":true,\"reminders\":[],\"remindersKnown\":true}"));
+    const defaults = try invitationCardText(&app, a, 100, 30);
+    defer a.free(defaults);
+    try std.testing.expect(std.mem.indexOf(u8, defaults, "Reminder · your calendar's default reminders") != null);
+    try std.testing.expect(std.mem.indexOf(u8, defaults, "Notes ·") == null);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
