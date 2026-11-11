@@ -2,7 +2,8 @@
 
 Create timed or all-day events, invite guests and add a Google Meet or pasted
 meeting link from the native Calendar view. Review the destination, times and
-guest notifications before anything is saved.
+guest notifications before anything is saved. Events can also be
+[deleted and invitations answered](#delete-events-and-answer-invitations) there.
 
 ## In the TUI
 
@@ -105,6 +106,90 @@ alternatives absent from the displayed titles; **Show all** retains the full
 candidate count. These choices change presentation and leave Calendar data,
 reminders and the Mail account untouched.
 
+## Delete events and answer invitations
+
+In the Calendar view, `D` (or the Delete key) deletes and `r` answers (RSVP)
+the selected event or the open event card. Each opens a dialog; neither key
+changes Calendar by itself. The dialog reads the latest version of the event,
+then shows its title, time, calendar, account, your role and guest count, the
+choices and one sentence stating exactly what will happen, for example
+**Deletes this event from Personal and emails 2 guests a cancellation.** `y`
+(or the focused button) confirms; Esc, `q` and `n` leave everything unchanged.
+
+| Situation | Delete | RSVP |
+| --- | --- | --- |
+| This calendar organizes the event and it has guests | Choose **Email N guests a cancellation** or **Don't email the guests** before `y` is available | No RSVP: `r` explains that organizers have nothing to answer |
+| Organized here, no guests | Deleted without email | No RSVP |
+| You are invited | **Removed from your calendar only**; the organizer is not told (decline instead) | `a` Accept, `m` Maybe, `x` Decline choose; `y` sends; the current answer cannot be resent |
+| Someone else's event without your guest entry | Removed from this calendar only | Not invited: nothing to answer |
+| Repeating event | **This event only** (default) or **All events in the series** | the same two scopes |
+| Read-only calendar, locked, special (focus time, out of office, birthdays) or private copy | Disabled with the reason; `b` opens Google Calendar | Disabled with the reason; a private copy is answered from its mail (`I`) |
+| Calendar write permission missing | Disabled; Enter shows the copyable authorization command that keeps your current capabilities | the same |
+
+*This and following events* is not offered; use Google Calendar (`b`) for it. A
+series answer may leave occurrences you answered separately with their own
+answer. **Email my answer to the organizer** is on by default; turned off, Google
+saves your answer on the shared event without email, which an organizer using
+Google Calendar still sees. Omagma never composes the email itself.
+
+Every write is conditional on the version the dialog showed (`If-Match`): when
+someone changed the event meanwhile, Calendar refuses it, nothing changes and the
+dialog says so. A confirmed delete removes the event from the view at once, an
+answer updates its `?`/`~`/`×` mark, and the range then reloads from Google. The
+status reads **Deleted · title · time**, **Removed from your calendar · …**,
+**Declined · …** and so on. There is no undo: Omagma cannot prove a restore, and
+a sent cancellation cannot be recalled.
+
+If Calendar does not confirm the outcome (a lost connection), the dialog stays
+**unconfirmed** and never guesses. `r` checks Calendar with reads only: a
+deleted (cancelled) event or your saved answer settles it. When Calendar still
+shows the unchanged version, `Ctrl+R` offers to send the identical request once
+more after its own confirmation; its unchanged `If-Match` cannot touch a newer
+version. `Ctrl+D` stops tracking the uncertainty after a warning that the change
+may already have happened. An unconfirmed change blocks other changes to the
+same event and survives a restart: `D` or `r` on that event resumes it.
+
+### From the CLI
+
+Both actions follow the review → apply contract of `calendar event-review`.
+A dry run (`--dry-run`, JSONL `dryRun:true`) reads only, saves nothing and needs
+no ETag; it returns the role, guest count, current answer, `consequence` and
+`options` (`series`, `notify`, `thisAndFollowing`) for choosing the real review:
+
+```sh
+omagma calendar event-delete-review --account personal@example.com \
+  --calendar-id RETURNED_CALENDAR_ID --event-id RETURNED_EVENT_ID \
+  --scope event --send-updates none --operation-id PLAN_ID --dry-run
+omagma calendar event-delete-review --account personal@example.com \
+  --calendar-id RETURNED_CALENDAR_ID --event-id RETURNED_EVENT_ID \
+  --expected-etag RETURNED_ETAG --scope event --send-updates all \
+  --operation-id UNIQUE_DELETE_ID
+omagma calendar event-apply --account personal@example.com \
+  --calendar-id RETURNED_CALENDAR_ID --operation-id UNIQUE_DELETE_ID \
+  --review-hash RETURNED_REVIEW_HASH
+```
+
+`calendar event-respond-review` takes the same fields plus `--response
+accepted|tentative|declined`. `--scope series` binds the series master's own
+ETag (`targetEventId`/`targetEtag` in the review). `--send-updates all` is
+accepted only where somebody can be notified: guests of an event this calendar
+organizes, or the organizer of an invitation. The saved review is applied,
+checked, retried and archived with `calendar event-apply`, `event-reconcile`,
+`event-retry` and `event-abandon`; `event-apply --dry-run` repeats apply's fresh
+checks and reports `wouldSend` without sending. `calendar event-pending
+--event-id ID` finds an unconfirmed delete or answer (also from the occurrence a
+series action was chosen on). One-shot exit status follows the state: 0
+applied, 3 rejected or refused, 4 missing permission, 6 unknown.
+
+Google calls: a review reads the event with `events.get` (and its series
+master for a series action or an occurrence's dry run); apply reads it once more
+and then sends exactly one `events.delete` with `If-Match` and `sendUpdates`, or
+one `events.patch` with `If-Match`, `sendUpdates`, `attendeesOmitted:true`, only
+this calendar's attendee entry and private receipt markers. Checking an
+uncertain outcome uses `events.get` only. Both actions use the existing
+`calendar-write-owned` or `calendar-write-shared` permission (OAuth scope
+`calendar.events.owned` or `calendar.events`); no new scope is requested.
+
 ## Booked appointments received by email
 
 A booking confirmation may contain a Calendar attachment with no guest list.
@@ -169,8 +254,8 @@ a join link, invent guests, or turn a published notice into a meeting request.
 
 ## Permissions
 
-Calendar creation and editing use the existing optional
-`calendar-write-owned` or `calendar-write-shared` permission. No Meet-specific
+Calendar creation, editing, deleting and answering invitations use the existing
+optional `calendar-write-owned` or `calendar-write-shared` permission. No Meet-specific
 OAuth permission is required to create a Google Meet conference attached to a
 Calendar event. Automatic Meet AI notes additionally need the optional
 `meet-settings` permission (see below). The existing account grant must also

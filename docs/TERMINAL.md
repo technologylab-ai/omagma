@@ -685,6 +685,50 @@ account's configured Chrome profile. Opening an event uses Google's returned
 event link and fixes the account selector; it does not guess an event ID from
 an invitation.
 
+### Delete events and answer invitations (RSVP)
+
+On the selected event, or in its event card, `D` (or the Delete key) opens
+**Delete event?** and `r` opens **Your answer**. Both are also buttons on the
+selected row and in the card (`[D Delete]`, `[r RSVP]`, reachable with Tab,
+Enter activates) and entries in `Ctrl+P` actions. Neither key changes Calendar:
+the dialog first reads the latest version of the event, shows its calendar,
+account, time, your role and guests, and then waits for an explicit choice and
+a separate `y` (or its button). Esc, `q` or `n` close it without changing
+anything; in an untouched delete Enter is on **Esc Cancel**, as in Mail's Trash
+dialog.
+
+- **Events you organize with guests**: choose **Email N guests a cancellation**
+  or **Don't email the guests** first; the button then says exactly what `y`
+  does (**[y Delete & email 2 guests]**, **[y Delete, no email]**). Without
+  guests nobody is emailed. There is no undo.
+- **Someone else's event** (an invitation or a copy in your calendar) is
+  **removed from your calendar only**; the organizer and other guests are not
+  told. To tell the organizer you won't attend, use `r` and Decline instead.
+- **Your answer**: `a` Accept, `m` Maybe or `x` Decline only *choose* (as do
+  j/k and Enter on a row); `y` sends it once. The current answer is shown and
+  cannot be resent. **Email my answer to the organizer** is on by default and
+  can be turned off (Google then saves the answer on the event without email).
+  Events you organize have no RSVP (`r` says so); a private invitation copy is
+  answered from its mail with `I`.
+- **Repeating events**: **This event only** (the default) or **All events in
+  the series**. *This and following* is not offered; `b` opens Google Calendar
+  for it. A series answer may leave occurrences you answered separately as they
+  were.
+
+The write is conditional on the version the dialog showed: if the event
+changed meanwhile, nothing is changed and the dialog says so. After a confirmed
+write the event disappears (or shows its new `?`/`~`/`×` mark) at once, the
+status reads **Deleted · title · time**, **Removed from your calendar · …** or
+**Declined · …**, and the range then refreshes from Google. If Calendar did not
+confirm the outcome, the dialog stays **unconfirmed**: `r` checks Calendar with
+reads only, `Ctrl+R` sends the identical request once more only after a check
+found the event unchanged, and `Ctrl+D` stops tracking it; each asks for its own
+`y`. An unconfirmed change survives a restart: pressing `D` or `r` on that
+event resumes it. Read-only calendars, locked or special events and a missing
+Calendar write permission keep the action visible but disabled, with the
+reason; for the permission, Enter opens the same copyable authorization guide
+as the editor. See [deleting events and answering invitations](CALENDAR-EVENTS.md#delete-events-and-answer-invitations).
+
 ### Join meetings in the right Chrome profile
 
 Events with a usable meeting link have a camera marker. Press **o** on the
