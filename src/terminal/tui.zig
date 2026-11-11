@@ -16340,6 +16340,10 @@ const App = struct {
         };
         return true;
     }
+    /// A due meeting card held back behind an open Calendar write dialog.
+    fn meetingDeferred(self: *App) bool {
+        return self.calendar.open and self.calendar_action.open and !self.meeting_focused and self.meeting_enabled and !browser_target and self.meetingCurrent() != null;
+    }
     fn drawMeetings(self: *App, win: vaxis.Window) !void {
         self.meeting_mouse_hits.clear();
         self.meeting_window_small = win.width < 30 or win.height < 10;
@@ -16353,6 +16357,11 @@ const App = struct {
             self.meeting_focused = false;
             return;
         }
+        // A passive card never covers a Calendar Delete/RSVP dialog: it waits
+        // (the Calendar status line says a meeting is due, M shows it) and
+        // returns when the dialog closes. A card the user focused with M is
+        // drawn, and then the dialog's confirm stays off until it is gone.
+        if (self.meetingDeferred()) return;
         // Overlay controls must remain clickable even when the underlying
         // reader has exhausted its bounded link/row hit map.
         const underlying_hits = self.mouse_hits;
@@ -17113,6 +17122,12 @@ const App = struct {
             const saved_action = text(get(review, "action"));
             if (same(saved_action, "delete_event") or same(saved_action, "respond_event")) {
                 try self.calendar_form_error.set(if (same(saved_action, "delete_event")) "An unconfirmed delete of this event is saved · Esc, then D on the event checks it" else "An unconfirmed RSVP for this event is saved · Esc, then r on the event checks it");
+                return;
+            }
+            // Only this event's own saved edit is restored into this form; one
+            // of another occurrence of its series is named, never loaded here.
+            if (self.calendar_form.editing and !same(text(get(review, "eventId")), self.calendar_form.event_id.slice())) {
+                try self.calendar_form_error.set("An unconfirmed edit of another event in this series is saved · open that event to check it");
                 return;
             }
             var chosen: Value = .null;
@@ -20109,6 +20124,8 @@ const App = struct {
         const a = self.frame.allocator();
         const title = text(get(event, "summary"));
         try self.calendar_action.begin(kind, target.account, target.calendar_id, text(get(event, "id")), if (title.len > 0) title else "Untitled event", self.calendarCardWhen(event, &self.calendar.zone) catch "");
+        // The provider's series for this event, as the agenda read it.
+        try self.calendar_action.series_event_id.set(text(get(event, "recurring_event_id")));
         const reason = if (kind == .delete) hints.delete_reason else hints.respond_reason;
         if (same(reason, "read-only calendar")) return self.calendarActionBlock("CalendarReadOnly");
         if (same(reason, "needs Calendar write permission")) return self.calendarActionBlock("CalendarWritePermissionRequired");
@@ -20255,10 +20272,16 @@ const App = struct {
     /// appeared: never an undrawn dialog, a typed-ahead key or the second
     /// click of a double click.
     fn calendarActionArmed(self: *App) !bool {
-        switch (self.calendar_action.readiness(Io.Timestamp.now(self.io, .awake).toMilliseconds())) {
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        switch (self.calendar_action.readiness(now)) {
             .ready => return true,
             .hidden => try self.calendar.notice.set("Scroll or enlarge the terminal until the event, what happens and the button show together · nothing was sent"),
-            .settling => try self.calendar.notice.set("Check what happens first · press y again to confirm · nothing was sent"),
+            .settling => {
+                // An early confirm restarts the wait: a held or repeating
+                // key never confirms, a press after a still moment does.
+                self.calendar_action.restartSettle(now);
+                try self.calendar.notice.set("Look first, then press y again · nothing was sent");
+            },
         }
         return false;
     }
@@ -20298,6 +20321,16 @@ const App = struct {
         dialog.message.display(if (kind == .calendar_action_reconcile) "Checking Calendar (reads only, nothing is sent)…" else if (kind == .calendar_action_abandon) "Archiving locally (nothing is sent)…" else "Sending the identical request once…");
         try self.start(kind, try dialog.executeRequest(self.frame.allocator(), command, next_attempt));
     }
+    /// An unconfirmed write this dialog cannot resume blocks it: say which,
+    /// and where it is checked. Nothing was sent and nothing is read again.
+    fn calendarActionBlockedBy(self: *App, what: []const u8) !void {
+        const dialog = &self.calendar_action;
+        dialog.phase = .blocked;
+        dialog.focus = .cancel;
+        dialog.permission = false;
+        dialog.message.display(if (same(what, "invitation")) "An unconfirmed invitation update for this event is saved · check it from the invitation in Mail · nothing was sent" else if (same(what, "edit")) "An unconfirmed edit of this event is still saved · press e on the event to check it · nothing was sent" else if (same(what, "edit-series")) "An unconfirmed edit of another event in this series is saved · press e on that event to check it · nothing was sent" else "An earlier unconfirmed change blocks this event but could not be opened here · nothing was sent · omagma calendar event-pending lists it, or b opens Google Calendar");
+        self.calendar.notice.display(dialog.message.slice());
+    }
     fn calendarActionReplan(self: *App, why: []const u8) !void {
         const dialog = &self.calendar_action;
         const a = self.frame.allocator();
@@ -20320,8 +20353,13 @@ const App = struct {
         if (self.job.failure != null or !truth(get(envelope, "ok"))) {
             const code = if (self.job.failure) |err| @errorName(err) else text(get(get(envelope, "error"), "code"));
             if (same(code, "CalendarOperationPending") and (kind == .calendar_action_plan or kind == .calendar_action_review or kind == .calendar_action_apply)) {
+                const failure = get(envelope, "error");
+                if (same(text(get(failure, "blockingKind")), "invitation")) return self.calendarActionBlockedBy("invitation");
                 dialog.phase = .working;
-                return self.start(.calendar_action_pending, .{ .cmd = "calendar.event-pending", .account = dialog.account.slice(), .calendarId = dialog.calendar_id.slice(), .eventId = dialog.event_id.slice() });
+                // Open exactly the write that refused this one; without its ID,
+                // look it up by this event and its provider series.
+                try dialog.blocking.set(text(get(failure, "blockingOperationId")));
+                return self.start(.calendar_action_pending, try dialog.pendingRequest(self.frame.allocator()));
             }
             // A write may be on its way once apply has claimed it: a lost
             // frame, the deadline or cancellation, a failed journal write.
@@ -20373,15 +20411,17 @@ const App = struct {
             },
             .calendar_action_pending => {
                 const pending = get(result, "pending");
-                if (pending == .null) return self.calendarActionReplan("No unconfirmed change is saved any more · checking the event again");
+                if (pending == .null) {
+                    if (get(result, "blockedBy") != .null) return self.calendarActionBlockedBy("invitation");
+                    // Re-plan at most once: if the write that blocks this is
+                    // still not found, stop honestly instead of reading again.
+                    if (dialog.replanned_after_pending) return self.calendarActionBlockedBy("unfound");
+                    dialog.replanned_after_pending = true;
+                    return self.calendarActionReplan("No unconfirmed change is saved any more · checking the event again");
+                }
                 const review = get(pending, "review");
                 const saved = text(get(review, "action"));
-                if (!same(saved, "delete_event") and !same(saved, "respond_event")) {
-                    dialog.phase = .blocked;
-                    dialog.focus = .cancel;
-                    dialog.message.display("An unconfirmed edit of this event is still saved · press e on the event to check it");
-                    return;
-                }
+                if (!same(saved, "delete_event") and !same(saved, "respond_event")) return self.calendarActionBlockedBy(if (same(text(get(pending, "relation")), "series")) "edit-series" else "edit");
                 dialog.kind = if (same(saved, "delete_event")) .delete else .respond;
                 try dialog.restore(self.allocator, review);
                 dialog.next_attempt = @intCast(@max(0, integer(get(pending, "nextAttempt"))));
@@ -20441,6 +20481,9 @@ const App = struct {
         const guests = if (prepared.guests_omitted) try a.dupe(u8, "the guests") else try std.fmt.allocPrint(a, "{d} guest{s}", .{ prepared.guest_count, if (prepared.guest_count == 1) @as([]const u8, "") else "s" });
         const emailed: []const u8 = if (!(dialog.notify orelse false)) "" else if (!deleting) " · Google was asked to email the organizer" else if (reconciled or prepared.role != .organizer) "" else try std.fmt.allocPrint(a, " · Google was asked to email {s} a cancellation", .{guests});
         const notice = try std.fmt.allocPrint(a, "{s}{s} · {s}{s}{s}{s}", .{ if (reconciled and !deleting) @as([]const u8, "Confirmed: ") else "", verb, title, if (when.len > 0) @as([]const u8, " · ") else "", when, emailed });
+        // A deleted event hands the selection to its chronological
+        // neighbour in every view (Agenda, Day and Week alike).
+        if (deleting) try self.calendarSelectNeighbour(selected, series);
         try self.calendarActionPatch(deleting, selected, series, response_tag);
         dialog.close();
         if (self.calendar.page == .detail) {
@@ -20462,6 +20505,39 @@ const App = struct {
             self.calendar.pending_notice.display(notice);
             try self.loadCalendarAgenda(false);
         } else self.calendar_action_reload = true;
+    }
+    /// Select the event after the deleted one (or before it at the end),
+    /// skipping every occurrence the delete removes.
+    fn calendarSelectNeighbour(self: *App, removed: []const u8, series: []const u8) !void {
+        const events = self.calendarEvents();
+        const gone = struct {
+            fn check(event: Value, id: []const u8, series_id: []const u8) bool {
+                const event_id = text(get(event, "id"));
+                return same(event_id, id) or (series_id.len > 0 and (same(event_id, series_id) or same(text(get(event, "recurring_event_id")), series_id)));
+            }
+        }.check;
+        var at: ?usize = null;
+        for (events, 0..) |event, index| if (same(text(get(event, "id")), removed)) {
+            at = index;
+            break;
+        };
+        const start_index = at orelse return;
+        var choice: ?Value = null;
+        for (events[start_index..]) |event| if (!gone(event, removed, series) and calendar_ui.matches(event, self.calendar_query.value())) {
+            choice = event;
+            break;
+        };
+        if (choice == null) {
+            var index = start_index;
+            while (index > 0) {
+                index -= 1;
+                if (!gone(events[index], removed, series) and calendar_ui.matches(events[index], self.calendar_query.value())) {
+                    choice = events[index];
+                    break;
+                }
+            }
+        }
+        if (choice) |event| try self.calendar.select_event.set(text(get(event, "id")));
     }
     fn calendarActionPatch(self: *App, deleting: bool, selected: []const u8, series: []const u8, response: []const u8) !void {
         const target: @import("calendar_types.zig").Target = .{ .account = self.calendar_action.account.slice(), .calendar_id = self.calendar_action.calendar_id.slice() };
@@ -20510,16 +20586,16 @@ const App = struct {
             .confirm_archive => "y Archive · Esc Back",
         };
     }
+    const CalendarActionRow = struct { text: []const u8, tone: Tone, control: ?calendar_action_ui.Control = null };
     /// The Delete / RSVP dialog over the Calendar body. Short terminals scroll
     /// its content above a fixed button row; the focused choice stays shown.
-    fn drawCalendarAction(self: *App, body: vaxis.Window) !void {
+    fn drawCalendarAction(self: *App, body: vaxis.Window, taller: vaxis.Window) !void {
         const a = self.frame.allocator();
         const dialog = &self.calendar_action;
         const Control = calendar_action_ui.Control;
-        const Item = struct { text: []const u8, tone: Tone, control: ?Control = null };
         self.mouse_hits.clear();
         const bordered = body.width >= 48 and body.height >= 9;
-        var rows: std.ArrayList(Item) = .empty;
+        var rows: std.ArrayList(CalendarActionRow) = .empty;
         if (!bordered) try rows.append(a, .{ .text = std.mem.trim(u8, dialog.heading(), " "), .tone = .accent });
         const plan = dialog.plan.value;
         const loaded = plan != .null;
@@ -20591,73 +20667,102 @@ const App = struct {
         const inner_width: u16 = if (bordered) width -| 4 else width;
         if (inner_width < 8 or body.height < 3) return;
         const measure = body.child(.{ .width = inner_width });
-        const starts = try a.alloc(usize, rows.items.len);
+        const heights = try a.alloc(usize, rows.items.len);
         var total: usize = 0;
-        for (rows.items, starts) |*item, *row_start| {
+        for (rows.items, heights) |*item, *height_of| {
             item.text = try safe(a, item.text, true);
-            row_start.* = total;
-            total += if (item.control != null) 1 else positionAfter(measure, item.text).row + 1;
+            height_of.* = if (item.control != null) 1 else positionAfter(measure, item.text).row + 1;
+            total += height_of.*;
         }
         const narrow = inner_width < 50;
+        // Recovery buttons wrap onto two rows whenever one row cannot hold
+        // them all, with Retry/Archive on the bottom row.
+        const recovery_labels = [_][]const u8{ "[Esc Close]", "[r Check Calendar]", "[Ctrl+R Retry]", "[Ctrl+D Archive]", "[b Google Calendar]" };
+        var recovery_width: usize = 0;
+        for (recovery_labels, 0..) |label, index| if (index != 2 or dialog.retry_possible) {
+            recovery_width += cellWidth(measure, label) + 2;
+        };
+        const recovery_wraps = narrow or recovery_width > inner_width;
         // A confirmation step puts its confirm button on its own row above
         // Back, so it never occupies the cells of the button that opened it
-        // (a double click lands on Back). Narrow recovery buttons use two
-        // rows with Retry/Archive at the bottom.
+        // (a double click lands on Back).
         const button_rows: u16 = switch (dialog.phase) {
             .confirm_retry, .confirm_archive => 2,
-            .unknown => if (narrow) 2 else 1,
+            .unknown => if (recovery_wraps) 2 else 1,
             else => 1,
         };
         const chrome: usize = (if (bordered) @as(usize, 2) else 0) + button_rows;
-        const height: u16 = @intCast(@min(@as(usize, body.height), total + chrome));
-        const area = body.child(.{ .x_off = (body.width - width) / 2, .y_off = (body.height - height) / 2, .width = width, .height = height });
+        var identity_height: usize = 0;
+        for (heights[identity_first .. identity_last + 1]) |value| identity_height += value;
+        const consequence_height: usize = if (consequence_row) |index| heights[index] else 0;
+        // The key-hint row joins the dialog only when the event, what
+        // happens and the button would not fit together without it (its
+        // buttons and choices name their keys).
+        const pinned_need = identity_height + consequence_height + 1 + chrome;
+        const space = if (consequence_row != null and total + chrome > body.height and pinned_need > body.height and pinned_need <= taller.height) taller else body;
+        const height: u16 = @intCast(@min(@as(usize, space.height), total + chrome));
+        const area = space.child(.{ .x_off = (space.width - width) / 2, .y_off = (space.height - height) / 2, .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = if (bordered) self.panel(area, 0, width, dialog.heading(), true) else area;
         if (inner.height < button_rows + 1) return;
         const available: usize = inner.height - button_rows;
+        // When everything does not fit, the event's identity stays pinned at
+        // the top and the consequence just above the buttons; only the rows
+        // between them scroll. The gate's rows then show together down to
+        // small terminals (40x12).
+        const pinned = consequence_row != null and total > available and identity_height + consequence_height + 1 <= available;
+        var middle: std.ArrayList(CalendarActionRow) = .empty;
+        var middle_heights: std.ArrayList(usize) = .empty;
+        for (rows.items, heights, 0..) |item, value, index| {
+            if (pinned and ((index >= identity_first and index <= identity_last) or (consequence_row != null and index == consequence_row.?))) continue;
+            try middle.append(a, item);
+            try middle_heights.append(a, value);
+        }
+        const region_top: usize = if (pinned) identity_height else 0;
+        const region_height: usize = if (pinned) available - identity_height - consequence_height else available;
+        var region_total: usize = 0;
+        for (middle_heights.items) |value| region_total += value;
         // Overflowing content keeps one row for its own scroll indicator.
-        const indicator = total > available and available >= 3;
-        const viewport: usize = if (indicator) available - 1 else available;
-        if (dialog.scrolled_focus != dialog.focus) {
+        const indicator = region_total > region_height and region_height >= (if (pinned) @as(usize, 2) else 3);
+        const viewport: usize = if (indicator) region_height - 1 else region_height;
+        // The focused choice is brought into view when the focus moves or
+        // the layout changes (pinning, or a different scrolling region).
+        const layout_key = viewport * 2 + @intFromBool(pinned);
+        if (dialog.scrolled_focus != dialog.focus or dialog.scrolled_layout != layout_key) {
             dialog.scrolled_focus = dialog.focus;
+            dialog.scrolled_layout = layout_key;
             var row: ?usize = null;
-            for (rows.items, starts) |item, row_start| if (item.control != null and item.control == dialog.focus) {
-                row = row_start;
-            };
-            if (row) |at| {
-                if (at < dialog.scroll) dialog.scroll = at else if (at >= dialog.scroll + viewport) dialog.scroll = at + 1 - viewport;
-            } else dialog.scroll = total -| viewport;
+            var at: usize = 0;
+            for (middle.items, middle_heights.items) |item, value| {
+                if (item.control != null and item.control == dialog.focus) row = at;
+                at += value;
+            }
+            if (row) |found| {
+                if (found < dialog.scroll) dialog.scroll = found else if (found >= dialog.scroll + viewport) dialog.scroll = found + 1 - viewport;
+            } else dialog.scroll = region_total -| viewport;
         }
-        dialog.scroll = @min(dialog.scroll, total -| viewport);
-        const view = inner.child(.{ .height = @intCast(viewport) });
-        var row: usize = 0;
-        for (rows.items) |item| {
-            const control = item.control orelse {
-                row = try self.flowTone(view, item.text, dialog.scroll, row, item.tone);
-                continue;
-            };
-            const at = row;
-            row += 1;
-            if (at < dialog.scroll or at >= dialog.scroll + viewport) continue;
-            const visible = at - dialog.scroll;
-            try self.line(view, visible, try self.fitLine(view, item.text, view.width), if (dialog.focus == control) .selected else .text);
-            self.mouseRows(view, visible, 1, .dialog_action, calendar_action_ui.hit_base + @backingInt(control));
-        }
+        dialog.scroll = @min(dialog.scroll, region_total -| viewport);
+        if (pinned) try self.drawCalendarActionRows(inner.child(.{ .height = @intCast(identity_height) }), rows.items[identity_first .. identity_last + 1], 0);
+        try self.drawCalendarActionRows(inner.child(.{ .y_off = @intCast(region_top), .height = @intCast(viewport) }), middle.items, dialog.scroll);
         if (indicator) {
-            const below = total -| (dialog.scroll + viewport);
+            const below = region_total -| (dialog.scroll + viewport);
             // In the unknown step Ctrl+D archives; PgDn scrolls there.
             const more = if (below > 0) try std.fmt.allocPrint(a, "↓ {d} more · {s}", .{ below, if (dialog.phase == .unknown) @as([]const u8, "PgDn") else "Ctrl+D" }) else "↑ more above · Ctrl+U";
-            try self.line(inner, viewport, try self.fitLine(inner, more, inner.width), .muted);
+            try self.line(inner, region_top + viewport, try self.fitLine(inner, more, inner.width), .muted);
         }
+        if (pinned) if (consequence_row) |index| try self.drawCalendarActionRows(inner.child(.{ .y_off = @intCast(region_top + region_height), .height = @intCast(consequence_height) }), rows.items[index .. index + 1], 0);
         // Whole rows of the item range on screen in this frame.
         const shown = struct {
-            fn range(first: usize, last: usize, row_starts: []const usize, rows_total: usize, top: usize, visible_rows: usize) bool {
-                const end = if (last + 1 < row_starts.len) row_starts[last + 1] else rows_total;
-                return row_starts[first] >= top and end <= top + visible_rows;
+            fn range(first: usize, last: usize, row_heights: []const usize, top: usize, visible_rows: usize) bool {
+                var begin: usize = 0;
+                for (row_heights[0..first]) |value| begin += value;
+                var end = begin;
+                for (row_heights[first .. last + 1]) |value| end += value;
+                return begin >= top and end <= top + visible_rows;
             }
         }.range;
-        const identity_shown = shown(identity_first, identity_last, starts, total, dialog.scroll, viewport);
-        const consequence_shown = if (consequence_row) |index| shown(index, index, starts, total, dialog.scroll, viewport) else false;
+        const identity_shown = pinned or shown(identity_first, identity_last, heights, dialog.scroll, viewport);
+        const consequence_shown = if (consequence_row) |index| pinned or shown(index, index, heights, dialog.scroll, viewport) else false;
         const bottom = inner.height - 1;
         const hit = struct {
             fn index(control: Control) usize {
@@ -20681,15 +20786,15 @@ const App = struct {
                 } else _ = try self.dialogButton(inner, bottom, x, if (narrow) "[b Web]" else "[b Google Calendar]", dialog.focus == .browser, self.job.future == null, hit(.browser));
             },
             .unknown => {
-                // Narrow: Esc/Check/Web above, Retry/Archive at the bottom.
-                const first = if (narrow) bottom - 1 else bottom;
+                // Wrapped: Esc/Check/Web above, Retry/Archive at the bottom.
+                const first = if (recovery_wraps) bottom - 1 else bottom;
                 x = try self.dialogButton(inner, first, x, if (narrow) "[Esc]" else "[Esc Close]", dialog.focus == .cancel, true, hit(.cancel));
                 x = try self.dialogButton(inner, first, x, if (narrow) "[r Check]" else "[r Check Calendar]", dialog.focus == .check, true, hit(.check));
-                if (narrow) x = try self.dialogButton(inner, first, x, "[b Web]", dialog.focus == .browser, self.job.future == null, hit(.browser));
-                if (narrow) x = 0;
+                if (recovery_wraps) x = try self.dialogButton(inner, first, x, if (narrow) "[b Web]" else "[b Google Calendar]", dialog.focus == .browser, self.job.future == null, hit(.browser));
+                if (recovery_wraps) x = 0;
                 if (dialog.retry_possible) x = try self.dialogButton(inner, bottom, x, "[Ctrl+R Retry]", dialog.focus == .retry, true, hit(.retry));
                 x = try self.dialogButton(inner, bottom, x, "[Ctrl+D Archive]", dialog.focus == .archive, true, hit(.archive));
-                if (!narrow) _ = try self.dialogButton(inner, bottom, x, "[b Google Calendar]", dialog.focus == .browser, self.job.future == null, hit(.browser));
+                if (!recovery_wraps) _ = try self.dialogButton(inner, bottom, x, "[b Google Calendar]", dialog.focus == .browser, self.job.future == null, hit(.browser));
             },
             .confirm_retry, .confirm_archive => {
                 const label: []const u8 = if (dialog.phase == .confirm_retry) "[y Send again once]" else "[y Archive]";
@@ -20698,9 +20803,55 @@ const App = struct {
                 _ = try self.dialogButton(inner, bottom, 0, "[Esc Back]", dialog.focus == .cancel, true, hit(.cancel));
             },
         }
-        // A confirm acts only on what this frame showed in full, a moment
-        // after this step first appeared (see onCalendarActionKey).
-        dialog.markDrawn(Io.Timestamp.now(self.io, .awake).toMilliseconds(), identity_shown and consequence_shown and confirm_shown);
+        // Only a candidate verdict: the frame is settled once every later
+        // layer is drawn (sealCalendarAction), so anything drawn over the
+        // dialog afterwards clears it. A confirm acts only on what was seen.
+        dialog.candidate = identity_shown and consequence_shown and confirm_shown;
+        dialog.candidate_frame = dialog.frame;
+        dialog.area = .{ .x = @intCast(@max(0, area.x_off)), .y = @intCast(@max(0, area.y_off)), .width = area.width, .height = area.height };
+        dialog.area_hash = self.calendarActionAreaHash(dialog.area);
+    }
+    /// Rows of the Delete/RSVP dialog in `win`, starting `scroll` rows down.
+    fn drawCalendarActionRows(self: *App, win: vaxis.Window, entries: []const CalendarActionRow, scroll: usize) !void {
+        var row: usize = 0;
+        for (entries) |item| {
+            const control = item.control orelse {
+                row = try self.flowTone(win, item.text, scroll, row, item.tone);
+                continue;
+            };
+            const at = row;
+            row += 1;
+            if (at < scroll or at >= scroll + win.height) continue;
+            const visible = at - scroll;
+            try self.line(win, visible, try self.fitLine(win, item.text, win.width), if (self.calendar_action.focus == control) .selected else .text);
+            self.mouseRows(win, visible, 1, .dialog_action, calendar_action_ui.hit_base + @backingInt(control));
+        }
+    }
+    /// The dialog's cells as drawn; any later layer that paints over them
+    /// changes this hash.
+    fn calendarActionAreaHash(self: *App, rect: calendar_action_ui.Dialog.Rect) u64 {
+        var hash = std.hash.Wyhash.init(0x5eed);
+        const screen = &self.vx.screen;
+        for (rect.y..@as(usize, rect.y) + rect.height) |y| for (rect.x..@as(usize, rect.x) + rect.width) |x| {
+            const cell = screen.readCell(@intCast(x), @intCast(y)) orelse continue;
+            hash.update(cell.char.grapheme);
+            hash.update(&.{@as(u8, @truncate(cell.char.width))});
+        };
+        return hash.final();
+    }
+    /// Settles the dialog's visibility after every layer of the frame is
+    /// drawn: a later layer over its rectangle (the meeting card, or any
+    /// other drawing over its cells) means the user did not see it whole.
+    fn sealCalendarAction(self: *App) void {
+        const dialog = &self.calendar_action;
+        if (!dialog.open or dialog.candidate_frame != dialog.frame) return;
+        var visible = dialog.candidate;
+        if (self.meeting_rect) |rect| {
+            const apart = @as(usize, rect.x) + rect.width <= dialog.area.x or @as(usize, dialog.area.x) + dialog.area.width <= rect.x or @as(usize, rect.y) + rect.height <= dialog.area.y or @as(usize, dialog.area.y) + dialog.area.height <= rect.y;
+            if (!apart) visible = false;
+        }
+        if (visible and self.calendarActionAreaHash(dialog.area) != dialog.area_hash) visible = false;
+        dialog.markDrawn(Io.Timestamp.now(self.io, .awake).toMilliseconds(), visible);
     }
     /// A dialog button measured in terminal cells, so a label with "…" or
     /// "·" owns exactly the cells it shows (and its click area no more).
@@ -22420,17 +22571,30 @@ const App = struct {
             if (label.len > 0) x = try self.actionButton(body, body.height - 1, x, label, self.calendar.focus == 1, enabled, .dialog_action, 10);
             if (self.calendar.page == .review and self.calendarZoneChoosable()) x = try self.actionButton(body, body.height - 1, x, "[Z Type zone]", self.calendar.focus == 26, enabled, .dialog_action, 26);
         }
-        if (self.calendar_action.open) try self.drawCalendarAction(body);
+        // On a short terminal the dialog may also use the key-hint row: its
+        // buttons and choices name their keys, and the event, what happens
+        // and the confirm button then fit together down to 40x12.
+        if (self.calendar_action.open) try self.drawCalendarAction(body, win.child(.{ .y_off = 2, .height = win.height -| 3 }));
+        const action_over_hints = self.calendar_action.open and self.calendar_action.candidate_frame == self.calendar_action.frame and @as(usize, self.calendar_action.area.y) + self.calendar_action.area.height > win.height -| 2;
         if (self.calendar.page == .calendars and self.calendar.primary_issue.len > 0 and self.calendar.primary_reason_rows > 0 and self.calendar.primary_reason_lines > self.calendar.primary_reason_rows) {
             const hint = if (win.width < 76) "j/k calendar  Ctrl+D/U reason\nEnter Select  Tab controls  q/Esc Back" else "j/k calendar  Ctrl+D/U reason  Enter Select  Tab controls  q/Esc Back";
             _ = try self.flowTone(win.child(.{ .y_off = win.height - 2, .height = 2 }), hint, 0, 0, .muted);
             return;
         }
-        if (self.calendar_action.open) try self.drawHints(win, win.height - 2, self.calendarActionHint(win.width)) else if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Go to date", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Find in loaded events", &self.calendar_query, true, .selected) else if (self.calendar.zone_entry) try self.editLine(win, win.height - 2, try std.fmt.allocPrint(a, "Zone, e.g. {s}", .{if (self.calendarZoneCandidate().len > 0) self.calendarZoneCandidate() else "Europe/Vienna"}), &self.calendar_zone_field, true, .selected) else try self.drawHints(win, win.height - 2, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) (if (self.calendarBookingAdd()) "j More · Add appointment unlocks at end · q Back" else "j More · Confirm unlocks at end · q Back") else if (self.calendarBookingAdd()) "y Add appointment · Tab Controls · q Back" else "y Confirm · Tab Controls · q Back") else if (self.calendar.review.value == .null) "Enter Try again · g Other calendar · q Back" else if (self.calendarZoneProblem()) (if (self.calendarZoneCandidate().len > 0) @as([]const u8, "z Use suggested zone · Z Type zone · Tab Controls · v Details · g Other calendar · q Back") else if (self.calendarZoneChoosable()) "Z Type zone · Tab Controls · v Details · g Other calendar · q Back" else "v Details · g Other calendar · q Back") else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "Enter Open in Calendar · q Back" else "j/k Scroll · Enter Review action · v Details · g Other calendar · Tab Controls · q Back") else if (self.calendar.page == .overlaps) "j/k Event · Enter Select · Tab Controls · Esc Back" else if (self.calendar.page == .detail) try self.calendarDetailHint() else if (self.calendar.page == .calendars) (if (self.calendar.source_message.len > 0) @as([]const u8, "j/k Calendar · Enter Select · Tab Controls · q Back") else "Space Toggle · Enter Apply · Esc/q Cancel · Tab Controls") else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · r RSVP · D Delete · g Calendars · ? Help · q Mail");
+        if (self.calendar_action.open) {
+            if (!action_over_hints) try self.drawHints(win, win.height - 2, self.calendarActionHint(win.width));
+        } else if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Go to date", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Find in loaded events", &self.calendar_query, true, .selected) else if (self.calendar.zone_entry) try self.editLine(win, win.height - 2, try std.fmt.allocPrint(a, "Zone, e.g. {s}", .{if (self.calendarZoneCandidate().len > 0) self.calendarZoneCandidate() else "Europe/Vienna"}), &self.calendar_zone_field, true, .selected) else try self.drawHints(win, win.height - 2, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) (if (self.calendarBookingAdd()) "j More · Add appointment unlocks at end · q Back" else "j More · Confirm unlocks at end · q Back") else if (self.calendarBookingAdd()) "y Add appointment · Tab Controls · q Back" else "y Confirm · Tab Controls · q Back") else if (self.calendar.review.value == .null) "Enter Try again · g Other calendar · q Back" else if (self.calendarZoneProblem()) (if (self.calendarZoneCandidate().len > 0) @as([]const u8, "z Use suggested zone · Z Type zone · Tab Controls · v Details · g Other calendar · q Back") else if (self.calendarZoneChoosable()) "Z Type zone · Tab Controls · v Details · g Other calendar · q Back" else "v Details · g Other calendar · q Back") else if (same(text(get(self.calendar.review.value, "decision")), "existing")) "Enter Open in Calendar · q Back" else "j/k Scroll · Enter Review action · v Details · g Other calendar · Tab Controls · q Back") else if (self.calendar.page == .overlaps) "j/k Event · Enter Select · Tab Controls · Esc Back" else if (self.calendar.page == .detail) try self.calendarDetailHint() else if (self.calendar.page == .calendars) (if (self.calendar.source_message.len > 0) @as([]const u8, "j/k Calendar · Enter Select · Tab Controls · q Back") else "Space Toggle · Enter Apply · Esc/q Cancel · Tab Controls") else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · r RSVP · D Delete · g Calendars · ? Help · q Mail");
         // Stable codes stay in Help; the status line uses words.
         const calendar_diagnostic = if (self.calendar.page == .permissions or self.calendar.error_code.len == 0) @as([]const u8, "") else calendarErrorText(self.calendar.error_code.slice());
         const repeated = calendar_diagnostic.len > 0 and std.mem.indexOf(u8, self.calendar.notice.slice(), calendar_diagnostic) != null;
-        const notice = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ self.calendar.notice.slice(), if (calendar_diagnostic.len > 0 and !repeated) @as([]const u8, " · ") else "", if (repeated) @as([]const u8, "") else calendar_diagnostic });
+        // While a Delete/RSVP step that writes cannot show the event, what
+        // happens and its button together, the status says so instead of
+        // "Ready"; a meeting card held back behind the dialog is announced.
+        const action = &self.calendar_action;
+        const writes_now = action.open and ((action.phase == .choose and action.canConfirm()) or action.phase == .confirm_retry or action.phase == .confirm_archive);
+        const action_note: []const u8 = if (writes_now and action.candidate_frame == action.frame and !action.candidate) "Enlarge the terminal: the event, what happens and the button do not fit together · nothing is sent" else "";
+        const meeting_note: []const u8 = if (self.meetingDeferred()) "Meeting due · M shows it · " else "";
+        const notice = try std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ meeting_note, if (action_note.len > 0) action_note else self.calendar.notice.slice(), if (calendar_diagnostic.len > 0 and !repeated and action_note.len == 0) @as([]const u8, " · ") else "", if (repeated or action_note.len > 0) @as([]const u8, "") else calendar_diagnostic });
         try self.line(win.child(.{ .x_off = 1, .width = win.width -| 1 }), win.height - 1, try self.fitLine(win, notice, win.width -| 1), if (self.calendar.error_code.len > 0 or self.calendar.unknown) .warning else .muted);
     }
 
@@ -22457,9 +22621,11 @@ const App = struct {
         self.update_rect = null;
         self.invitation_confirm_ready = false;
         self.review_ready = false;
-        // A Delete/RSVP confirm needs this new frame to show the dialog.
+        // A Delete/RSVP confirm needs this new frame to show the dialog, and
+        // is settled only after every layer of the frame has been drawn.
         self.calendar_action.frame +%= 1;
         self.calendar_action_room = false;
+        defer self.sealCalendarAction();
         win.clear();
         win.hideCursor();
         win.fill(.{ .style = self.style(.text) });
@@ -37881,7 +38047,7 @@ test "calendar actions UI: a confirmed delete or answer updates the loaded snaps
     try std.testing.expectEqual(@as(usize, 0), items(get(get(app.calendar.source_snapshots[0].value, "snapshot"), "events")).len);
 }
 
-test "calendar actions UI: the dialog fits 40 by 12 in monochrome with its confirm button and keys visible" {
+test "calendar actions UI: at 40 by 12 in monochrome the event, what happens and the confirm button show together" {
     const a = std.testing.allocator;
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
@@ -37905,7 +38071,132 @@ test "calendar actions UI: the dialog fits 40 by 12 in monochrome with its confi
     vx.screen.clear();
     try app.drawCalendar(vx.window());
     try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "This event only")) != null);
+    // Once the email choice is made, the pinned title and consequence and
+    // the confirm button are on screen together: confirmable at 40x12.
+    app.calendar_action.choose(.notify_no);
+    vx.screen.clear();
+    app.calendar_action.frame +%= 1;
+    try app.drawCalendar(vx.window());
+    app.sealCalendarAction();
+    try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "Standup")) != null);
+    try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "without emailing")) != null);
+    try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "[y Delete, no email]")) != null);
+    try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.settling, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar actions UI: anything drawn over the dialog after it (a meeting card) keeps y from confirming" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    errdefer calendarActionTestScreen(&vx.screen);
+    for ([_]calendar_action_ui.Phase{ .choose, .confirm_retry, .confirm_archive }) |phase| {
+        try calendarActionTestPlan(&app, .delete, .{ .role = "organizer", .guestCount = 0, .summary = "Focus block", .calendarName = "Work", .eventId = "event-1", .expectedEtag = "\"1\"", .targetEventId = "event-1" });
+        app.calendar_action.phase = phase;
+        // Seen whole: confirmable after the settle time.
+        app.calendar_action.frame +%= 1;
+        try app.drawCalendar(vx.window());
+        app.sealCalendarAction();
+        app.calendar_action.armed_at_ms = 0;
+        try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.ready, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
+        // A later layer's rectangle over the dialog (the meeting card).
+        app.calendar_action.frame +%= 1;
+        try app.drawCalendar(vx.window());
+        const area = app.calendar_action.area;
+        app.meeting_rect = .{ .x = area.x + area.width -| 10, .y = area.y + area.height -| 3, .width = 30, .height = 5 };
+        app.sealCalendarAction();
+        app.meeting_rect = null;
+        try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.hidden, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
+        try app.onCalendarKey(.{ .codepoint = 'y' });
+        try std.testing.expect(app.job.future == null and app.calendar_action.phase == phase);
+        // Any other later drawing over its cells, registered or not.
+        app.calendar_action.frame +%= 1;
+        try app.drawCalendar(vx.window());
+        vx.window().writeCell(area.x + 3, area.y + area.height - 1, .{ .char = .{ .grapheme = "#", .width = 1 } });
+        app.sealCalendarAction();
+        try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.hidden, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
+        // Seen whole again: the wait starts over.
+        app.calendar_action.frame +%= 1;
+        try app.drawCalendar(vx.window());
+        app.sealCalendarAction();
+        try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.settling, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
+    }
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar actions UI: a held y never confirms, and changing a choice starts the wait again" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    errdefer calendarActionTestScreen(&vx.screen);
+    try calendarActionTestPlan(&app, .respond, .{ .role = "attendee", .previousResponse = "needsAction", .attendee = "work@example.test", .organizer = "host@example.test", .summary = "Partner sync", .calendarName = "Work", .eventId = "event-1", .expectedEtag = "\"1\"", .targetEventId = "event-1" });
+    app.calendar_action.choose(.decline);
+    app.calendar_action.frame +%= 1;
+    try app.drawCalendar(vx.window());
+    app.sealCalendarAction();
+    // Each early y (a held key repeats) pushes the wait out again.
+    const now = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+    app.calendar_action.armed_at_ms = now + 50;
+    try app.onCalendarKey(.{ .codepoint = 'y' });
+    try std.testing.expect(app.calendar_action.armed_at_ms >= now + calendar_action_ui.Dialog.settle_ms);
+    try std.testing.expect(app.job.future == null and app.calendar_action.phase == .choose);
+    // Seen and settled: ready. Then a different answer (or email choice)
+    // is a different write: not confirmable until shown and settled again.
+    app.calendar_action.armed_at_ms = 0;
+    try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.ready, app.calendar_action.readiness(now));
+    app.calendar_action.choose(.accept);
+    try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.hidden, app.calendar_action.readiness(now));
+    app.calendar_action.frame +%= 1;
+    try app.drawCalendar(vx.window());
+    app.sealCalendarAction();
+    try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.settling, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
+    app.calendar_action.armed_at_ms = 0;
+    app.calendar_action.choose(.notify_yes);
+    try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.hidden, app.calendar_action.readiness(now));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar actions UI: a write that cannot be found after one re-plan stops instead of reading again" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarActionTestPlan(&app, .delete, .{ .role = "organizer", .guestCount = 0, .summary = "Focus block", .calendarName = "Work", .eventId = "event-1", .expectedEtag = "\"1\"", .targetEventId = "event-1" });
+    // The refusal names the blocking write: it is opened by that ID;
+    // otherwise by this event and the provider series the agenda read.
+    try app.calendar_action.series_event_id.set("weekly_R20261111T150000");
+    const by_event = try app.calendar_action.pendingRequest(app.frame.allocator());
+    try std.testing.expectEqualStrings("weekly_R20261111T150000", text(get(by_event, "seriesEventId")));
+    try std.testing.expect(get(by_event, "operationId") == .null);
+    try app.calendar_action.blocking.set("series-del");
+    const by_operation = try app.calendar_action.pendingRequest(app.frame.allocator());
+    try std.testing.expectEqualStrings("series-del", text(get(by_operation, "operationId")));
+    try std.testing.expect(get(by_operation, "eventId") == .null);
+    // Nothing found after the one re-plan: blocked, no further read.
+    app.calendar_action.replanned_after_pending = true;
+    app.job.kind = .calendar_action_pending;
+    app.job.response = "{\"ok\":true,\"data\":{\"pending\":null,\"seriesChecked\":true}}";
+    try app.finishCalendarAction();
+    try std.testing.expectEqual(calendar_action_ui.Phase.blocked, app.calendar_action.phase);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_action.message.slice(), "could not be opened") != null);
+    // An invitation's own unconfirmed update is named, not looped on.
+    app.calendar_action.phase = .loading;
+    app.job.kind = .calendar_action_plan;
+    app.job.response = "{\"ok\":false,\"error\":{\"code\":\"CalendarOperationPending\",\"blockingOperationId\":\"invite-op\",\"blockingKind\":\"invitation\"}}";
+    try app.finishCalendarAction();
+    try std.testing.expect(app.calendar_action.phase == .blocked and app.job.future == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_action.message.slice(), "invitation") != null);
 }
 
 test "calendar actions UI: y confirms only a dialog drawn in full, and only a moment after it appeared" {
@@ -37926,6 +38217,7 @@ test "calendar actions UI: y confirms only a dialog drawn in full, and only a mo
     // Drawn in full, but only just: y waits for the settle interval.
     app.calendar_action.frame +%= 1;
     try app.drawCalendar(vx.window());
+    app.sealCalendarAction();
     try std.testing.expect((try readerLinkCell(app.frame.allocator(), &vx.screen, "It has no guests, so no email is sent")) != null);
     try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.settling, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
     try app.onCalendarKey(.{ .codepoint = 'y' });
@@ -37943,6 +38235,7 @@ test "calendar actions UI: y confirms only a dialog drawn in full, and only a mo
     vx.screen = try vaxis.Screen.init(a, .{ .cols = 34, .rows = 9, .x_pixel = 0, .y_pixel = 0 });
     app.calendar_action.frame +%= 1;
     try app.drawCalendar(vx.window());
+    app.sealCalendarAction();
     try std.testing.expectEqual(calendar_action_ui.Dialog.Readiness.hidden, app.calendar_action.readiness(Io.Timestamp.now(app.io, .awake).toMilliseconds()));
     try app.onCalendarKey(.{ .codepoint = 'y' });
     try std.testing.expect(app.job.future == null and app.calendar_action.phase == .choose);
