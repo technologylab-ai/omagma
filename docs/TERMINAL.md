@@ -741,14 +741,18 @@ time and calendar, the sentence saying what happens and the confirm button are
 all on screen together, with nothing drawn over them, and only once that exact
 step (including the answer and email choice) has been shown unchanged for a
 moment: a key typed ahead, a held key, a changed choice or the second click of
-a double click never confirms (the status asks to **press y again**). When the
+a double click never confirms (the status asks to **let go, look, then press y
+once more**; after a refused `y` the next one counts only after 2 s without
+one, so holding `y` never confirms). When the
 dialog does not fit, the title and the consequence stay put and only the
 choices scroll (`Ctrl+D`/`Ctrl+U`, PgDn/PgUp): an answer or a single delete
 fits at 40x12, and a step that still does not fit says **Enlarge the
 terminal** instead of offering y. A terminal too small for Calendar does not
 open the dialog. The mouse wheel only scrolls the
 dialog. A due meeting card waits while the dialog is open (**Meeting due · M
-shows it**).
+shows it** on the agenda, after any **Enlarge** note); when it returns its
+buttons wait a moment, so a double click that closes the dialog never acts on
+the card.
 
 - **Events you organize with guests**: choose **Email N guests a cancellation**
   or **Don't email the guests** first; the button then says exactly what `y`
@@ -782,10 +786,14 @@ email the organizer**, and the range then refreshes from Google (from a card,
 when the agenda shows again). If Calendar did not confirm the outcome, the
 dialog stays **unconfirmed**: `r` checks Calendar with reads only, `Ctrl+R`
 sends the identical request once more only after a check found the event
-unchanged, and `Ctrl+D` stops tracking it; each asks for its own `y`, placed
-on its own row so a double click on **Retry** lands on **Back**. An
+unchanged, and `Ctrl+D` stops tracking it; each asks for its own `y` and shows
+what it acts on (**[y Send Decline series again · email organizer]**), with the
+button on its own row so a double click on **Retry** lands on **Back**. An
 unconfirmed change survives a restart: pressing `D` or `r` on that event, or on
-any occurrence of a series it changed, resumes it. Read-only calendars, locked or special events and a missing
+any occurrence of a series it changed, resumes it. An unconfirmed edit of
+another event is named (title and time) with where to check it; an
+invitation's own unconfirmed Calendar update is named and settled right there
+(`r` checks, `Ctrl+D` stops tracking it). Read-only calendars, locked or special events and a missing
 Calendar write permission keep the action visible but disabled, with the
 reason; for the permission, Enter opens the same copyable authorization guide
 as the editor. See [deleting events and answering invitations](CALENDAR-EVENTS.md#delete-events-and-answer-invitations).
