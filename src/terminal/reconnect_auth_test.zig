@@ -45,6 +45,7 @@ const Behaviour = enum { approve, deny, ignore, fixture_self, fixture_other, fix
 const Consent = struct {
     var behaviour: Behaviour = .approve;
     var opened: usize = 0;
+    var port: u16 = 0;
     var challenge: [43]u8 = @splat(0);
     var scope: [512]u8 = undefined;
     var scope_len: usize = 0;
@@ -88,7 +89,7 @@ const Consent = struct {
         const state = try param(url, "state", &storage[5]);
         const prefix = "http://127.0.0.1:";
         try std.testing.expect(std.mem.startsWith(u8, redirect, prefix));
-        const port = try std.fmt.parseInt(u16, redirect[prefix.len..std.mem.indexOfScalarPos(u8, redirect, prefix.len, '/').?], 10);
+        port = try std.fmt.parseInt(u16, redirect[prefix.len..std.mem.indexOfScalarPos(u8, redirect, prefix.len, '/').?], 10);
         if (behaviour == .ignore) return;
         var head: [1024]u8 = undefined;
         var identity: [128]u8 = undefined;
@@ -109,9 +110,9 @@ const Consent = struct {
         const owned = try std.testing.allocator.dupe(u8, request);
         pending = try io.concurrent(redirectBack, .{ port, owned });
     }
-    fn redirectBack(port: u16, request: []const u8) anyerror!void {
+    fn redirectBack(target: u16, request: []const u8) anyerror!void {
         defer std.testing.allocator.free(request);
-        const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", target);
         const stream = try address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
         var writer = std.Io.net.Stream.Writer.init(stream, io, &.{});
@@ -124,13 +125,21 @@ const Consent = struct {
     }
 };
 
-/// Google's token endpoint and Gmail profile, on loopback.
+/// Google's token endpoint, Gmail profile and labels, on loopback.
 const Oracle = struct {
     listener: std.Io.net.Server,
     profile: []const u8 = account,
     scope: []const u8 = "",
+    /// Scope string returned for the authorization code; empty: `scope`.
+    granted_scope: []const u8 = "",
     exchanges: std.atomic.Value(usize) = .init(0),
+    refreshes: std.atomic.Value(usize) = .init(0),
     verified_pkce: std.atomic.Value(bool) = .init(false),
+    /// The code exchange waits here until released (a slow token endpoint).
+    hold_exchange: std.atomic.Value(bool) = .init(false),
+    exchange_entered: std.atomic.Value(bool) = .init(false),
+    /// A refresh of the stored token is refused like Google's invalid_rapt.
+    refuse_refresh: std.atomic.Value(bool) = .init(false),
     fn run(self: *Oracle) anyerror!void {
         while (true) {
             const stream = try self.listener.accept(io);
@@ -153,23 +162,35 @@ const Oracle = struct {
         const size = if (method.requestHasBody()) try request.readerExpectNone(&.{}).readSliceShort(&body) else 0;
         var reply: [1024]u8 = undefined;
         var response: []const u8 = "{}";
+        var status: std.http.Status = .ok;
         if (std.mem.eql(u8, path, "/oauth2.googleapis.com/token")) {
-            _ = self.exchanges.fetchAdd(1, .acq_rel);
             const form = body[0..size];
-            try std.testing.expect(std.mem.indexOf(u8, form, "grant_type=authorization_code") != null);
-            try std.testing.expect(std.mem.indexOf(u8, form, "code=synthetic-code") != null);
-            const at = (std.mem.indexOf(u8, form, "code_verifier=") orelse return error.MissingVerifier) + "code_verifier=".len;
-            var expected: [43]u8 = undefined;
-            oauth.pkceChallenge(form[at..][0..43], &expected);
-            self.verified_pkce.store(std.mem.eql(u8, &expected, &Consent.challenge), .release);
-            response = try std.fmt.bufPrint(&reply, "{{\"access_token\":\"synthetic-renewed-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"{s}\",\"scope\":\"{s}\"}}", .{ fresh_refresh, self.scope });
+            if (std.mem.indexOf(u8, form, "grant_type=refresh_token") != null) {
+                _ = self.refreshes.fetchAdd(1, .acq_rel);
+                if (self.refuse_refresh.load(.acquire)) {
+                    status = .bad_request;
+                    response = "{\"error\":\"invalid_grant\",\"error_description\":\"reauth related error (invalid_rapt)\",\"error_uri\":\"https://support.google.com/a/answer/9368756\",\"error_subtype\":\"invalid_rapt\"}";
+                } else response = try std.fmt.bufPrint(&reply, "{{\"access_token\":\"synthetic-refreshed-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"{s}\"}}", .{self.scope});
+            } else {
+                _ = self.exchanges.fetchAdd(1, .acq_rel);
+                self.exchange_entered.store(true, .release);
+                while (self.hold_exchange.load(.acquire)) try io.sleep(.fromMilliseconds(5), .awake);
+                try std.testing.expect(std.mem.indexOf(u8, form, "grant_type=authorization_code") != null);
+                try std.testing.expect(std.mem.indexOf(u8, form, "code=synthetic-code") != null);
+                const at = (std.mem.indexOf(u8, form, "code_verifier=") orelse return error.MissingVerifier) + "code_verifier=".len;
+                var expected: [43]u8 = undefined;
+                oauth.pkceChallenge(form[at..][0..43], &expected);
+                self.verified_pkce.store(std.mem.eql(u8, &expected, &Consent.challenge), .release);
+                response = try std.fmt.bufPrint(&reply, "{{\"access_token\":\"synthetic-renewed-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"{s}\",\"scope\":\"{s}\"}}", .{ fresh_refresh, if (self.granted_scope.len > 0) self.granted_scope else self.scope });
+            }
         } else if (std.mem.startsWith(u8, path, "/gmail.googleapis.com/gmail/v1/users/me/profile?")) {
             response = try std.fmt.bufPrint(&reply, "{{\"emailAddress\":\"{s}\"}}", .{self.profile});
+        } else if (std.mem.startsWith(u8, path, "/gmail.googleapis.com/gmail/v1/users/me/labels")) {
+            response = "{\"labels\":[]}";
         } else return error.UnexpectedOracleRequest;
-        try request.respond(response, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }} });
+        try request.respond(response, .{ .status = status, .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }} });
     }
 };
-
 /// A vault-backed credential store that records what authorization writes.
 const Vault = struct {
     registry: []const u8,
@@ -258,7 +279,7 @@ test "reconnect auth: consent renews exactly the recorded grant and its credenti
     try setup.init(true);
     defer setup.deinit();
     const a = setup.arena.allocator();
-    auth_diagnostic.recordFailure(account, oauth.TokenError.fromJson(400, try std.json.parseFromSliceLeaky(j.Value, a, "{\"error\":\"invalid_grant\",\"error_subtype\":\"invalid_rapt\"}", .{})), 7);
+    auth_diagnostic.recordFailure(account, &setup.grant_id, oauth.TokenError.fromJson(400, try std.json.parseFromSliceLeaky(j.Value, a, "{\"error\":\"invalid_grant\",\"error_subtype\":\"invalid_rapt\"}", .{})), 7);
     const before = try auth.run(io, a, setup.config, &setup.env, try j.value(a, .{ .cmd = "auth.status", .account = account }));
     try std.testing.expectEqualStrings("reauthenticationRequired", j.text(j.get(before, "lastRefreshError").?, "kind"));
     Consent.reset(.approve);
@@ -273,31 +294,39 @@ test "reconnect auth: consent renews exactly the recorded grant and its credenti
     // The stored registry keeps the recorded capabilities, scopes and identity.
     try std.testing.expectEqual(@as(usize, 1), setup.vault.applies);
     const saved = try auth.parse(a, setup.vault.saved_registry[0..setup.vault.saved_registry_len]);
-    const grant = auth.find(&saved, account) orelse {
-        std.debug.print("saved registry: {s}\n", .{setup.vault.saved_registry[0..setup.vault.saved_registry_len]});
-        return error.GrantNotSaved;
-    };
+    const grant = auth.find(&saved, account) orelse return error.GrantNotSaved;
     try std.testing.expectEqual(recorded.len, grant.capabilities.len);
     for (recorded, grant.capabilities) |left, right| try std.testing.expectEqualStrings(left, right);
     try std.testing.expectEqualStrings(&setup.grant_id, grant.grantId);
     try std.testing.expectEqualStrings(fresh_refresh, setup.vault.token[0..setup.vault.token_len]);
-    // The obsolete reason is gone and the reply carries no token material.
+    // The obsolete reason is gone, the commit has ended and the reply carries
+    // no token material.
+    try std.testing.expect(!oauth.committing());
     const after = try auth.run(io, a, setup.config, &setup.env, try j.value(a, .{ .cmd = "auth.status", .account = account }));
     try std.testing.expect(j.get(after, "lastRefreshError").? == .null);
     const encoded = try j.encodeAlloc(a, result, .{});
     for ([_][]const u8{ fresh_refresh, "synthetic-code", "synthetic-renewed-access", "synthetic-reconnect-secret" }) |secret| try std.testing.expect(std.mem.indexOf(u8, encoded, secret) == null);
 }
 
-test "reconnect auth: a narrower, broader or changed grant is refused before consent" {
+test "reconnect auth: a narrower, broader, changed or re-registered grant is refused before consent" {
     var setup: Setup = undefined;
     try setup.init(true);
     defer setup.deinit();
+    const a = setup.arena.allocator();
     Consent.reset(.approve);
     try std.testing.expectError(error.ReconnectCapabilitiesChanged, setup.authorize(&.{ "mail-read", "mail-send", "contacts-read" }, null));
     try std.testing.expectError(error.ReconnectCapabilitiesChanged, setup.authorize(&.{ "mail-read", "mail-send", "contacts-read", "calendar-read", "drive-upload" }, null));
     try std.testing.expectError(error.ReconnectCapabilitiesChanged, setup.authorize(&.{ "mail-read", "mail-send", "contacts-read", "calendar-freebusy" }, null));
     const other_grant: [64]u8 = @splat('0');
     try std.testing.expectError(error.GrantChanged, setup.authorize(&recorded, &other_grant));
+    // A malformed identity is a malformed request, not a changed grant.
+    try std.testing.expectError(error.InvalidRequest, setup.authorize(&recorded, "x"));
+    try std.testing.expectError(error.InvalidRequest, setup.authorize(&recorded, "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"));
+    // Reconnect never switches the OAuth registration.
+    var moved = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .reconnect = true, .clientFile = "another-registration" });
+    try std.testing.expectError(error.ReconnectRegistrationChanged, auth.run(io, a, setup.config, &setup.env, moved));
+    moved = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .expectedGrantId = &setup.grant_id });
+    try std.testing.expectError(error.ExpectedGrantRequiresReconnect, auth.run(io, a, setup.config, &setup.env, moved));
     try Consent.finish();
     try std.testing.expectEqual(@as(usize, 0), Consent.opened);
     try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
@@ -311,7 +340,7 @@ test "reconnect auth: a narrower, broader or changed grant is refused before con
     try std.testing.expectEqual(@as(usize, 0), Consent.opened);
 }
 
-test "reconnect auth: denied consent and a different Google account store nothing" {
+test "reconnect auth: denial, a different Google account and a narrowed grant store nothing" {
     var setup: Setup = undefined;
     try setup.init(true);
     defer setup.deinit();
@@ -319,35 +348,161 @@ test "reconnect auth: denied consent and a different Google account store nothin
     try std.testing.expectError(error.AuthorizationDenied, setup.authorize(&recorded, &setup.grant_id));
     try Consent.finish();
     try std.testing.expectEqual(@as(usize, 0), setup.oracle.exchanges.load(.acquire));
+    try std.testing.expect(!oauth.committing());
     setup.oracle.profile = "other@example.test";
     Consent.reset(.approve);
     try std.testing.expectError(error.WrongAccount, setup.authorize(&recorded, &setup.grant_id));
     try Consent.finish();
     try std.testing.expectEqual(@as(usize, 1), setup.oracle.exchanges.load(.acquire));
+    // A permission unchecked on Google's consent page returns fewer scopes.
+    setup.oracle.profile = account;
+    setup.oracle.granted_scope = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly";
+    Consent.reset(.approve);
+    try std.testing.expectError(error.UnexpectedScope, setup.authorize(&recorded, &setup.grant_id));
+    try Consent.finish();
+    try std.testing.expectEqual(@as(usize, 2), setup.oracle.exchanges.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
+    try std.testing.expect(!oauth.committing());
+}
+
+const Authorization = struct {
+    fn run(setup: *Setup) anyerror!j.Value {
+        return setup.authorize(&recorded, &setup.grant_id);
+    }
+};
+
+test "reconnect auth: cancelling after Google's callback still stores and reports the renewed credential" {
+    var setup: Setup = undefined;
+    try setup.init(true);
+    defer setup.deinit();
+    setup.oracle.hold_exchange.store(true, .release);
+    Consent.reset(.approve);
+    var future = try io.concurrent(Authorization.run, .{&setup});
+    while (!setup.oracle.exchange_entered.load(.acquire)) try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(oauth.committing());
+    // Release the slow exchange shortly after the cancel request arrives.
+    const Release = struct {
+        fn later(oracle: *Oracle) anyerror!void {
+            try io.sleep(.fromMilliseconds(150), .awake);
+            oracle.hold_exchange.store(false, .release);
+        }
+    };
+    var release = try io.concurrent(Release.later, .{&setup.oracle});
+    const result = try future.cancel(io);
+    try release.await(io);
+    try Consent.finish();
+    try std.testing.expect(try j.boolean(result, "reconnected", false));
+    try std.testing.expectEqual(@as(usize, 1), setup.vault.applies);
+    try std.testing.expectEqualStrings(fresh_refresh, setup.vault.token[0..setup.vault.token_len]);
+    try std.testing.expect(!oauth.committing());
+}
+
+test "reconnect auth: cancelling while consent waits closes the loopback listener and stores nothing" {
+    var setup: Setup = undefined;
+    try setup.init(true);
+    defer setup.deinit();
+    Consent.reset(.ignore);
+    var future = try io.concurrent(Authorization.run, .{&setup});
+    while (Consent.opened == 0) try io.sleep(.fromMilliseconds(5), .awake);
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", Consent.port);
+    // The listener is open while waiting...
+    (try address.connect(io, .{ .mode = .stream })).close(io);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+    try Consent.finish();
+    // ...and closed once the cancel returns.
+    try std.testing.expectError(error.ConnectionRefused, address.connect(io, .{ .mode = .stream }));
+    try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
+    try std.testing.expect(!oauth.committing());
 }
 
 test "reconnect auth: fixture consent checks PKCE and identity, times out and cancels with its listener closed" {
     const scopes = [_][]const u8{oauth.readonly_scope};
     Consent.reset(.fixture_self);
-    try oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/browser", &scopes, platform.seconds(5));
+    try oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null);
     try Consent.finish();
     Consent.reset(.fixture_other);
-    try std.testing.expectError(error.WrongAccount, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/browser", &scopes, platform.seconds(5)));
+    try std.testing.expectError(error.WrongAccount, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null));
     try Consent.finish();
     Consent.reset(.fixture_bad_pkce);
-    try std.testing.expectError(error.InvalidGrant, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/browser", &scopes, platform.seconds(5)));
+    try std.testing.expectError(error.InvalidGrant, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null));
     try Consent.finish();
     // A closed browser never calls back: the bounded wait ends cleanly.
     Consent.reset(.ignore);
-    try std.testing.expectError(error.Timeout, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/browser", &scopes, .{ .clock = .awake, .raw = .fromMilliseconds(200) }));
+    try std.testing.expectError(error.Timeout, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, .{ .clock = .awake, .raw = .fromMilliseconds(200) }, null));
     try Consent.finish();
     // Cancelling while consent waits closes the loopback listener.
     Consent.reset(.ignore);
-    var future = try io.concurrent(oauth.authorizeFixture, .{ io, account, "Synthetic Profile", "/nonexistent/browser", @as([]const []const u8, &scopes), platform.seconds(30) });
+    var future = try io.concurrent(oauth.authorizeFixture, .{ io, account, "Synthetic Profile", "/nonexistent/consent-page", @as([]const []const u8, &scopes), platform.seconds(30), @as(?*oauth.Commit, null) });
     while (Consent.opened == 0) try io.sleep(.fromMilliseconds(5), .awake);
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", Consent.port);
     try std.testing.expectError(error.Canceled, future.cancel(io));
+    try std.testing.expectError(error.ConnectionRefused, address.connect(io, .{ .mode = .stream }));
     try Consent.finish();
+    try std.testing.expect(!oauth.committing());
+}
+
+test "reconnect auth: fixture consent never launches a configured browser" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const config = try a.create(Config);
+    try config.defaults("/nonexistent/synthetic-home");
+    const options: @import("types.zig").Options = .{ .fixtures = true, .fixture_scenario = "sign-in-expired", .cache_dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{temporary.sub_path}) };
+    const request = try j.value(a, .{ .cmd = "auth.authorize", .account = "work@example.com", .capabilities = &@import("fixture_auth.zig").capabilities, .reconnect = true });
+    Consent.reset(.fixture_self);
+    for ([_][]const u8{ Config.default_chrome, "/usr/bin/chromium", "/Applications/Chromium.app/Contents/MacOS/Chromium", "/opt/any/browser" }) |browser| {
+        try config.chrome.set(browser);
+        try std.testing.expectError(error.FixtureConsentPageRequired, auth.runFixture(io, a, config, options, options.cache_dir.?, request, null));
+    }
+    try Consent.finish();
+    try std.testing.expectEqual(@as(usize, 0), Consent.opened);
+    // The explicit synthetic page is the only way in.
+    var parsed: Config = undefined;
+    try parsed.defaults("/nonexistent/synthetic-home");
+    try parsed.parse(a, "{\"fixtureConsentPage\":\"/synthetic/consent-page\"}");
+    try std.testing.expectEqualStrings("/synthetic/consent-page", parsed.fixture_consent_page.slice());
+    try std.testing.expectError(error.InvalidFixtureConsentPage, parsed.parse(a, "{\"fixtureConsentPage\":\"relative/page\"}"));
+}
+
+test "reconnect auth: revoking a grant forgets its refusal in memory and in the sidecar" {
+    auth_diagnostic.reset();
+    defer auth_diagnostic.reset();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{temporary.sub_path}), a);
+    const credentials = try std.fmt.allocPrint(a, "{s}/credentials", .{root});
+    try std.Io.Dir.cwd().createDir(io, credentials, .fromMode(0o700));
+    const grants = try std.fmt.allocPrint(a, "{s}/terminal-grants.json", .{root});
+    const scopes = try auth.scopesFor(a, &recorded);
+    const grant_id = auth.grantIdentity(scopes);
+    var rows = [_]auth.Grant{.{ .account = account, .clientFile = "/synthetic/client.json", .clientId = client_id, .grantId = &grant_id, .capabilities = &recorded, .scopes = scopes }};
+    const file = try std.Io.Dir.cwd().createFile(io, grants, .{ .permissions = .fromMode(0o600) });
+    try file.writeStreamingAll(io, try j.encodeAlloc(a, auth.Registry{ .accounts = &rows }, .{}));
+    file.close(io);
+    const config = try a.create(Config);
+    try config.defaults("/nonexistent/synthetic-home");
+    config.count = 1;
+    try config.accounts[0].address.set(account);
+    try config.accounts[0].profile.set("Synthetic Profile");
+    config.accounts[0].enabled = true;
+    config.credential_store = .file;
+    try config.credential_directory.set(credentials);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    auth_diagnostic.recordFailure(account, &grant_id, .{}, 3);
+    const sidecar = try auth_diagnostic.sidecarPath(a, grants);
+    try auth_diagnostic.persist(io, a, sidecar, account);
+    const status = try j.value(a, .{ .cmd = "auth.status", .account = account, .grantFile = grants });
+    try std.testing.expect(j.get(try auth.run(io, a, config, &env, status), "lastRefreshError").? != .null);
+    _ = try auth.run(io, a, config, &env, try j.value(a, .{ .cmd = "auth.revoke", .account = account, .grantFile = grants }));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, sidecar, .{}));
+    try std.testing.expectEqual(auth_diagnostic.Observed.unknown, auth_diagnostic.observed(account).observed);
+    try std.testing.expect(j.get(try auth.run(io, a, config, &env, status), "lastRefreshError").? == .null);
 }
 
 test "reconnect auth: Google's refresh refusal reason reaches the diagnostic" {
@@ -356,6 +511,92 @@ test "reconnect auth: Google's refresh refusal reason reaches the diagnostic" {
     const refusal = oauth.takeTokenError();
     try std.testing.expectEqualStrings("expiredOrRevoked", refusal.kind());
     try std.testing.expect(!oauth.takeTokenError().present());
+}
+
+test "reconnect auth: production sessions persist only the terminal grant's refusal and clear it after a verified refresh" {
+    const core = @import("core.zig");
+    const keyring = @import("../keyring.zig");
+    auth_diagnostic.reset();
+    defer auth_diagnostic.reset();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{temporary.sub_path}), a);
+    const credentials = try std.fmt.allocPrint(a, "{s}/credentials", .{root});
+    try std.Io.Dir.cwd().createDir(io, credentials, .fromMode(0o700));
+    const client_path = try std.fmt.allocPrint(a, "{s}/terminal-client.json", .{root});
+    const client_file = try std.Io.Dir.cwd().createFile(io, client_path, .{ .permissions = .fromMode(0o600) });
+    try client_file.writeStreamingAll(io, client_json);
+    client_file.close(io);
+    const grants = try std.fmt.allocPrint(a, "{s}/terminal-grants.json", .{root});
+    const capabilities = [_][]const u8{"mail-read"};
+    const scopes = try auth.scopesFor(a, &capabilities);
+    const grant_id = auth.grantIdentity(scopes);
+    var rows = [_]auth.Grant{.{ .account = account, .clientFile = client_path, .clientId = client_id, .grantId = &grant_id, .capabilities = &capabilities, .scopes = scopes }};
+    const registry_file = try std.Io.Dir.cwd().createFile(io, grants, .{ .permissions = .fromMode(0o600) });
+    try registry_file.writeStreamingAll(io, try j.encodeAlloc(a, auth.Registry{ .accounts = &rows }, .{}));
+    registry_file.close(io);
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", try std.fmt.allocPrint(a, "{s}/home", .{root}));
+    try env.put("XDG_CONFIG_HOME", try std.fmt.allocPrint(a, "{s}/config", .{root}));
+    try env.put("XDG_RUNTIME_DIR", try std.fmt.allocPrint(a, "{s}/runtime", .{root}));
+    const session = try std.testing.allocator.create(core.Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try core.Session.init(io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = try std.fmt.allocPrint(a, "{s}/cache", .{root}) });
+    defer session.deinit();
+    session.options.fixtures = false;
+    session.options.grant_file = grants;
+    session.config.count = 1;
+    try session.config.accounts[0].address.set(account);
+    try session.config.accounts[0].profile.set("Synthetic Profile");
+    session.config.accounts[0].enabled = true;
+    session.config.credential_store = .file;
+    try session.config.credential_directory.set(credentials);
+    // The bar's read-only registration and credential live beside it.
+    try session.config.client_file.set(client_path);
+    try keyring.storeTerminal(io, session.config.credentials(), account, client_id, &grant_id, "synthetic-stored-refresh");
+    try keyring.store(io, session.config.credentials(), account, client_id, "synthetic-bar-refresh");
+    var oracle: Oracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }), .scope = oauth.readonly_scope };
+    defer oracle.listener.deinit(io);
+    http.TestRoute.origin = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
+    defer http.TestRoute.origin = null;
+    var task = try io.concurrent(Oracle.run, .{&oracle});
+    defer task.cancel(io) catch {};
+    const sidecar = try auth_diagnostic.sidecarPath(a, grants);
+    const labels = "{\"cmd\":\"labels.list\",\"account\":\"self@example.test\"}";
+    const status = "{\"cmd\":\"auth.status\",\"account\":\"self@example.test\"}";
+    // Google refuses the stored terminal token: the reason is persisted.
+    oracle.refuse_refresh.store(true, .release);
+    const refused = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, labels), .{});
+    try std.testing.expectEqualStrings("InvalidGrant", j.text(j.get(refused, "error").?, "code"));
+    const persisted = (try auth_diagnostic.status(io, a, sidecar, account, &grant_id)).?;
+    try std.testing.expectEqualStrings("invalid_rapt", persisted.subtype);
+    // A later one-shot process (nothing observed) still explains it.
+    auth_diagnostic.reset();
+    const later = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, status), .{});
+    try std.testing.expectEqualStrings("reauthenticationRequired", j.text(j.get(j.get(later, "data").?, "lastRefreshError").?, "kind"));
+    // The bar's read-only credential is never described as the terminal grant's.
+    auth_diagnostic.reset();
+    try std.Io.Dir.cwd().deleteFile(io, sidecar);
+    // Exactly the background cache-refresh request, which uses the bar's credential.
+    const bar = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, "{\"cmd\":\"mail.refresh\",\"account\":\"self@example.test\",\"label\":\"INBOX\",\"limit\":32,\"auto\":true,\"intervalSeconds\":300,\"barGrantOnly\":true}"), .{});
+    try std.testing.expectEqualStrings("InvalidGrant", j.text(j.get(bar, "error").?, "code"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, sidecar, .{}));
+    try std.testing.expectEqual(auth_diagnostic.Observed.unknown, auth_diagnostic.observed(account).observed);
+    // Refused again, then the grant works again (re-authorized elsewhere):
+    // the first verified refresh removes the persisted reason for every process.
+    _ = try session.execute(a, labels);
+    _ = try std.Io.Dir.cwd().statFile(io, sidecar, .{});
+    oracle.refuse_refresh.store(false, .release);
+    const recovered = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, labels), .{});
+    try std.testing.expect(try j.boolean(recovered, "ok", false));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, sidecar, .{}));
+    auth_diagnostic.reset();
+    const clean = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, status), .{});
+    try std.testing.expect(j.get(j.get(clean, "data").?, "lastRefreshError").? == .null);
 }
 
 test {

@@ -8,6 +8,9 @@ pub const Config = struct {
     client_file: b.Text(4096) = .{},
     chrome: b.Text(4096) = .{},
     chrome_data: b.Text(4096) = .{},
+    /// Synthetic consent page for --fixtures reconnect tests only. Fixture
+    /// consent opens this program and never the configured browser.
+    fixture_consent_page: b.Text(1024) = .{},
     refresh_seconds: u32 = 0,
     credential_store: @import("keyring.zig").Kind = .keyring,
     credential_directory: b.Text(4096) = .{},
@@ -59,6 +62,11 @@ pub const Config = struct {
             const s = try b.string(v);
             if (!std.mem.startsWith(u8, s, "/")) return error.InvalidChromePath;
             try self.chrome.set(s);
+        }
+        if (b.optional(root, "fixtureConsentPage")) |v| {
+            const s = try b.string(v);
+            if (!std.mem.startsWith(u8, s, "/")) return error.InvalidFixtureConsentPage;
+            try self.fixture_consent_page.set(s);
         }
         if (b.optional(root, "chromeUserData")) |v| {
             const s = try b.string(v);

@@ -79,6 +79,9 @@ const Network = struct {
     cache_lease: ?session_cache.Lease = null,
     cache_index: usize = 0,
     compose_source: bool = false,
+    /// The terminal grant whose credential this is; empty for the bar's
+    /// read-only credential, whose refusals are not terminal diagnostics.
+    diagnostic_grant: []const u8 = "",
     fn invalidate(self: *Network) void {
         if (self.cache) |cache| if (self.cache_lease) |lease| cache.invalidate(lease);
         self.cache_lease = null;
@@ -92,12 +95,13 @@ const Network = struct {
         errdefer self.invalidate();
         const token = oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes) catch |err| {
             // Keep Google's sanitized reason for reconnect guidance/status.
-            if (err == error.InvalidGrant) auth_diagnostic.recordFailure(self.verified_account, oauth.takeTokenError(), std.Io.Timestamp.now(self.client.io, .real).toMilliseconds());
+            const refusal = oauth.takeTokenError();
+            if (err == error.InvalidGrant and self.diagnostic_grant.len != 0) auth_diagnostic.recordFailure(self.verified_account, self.diagnostic_grant, refusal, std.Io.Timestamp.now(self.client.io, .real).toMilliseconds());
             return err;
         };
         const profile = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, token.access_token, null, self.response);
         try oauth.verifyProfile(profile.status, profile.body, self.verified_account);
-        auth_diagnostic.recordSuccess(self.verified_account);
+        if (self.diagnostic_grant.len != 0) auth_diagnostic.recordSuccess(self.verified_account, self.diagnostic_grant);
         if (self.cache) |cache| _ = try cache.publishVerified(self.cache_lease.?, self.verified_account, token.access_token, started, token.expires_in, sessionNow(self.client.io));
         self.access = token.access_token;
     }
@@ -344,7 +348,7 @@ pub const NetworkSession = struct {
         self.scopes = scopes;
         self.capabilities = capabilities;
         self.buffer_allocator = buffer_allocator;
-        self.network = .{ .client = &self.client, .access = "", .access_storage = access, .desktop = &self.desktop, .refresh_token = refresh_token, .scopes = scopes, .response = buffers.response, .verified_account = self.verified_account, .cache = config.runtime_access_cache, .cache_index = index };
+        self.network = .{ .client = &self.client, .access = "", .access_storage = access, .desktop = &self.desktop, .refresh_token = refresh_token, .scopes = scopes, .response = buffers.response, .verified_account = self.verified_account, .cache = config.runtime_access_cache, .cache_index = index, .diagnostic_grant = if (grant) |g| (if (bar_only) "" else g.grantId) else "" };
         if (config.runtime_access_cache) |cache| {
             var location_buffer: [32]u8 = undefined;
             const location = if (config.credential_store == .vault) try std.fmt.bufPrint(&location_buffer, "vault:{x}", .{@intFromPtr((config.runtime_provider orelse return error.VaultLocked).context)}) else config.credential_directory.slice();

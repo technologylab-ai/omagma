@@ -1064,8 +1064,10 @@ Cancel`. Approve as that account. On success the dialog closes, the new
 credential is stored in the selected credential store, and the account's mail
 (and, from Calendar, its calendars) refresh in the same TUI.
 
-Esc cancels the wait and closes the local callback listener. Declining in
-Google, signing in as another Google account, unchecking a requested
+Esc cancels the wait and closes the local callback listener. Once Google has
+answered, the dialog says `Google approved · storing the renewed sign-in…`
+without a Cancel button and closes when the renewed sign-in is stored.
+Declining in Google, signing in as another Google account, unchecking a requested
 permission, or three minutes without an answer store nothing; the dialog says
 which and offers **Try again** (another explicit consent). Reconnect never
 broadens or narrows access; use `terminal-auth authorize` to change

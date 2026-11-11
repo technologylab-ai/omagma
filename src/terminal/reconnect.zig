@@ -34,6 +34,11 @@ pub const State = struct {
     focus: u8 = 0,
     /// Opened from Calendar: reload its account lists after success.
     calendar: bool = false,
+    /// Google's callback arrived; the worker is storing the result and can
+    /// no longer be cancelled (the backend reports the authorizing phase).
+    finishing: bool = false,
+    /// First body line shown when the dialog is taller than the terminal.
+    scroll: usize = 0,
 
     pub fn open(self: *State, index: usize, account: []const u8, calendar: bool) !void {
         self.* = .{};
@@ -63,7 +68,8 @@ pub const State = struct {
             self.reason_description.set(clip(text(last, "description"), 160)) catch {};
         }
         const grant = get(data, "grant");
-        if (grant != .object or (get(grant, "enabled") == .bool and !get(grant, "enabled").bool)) return self.fail("ReconnectRequiresGrant");
+        if (grant != .object) return self.fail("ReconnectRequiresGrant");
+        if (get(grant, "enabled") == .bool and !get(grant, "enabled").bool) return self.fail("GrantDisabled");
         const list = get(grant, "capabilities");
         if (list != .array or list.array.items.len == 0 or list.array.items.len > max_capabilities) return self.fail("ReconnectRequiresGrant");
         for (list.array.items, 0..) |item, index| {
@@ -79,6 +85,8 @@ pub const State = struct {
     pub fn fail(self: *State, code: []const u8) void {
         self.failure.set(clip(code, 64)) catch {};
         self.phase = .failed;
+        self.finishing = false;
+        self.scroll = 0;
         self.focus = 0;
     }
     /// Enter on the primary action: only a known grant can be renewed.
@@ -89,7 +97,17 @@ pub const State = struct {
         if (!self.canStart()) return error.ReconnectUnavailable;
         self.failure = .{};
         self.phase = .waiting;
+        self.finishing = false;
+        self.scroll = 0;
         self.focus = 1;
+    }
+    /// The worker reported Google's callback: from now on only its result
+    /// closes the dialog; Esc, q and Ctrl+C are ignored.
+    pub fn callbackArrived(self: *State) void {
+        if (self.phase == .waiting) self.finishing = true;
+    }
+    pub fn cancellable(self: *const State) bool {
+        return self.phase != .closed and !self.finishing;
     }
     /// The worker's auth.authorize reply. Success must name exactly the
     /// requested capabilities; anything else is reported, never assumed.
@@ -121,35 +139,41 @@ pub const State = struct {
         }
         return list.items;
     }
-    pub fn primaryLabel(self: *const State) []const u8 {
+    /// Compact labels keep both buttons whole in narrow dialogs; the footer
+    /// still names their keys.
+    pub fn primaryLabel(self: *const State, compact: bool) []const u8 {
         return switch (self.phase) {
-            .ready => "[Reconnect · Enter]",
-            .failed => if (self.canStart()) "[Try again · Enter]" else "[Close · Enter]",
+            .ready => if (compact) "[Reconnect]" else "[Reconnect · Enter]",
+            .failed => if (self.canStart()) (if (compact) "[Try again]" else "[Try again · Enter]") else (if (compact) "[Close]" else "[Close · Enter]"),
             else => "",
         };
     }
-    pub fn secondaryLabel(self: *const State) []const u8 {
+    /// Empty while finishing: nothing may interrupt storing the result.
+    pub fn secondaryLabel(self: *const State, compact: bool) []const u8 {
+        if (self.finishing) return "";
         return switch (self.phase) {
-            .waiting, .checking, .ready => "[Cancel · Esc]",
-            else => "[Close · Esc]",
+            .waiting, .checking, .ready => if (compact) "[Cancel]" else "[Cancel · Esc]",
+            else => if (compact) "[Close]" else "[Close · Esc]",
         };
     }
     pub fn hints(self: *const State) []const u8 {
+        if (self.finishing) return "Google approved · storing the renewed sign-in… · please wait";
         return switch (self.phase) {
             .checking => "Reading this account's sign-in… · Esc Cancel",
-            .ready => "Enter Reconnect · Tab Choose · Esc Cancel",
+            .ready => "Enter Reconnect · Tab Choose · j/k Scroll · Esc Cancel",
             .waiting => "Waiting for Google consent in Chrome · Esc Cancel",
             .failed => if (self.canStart()) "Enter Try again · Tab Choose · Esc Close" else "Enter Close · Esc Close",
             else => "",
         };
     }
-    /// One line describing why Google refused the stored sign-in.
+    /// One line describing why Google refused the stored sign-in. Without a
+    /// recorded refusal it never claims the sign-in expired.
     pub fn reasonText(self: *const State) []const u8 {
         const kind = self.reason_kind.slice();
         if (std.mem.eql(u8, kind, "reauthenticationRequired")) return "Your Google Workspace requires signing in again (re-authentication policy)";
         if (std.mem.eql(u8, kind, "expiredOrRevoked")) return "The stored sign-in expired or was revoked (revoked access, a password change, or a Testing-mode app's 7-day limit)";
         if (kind.len > 0) return "Google refused the stored sign-in";
-        return "Google sign-in expired or was revoked";
+        return "No refusal of this sign-in is recorded · reconnecting renews it anyway";
     }
 };
 
@@ -222,7 +246,7 @@ test "reconnect state: status, explicit start, success keeps the recorded capabi
     try std.testing.expectEqualStrings("Your Google Workspace requires signing in again (re-authentication policy)", state.reasonText());
     try std.testing.expectEqualStrings("reauth related error (invalid_rapt)", state.reason_description.slice());
     try std.testing.expectEqualStrings("mail-read, mail-send, calendar-read", try state.capabilityText(a));
-    try std.testing.expectEqualStrings("[Reconnect · Enter]", state.primaryLabel());
+    try std.testing.expectEqualStrings("[Reconnect · Enter]", state.primaryLabel(false));
     var out: [max_capabilities][]const u8 = undefined;
     const request = state.requestCapabilities(&out);
     try std.testing.expectEqual(@as(usize, 3), request.len);
@@ -242,12 +266,12 @@ test "reconnect state: denied, wrong account, timeout and cancel are retryable f
         var state: State = .{};
         try state.open(1, "work@example.com", true);
         try state.statusLoaded(try parse(a, status));
-        try std.testing.expectEqualStrings("Google sign-in expired or was revoked", state.reasonText());
+        try std.testing.expectEqualStrings("No refusal of this sign-in is recorded · reconnecting renews it anyway", state.reasonText());
         try state.begin();
         state.fail(code);
         try std.testing.expectEqual(Phase.failed, state.phase);
         try std.testing.expect(state.canStart());
-        try std.testing.expectEqualStrings("[Try again · Enter]", state.primaryLabel());
+        try std.testing.expectEqualStrings("[Try again · Enter]", state.primaryLabel(false));
         try std.testing.expect(!std.mem.eql(u8, failureText(code), failureText("SomethingElse")));
         try state.begin();
         try std.testing.expectEqual(Phase.waiting, state.phase);
@@ -278,12 +302,36 @@ test "reconnect state: no recorded grant, a disabled grant or a changed account 
     try state.statusLoaded(try parse(a, "{\"account\":\"personal@example.com\",\"configured\":false}"));
     try std.testing.expectEqual(Phase.failed, state.phase);
     try std.testing.expect(!state.canStart());
-    try std.testing.expectEqualStrings("[Close · Enter]", state.primaryLabel());
+    try std.testing.expectEqualStrings("[Close · Enter]", state.primaryLabel(false));
     try state.open(0, "personal@example.com", false);
     try state.statusLoaded(try parse(a, "{\"account\":\"personal@example.com\",\"grant\":{\"enabled\":false,\"grantId\":\"" ++ grant_id ++ "\",\"capabilities\":[\"mail-read\"]}}"));
     try std.testing.expect(!state.canStart());
+    // A disabled grant is named as such, not as a missing one.
+    try std.testing.expectEqualStrings("GrantDisabled", state.failure.slice());
+    try std.testing.expect(std.mem.indexOf(u8, failureText(state.failure.slice()), "disabled") != null);
     try state.open(0, "personal@example.com", false);
     try std.testing.expectError(error.WrongAccount, state.statusLoaded(try parse(a, "{\"account\":\"other@example.com\"}")));
     state.close();
     try std.testing.expect(!state.active());
+}
+
+test "reconnect state: after Google's callback the dialog cannot be cancelled and drops Cancel" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state: State = .{};
+    try state.open(1, "work@example.com", false);
+    try state.statusLoaded(try parse(a, "{\"account\":\"work@example.com\",\"grant\":{\"grantId\":\"" ++ grant_id ++ "\",\"capabilities\":[\"mail-read\"]},\"lastRefreshError\":null}"));
+    // No recorded refusal: neutral wording, never "expired".
+    try std.testing.expect(std.mem.indexOf(u8, state.reasonText(), "expired") == null);
+    try std.testing.expectEqualStrings("[Reconnect]", state.primaryLabel(true));
+    try std.testing.expectEqualStrings("[Cancel]", state.secondaryLabel(true));
+    try state.begin();
+    try std.testing.expect(state.cancellable());
+    state.callbackArrived();
+    try std.testing.expect(!state.cancellable());
+    try std.testing.expectEqualStrings("", state.secondaryLabel(false));
+    try std.testing.expect(std.mem.indexOf(u8, state.hints(), "Esc") == null);
+    try state.finished(try parse(a, "{\"account\":\"work@example.com\",\"authorized\":true,\"capabilities\":[\"mail-read\"]}"));
+    try std.testing.expectEqual(Phase.succeeded, state.phase);
 }

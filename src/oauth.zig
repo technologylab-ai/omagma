@@ -29,11 +29,11 @@ pub const TokenError = struct {
     /// Stable classification for people and agents. Google uses the same
     /// "expired or revoked" text for revoked access, a password change and a
     /// Testing-mode project's seven-day grant limit; it cannot be narrowed.
+    /// Only invalid_grant refusals are kept, so there is no fourth kind.
     pub fn kind(self: *const TokenError) []const u8 {
         if (std.mem.eql(u8, self.subtype.slice(), "invalid_rapt")) return "reauthenticationRequired";
         if (std.ascii.findIgnoreCase(self.description.slice(), "expired or revoked") != null) return "expiredOrRevoked";
-        if (std.mem.eql(u8, self.code.slice(), "invalid_grant")) return "invalidGrant";
-        return "other";
+        return "invalidGrant";
     }
     pub fn fromJson(status: u16, value: std.json.Value) TokenError {
         var result: TokenError = .{ .status = status };
@@ -51,43 +51,60 @@ fn machineWord(out: *b.Text(48), raw: []const u8) void {
 fn tokenAlphabet(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~+/=", c) != null;
 }
-/// Printable ASCII prose with single spaces. Descriptions are sentences, so
-/// any 20+ character run of token-alphabet bytes can only be an echoed
-/// credential, authorization code or identifier: it is replaced, never kept.
+/// Printable ASCII prose with single spaces. ASCII whitespace separates
+/// words. Every other dropped byte (controls, DEL, any non-ASCII byte) is
+/// shown as a space but cannot split a credential: token-alphabet pieces it
+/// joins count as one run. Descriptions are sentences, so any 20+ character
+/// run can only be an echoed credential, authorization code or identifier
+/// and is replaced as a whole.
 fn prose(out: *b.Text(160), raw: []const u8) void {
-    var buffer: [160]u8 = undefined;
-    var n: usize = 0;
-    var index: usize = 0;
+    // 0 marks one or more dropped bytes between visible ones.
+    var normalized: [1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &normalized);
+    var length: usize = 0;
     var truncated = false;
-    while (index < raw.len) {
-        const c = raw[index];
-        if (tokenAlphabet(c)) {
-            var end = index;
-            while (end < raw.len and tokenAlphabet(raw[end])) end += 1;
-            const word = if (end - index >= 20) "[redacted]" else raw[index..end];
-            if (n + word.len > buffer.len - 3) {
-                truncated = true;
-                break;
+    for (raw) |c| {
+        const class: u8 = if (c > 32 and c < 127) c else if (c == ' ' or c == '\t' or c == '\n' or c == '\r') ' ' else 0;
+        if (class == ' ' or class == 0) {
+            if (length == 0 or normalized[length - 1] == ' ') continue;
+            if (normalized[length - 1] == 0) {
+                if (class == ' ') normalized[length - 1] = ' ';
+                continue;
             }
-            @memcpy(buffer[n..][0..word.len], word);
-            n += word.len;
-            index = end;
-            continue;
         }
-        if (n >= buffer.len - 3) {
+        if (length == normalized.len) {
             truncated = true;
             break;
         }
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
-            if (n > 0 and buffer[n - 1] != ' ') {
-                buffer[n] = ' ';
-                n += 1;
+        normalized[length] = class;
+        length += 1;
+    }
+    const text = normalized[0..length];
+    var buffer: [160]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
+    var n: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        var end = index + 1;
+        var letters: usize = 1;
+        if (tokenAlphabet(text[index])) {
+            while (end < text.len) {
+                if (tokenAlphabet(text[end])) {
+                    letters += 1;
+                    end += 1;
+                } else if (text[end] == 0 and end + 1 < text.len and tokenAlphabet(text[end + 1])) {
+                    end += 1;
+                } else break;
             }
-        } else if (c > 32 and c < 127) {
-            buffer[n] = c;
-            n += 1;
         }
-        index += 1;
+        const word = if (letters >= 20) "[redacted]" else text[index..end];
+        if (n + word.len > buffer.len - 3) {
+            truncated = true;
+            break;
+        }
+        for (word, 0..) |c, offset| buffer[n + offset] = if (c == 0) ' ' else c;
+        n += word.len;
+        index = end;
     }
     while (n > 0 and buffer[n - 1] == ' ') n -= 1;
     if (truncated) {
@@ -95,7 +112,6 @@ fn prose(out: *b.Text(160), raw: []const u8) void {
         n += 3;
     }
     out.set(buffer[0..n]) catch {};
-    std.crypto.secureZero(u8, &buffer);
 }
 /// One network worker owns token exchanges; the lock only guards a reader on
 /// another thread. The value is a sanitized diagnostic, never token material.
@@ -391,7 +407,40 @@ var auth_desktop: DesktopClient = .{};
 pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, credentials: keyring.Settings) !void {
     try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null, credentials);
 }
-pub const TerminalCredential = struct { grant_id: []const u8, capture: ?*b.Text(limits.secret) = null };
+pub const TerminalCredential = struct { grant_id: []const u8, capture: ?*b.Text(limits.secret) = null, commit: ?*Commit = null };
+pub const Notify = struct {
+    context: *anyopaque,
+    callFn: *const fn (*anyopaque) void,
+};
+/// Once Google's callback has arrived, the exchange, identity check and the
+/// durable store must finish: cancelling then would discard a credential
+/// Google already issued, or report "unchanged" after it was stored. The
+/// commit blocks cancellation of the current task (deadlines still bound each
+/// network and keyring step) and marks the process as committing until the
+/// caller ends it after its own durable writes.
+pub const Commit = struct {
+    notify: ?Notify = null,
+    started: bool = false,
+    previous: std.Io.CancelProtection = .unblocked,
+    pub fn begin(self: *Commit, io: std.Io) void {
+        if (self.started) return;
+        self.previous = io.swapCancelProtection(.blocked);
+        self.started = true;
+        committing_flag.store(true, .release);
+        if (self.notify) |notify| notify.callFn(notify.context);
+    }
+    pub fn end(self: *Commit, io: std.Io) void {
+        if (!self.started) return;
+        self.started = false;
+        committing_flag.store(false, .release);
+        _ = io.swapCancelProtection(self.previous);
+    }
+};
+var committing_flag: std.atomic.Value(bool) = .init(false);
+/// Whether this process is past a consent callback and storing its result.
+pub fn committing() bool {
+    return committing_flag.load(.acquire);
+}
 /// Unit-test-only consent page. Production always launches the configured
 /// browser; no runtime option, environment variable or production
 /// declaration can replace it or observe the consent URL.
@@ -475,6 +524,12 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     var flow: Flow = .{};
     defer flow.wipe();
     const code = try consent(io, &flow, auth_desktop.client_id.slice(), address, profile, chrome, scopes, platform.seconds(limits.auth_seconds));
+    // Google answered: finish the exchange and store, uncancellable. A caller
+    // with its own durable writes owns the commit and ends it afterwards.
+    var local_commit: Commit = .{};
+    const commit = if (terminal) |credential| credential.commit orelse &local_commit else &local_commit;
+    defer local_commit.end(io);
+    commit.begin(io);
     var client = try http.Client.init(io);
     defer client.deinit();
     var form = std.Io.Writer.fixed(&form_buffer);
@@ -502,7 +557,7 @@ pub const fixture_client_id = "omagma-fixture-consent.apps.googleusercontent.com
 /// `fixture.<S256 challenge>.<base64url(signed-in address)>`, standing in for
 /// Google's PKCE check and the Gmail profile identity, which is then verified
 /// exactly as a real profile response.
-pub fn authorizeFixture(io: std.Io, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, wait: std.Io.Clock.Duration) !void {
+pub fn authorizeFixture(io: std.Io, address: []const u8, profile: []const u8, consent_page: []const u8, scopes: []const []const u8, wait: std.Io.Clock.Duration, commit: ?*Commit) !void {
     try validateScopeSet(scopes);
     try b.address(address);
     try b.profile(profile);
@@ -513,7 +568,10 @@ pub fn authorizeFixture(io: std.Io, address: []const u8, profile: []const u8, ch
     }
     var flow: Flow = .{};
     defer flow.wipe();
-    const code = try consent(io, &flow, fixture_client_id, address, profile, chrome, scopes, wait);
+    const code = try consent(io, &flow, fixture_client_id, address, profile, consent_page, scopes, wait);
+    var local_commit: Commit = .{};
+    defer local_commit.end(io);
+    (commit orelse &local_commit).begin(io);
     try fixtureExchange(code, &flow.verifier, address);
 }
 fn fixtureExchange(code: []const u8, verifier: []const u8, address: []const u8) !void {

@@ -459,7 +459,7 @@ fn actionKey(id: action_palette.Id) ?u21 {
     };
 }
 /// Command names the prompt accepts, for "did you mean" suggestions.
-const command_names = [_][]const u8{ "actions", "add-contact", "attachments", "bind", "calendar", "calendar-import", "cancel-send", "copy-message", "density", "detach", "discard-draft", "find", "follow-up", "follow-ups", "gmail-draft", "headers", "inbox", "labels", "layout", "links", "meeting", "next-unread", "paste-image", "preview-browser", "previous-unread", "q", "quit", "receipt", "received", "reload-draft", "resolve-draft", "resume-send", "save-all", "save-attachment", "save-copy", "save-search", "saved-searches", "scope", "search-history", "send", "send-grace", "sender", "spam", "split", "theme", "thread-newer", "thread-older", "unbind", "undo", "unspam", "updates", "version", "view-editor" };
+const command_names = [_][]const u8{ "actions", "add-contact", "attachments", "bind", "calendar", "calendar-import", "cancel-send", "copy-message", "density", "detach", "discard-draft", "find", "follow-up", "follow-ups", "gmail-draft", "headers", "inbox", "labels", "layout", "links", "meeting", "next-unread", "paste-image", "preview-browser", "previous-unread", "q", "quit", "receipt", "received", "reconnect", "reload-draft", "resolve-draft", "resume-send", "save-all", "save-attachment", "save-copy", "save-search", "saved-searches", "scope", "search-history", "send", "send-grace", "sender", "spam", "split", "theme", "thread-newer", "thread-older", "unbind", "undo", "unspam", "updates", "version", "view-editor" };
 fn editDistance(a: []const u8, b: []const u8) usize {
     if (a.len > 32 or b.len > 32) return std.math.maxInt(usize);
     var previous: [33]usize = undefined;
@@ -532,6 +532,11 @@ fn batchUndoLabel(request: Value) []const u8 {
     if (unread == .bool) return if (unread.bool) "mark unread" else "mark read";
     if (get(request, "addLabels") != .null or get(request, "removeLabels") != .null) return "labels";
     return "mail action";
+}
+
+/// A list/refresh failure that a sign-in reconnect fixes.
+fn signInFailure(code: []const u8) bool {
+    return std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null;
 }
 
 /// An account's mailbox status names the key that fixes an expired sign-in.
@@ -2236,6 +2241,8 @@ const App = struct {
     reconnect: reconnect_ui.State = .{},
     /// A reconnected account's mail refresh, once the worker is free.
     reconnect_refresh: ?usize = null,
+    /// Last body line the reconnect dialog can scroll to at this size.
+    reconnect_scroll_max: usize = 0,
     /// Account slot for the next started job when it is not the current one.
     job_account_override: ?usize = null,
     mono: bool = false,
@@ -6563,12 +6570,13 @@ const App = struct {
         defer self.job_account_override = null;
         try self.start(.refresh, .{ .account = text(get(self.accounts[index], "address")), .cmd = "mail.refresh", .limit = @as(usize, 32), .query = "", .label = "INBOX" });
     }
-    /// The account a Reconnect without an explicit address refers to: the one
-    /// the Calendar warning names, the shown calendar's, else the mailbox's.
+    /// The account a Reconnect without an explicit address refers to: the
+    /// first account Calendar left out because its sign-in failed, the shown
+    /// calendar's, else the mailbox's. An account missing for another reason
+    /// (offline, unavailable) is never singled out as expired.
     fn reconnectAccountFor(self: *App) usize {
         if (self.calendar.open) {
-            const absent = self.calendarAbsentAccounts();
-            if (absent.count > 0) return absent.first;
+            for (self.calendar.list_errors, 0..) |failure, index| if (index < self.accounts.len and signInFailure(failure.slice())) return index;
             if (self.calendarAccountSlot(self.calendar.account.slice())) |slot| return slot;
         }
         return self.account_index;
@@ -6579,6 +6587,8 @@ const App = struct {
         return self.mode == .browse and self.ux_overlay == .none and self.reader_overlay == .none and !self.label_picker and !self.compose_choice and !self.grace_active and !self.update_open;
     }
     /// Opens the modal for one account; nothing reaches Google until Enter.
+    /// Running work is never preempted (an autosave or a queued intent must
+    /// not be lost): the status read simply waits for the worker.
     fn openReconnect(self: *App, wanted: ?usize) !void {
         if (browser_target) return error.NativeOnly;
         const index = wanted orelse self.reconnectAccountFor();
@@ -6586,12 +6596,15 @@ const App = struct {
         const entry = self.accounts[index];
         if (get(entry, "enabled") == .bool and !truth(get(entry, "enabled"))) return error.AccountDisabled;
         try self.reconnect.open(index, text(get(entry, "address")), self.calendar.open);
-        self.preemptReadOnly();
+        self.reconnect_scroll_max = 0;
+        // A notice from an earlier attempt never stays under a new dialog.
+        self.action_notice = false;
+        self.sayIdle();
         try self.dispatchReconnect();
     }
     fn openReconnectNamed(self: *App, address: []const u8) !void {
         for (self.accounts, 0..) |entry, index| if (std.ascii.eqlIgnoreCase(text(get(entry, "address")), address)) return self.openReconnect(index);
-        return error.UnknownAccount;
+        self.say(true, "Not a configured account: {s} · :reconnect takes one of the accounts in the sidebar", .{address[0..@min(address.len, 80)]});
     }
     fn dispatchReconnect(self: *App) !void {
         if (self.reconnect.phase != .checking or self.reconnect.requested or self.job.future != null) return;
@@ -6602,7 +6615,6 @@ const App = struct {
     /// renewing exactly the recorded grant (the backend refuses any change).
     fn beginReconnect(self: *App) !void {
         if (!self.reconnect.canStart()) return;
-        self.preemptReadOnly();
         if (self.job.future != null) {
             self.say(true, "Wait for the current operation, then press Enter to reconnect", .{});
             return;
@@ -6611,21 +6623,68 @@ const App = struct {
         const capabilities = self.reconnect.requestCapabilities(&buffer);
         try self.reconnect.begin();
         errdefer self.reconnect.fail("AuthorizationFailed");
+        self.action_notice = false;
+        self.sayIdle();
         try self.start(.auth_reconnect, .{ .cmd = "auth.authorize", .account = self.reconnect.account.slice(), .capabilities = capabilities, .reconnect = true, .expectedGrantId = self.reconnect.grant_id.slice() });
     }
-    fn cancelReconnect(self: *App) void {
+    /// The backend reports Google's callback as the authorizing phase.
+    fn syncReconnectProgress(self: *App) void {
+        if (self.reconnect.phase == .waiting and self.job.future != null and self.job.kind == .auth_reconnect and self.job.progress.snapshot().phase == .authorizing) self.reconnect.callbackArrived();
+    }
+    fn releaseReconnectJob(self: *App) void {
+        if (self.job.future != null) return;
+        self.job.request = "";
+        self.job.response = null;
+        _ = self.job_arena.reset(.free_all);
+    }
+    /// Esc/q/Ctrl+C or Cancel. Only the reconnect's own job is stopped;
+    /// intents queued behind the modal stay queued. A reply that already
+    /// renewed the credential is never discarded, and nothing at all happens
+    /// once Google's callback has arrived.
+    fn cancelReconnect(self: *App) !void {
+        self.syncReconnectProgress();
+        if (!self.reconnect.cancellable()) return;
         const waiting = self.reconnect.phase == .waiting;
         var account_copy: [254]u8 = undefined;
         const name = account_copy[0..self.reconnect.account.len];
         @memcpy(name, self.reconnect.account.slice());
-        if (self.job.future != null and (self.job.kind == .auth_status or self.job.kind == .auth_reconnect)) self.cancelJob();
+        if (self.job.future != null and (self.job.kind == .auth_status or self.job.kind == .auth_reconnect)) {
+            const kind = self.job.kind;
+            if (self.job.future) |*future| future.cancel(self.io);
+            self.job.future = null;
+            if (kind == .auth_reconnect and self.job.failure == null and self.job.response != null) {
+                // The worker finished before the cancel reached it.
+                try self.finishReconnect();
+                self.releaseReconnectJob();
+                if (!self.reconnect.active()) return;
+            } else self.releaseReconnectJob();
+        }
         self.reconnect.close();
         if (waiting) self.say(false, "Reconnect canceled · Google sign-in for {s} unchanged", .{name});
     }
     fn onReconnectKey(self: *App, key: Key) !void {
         if (self.paste) return;
+        self.syncReconnectProgress();
+        // Finishing: every key waits for the stored result.
+        if (!self.reconnect.cancellable()) return;
         const has_primary = self.reconnect.phase == .ready or self.reconnect.phase == .failed;
         if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true }) or key.matches('q', .{})) return self.cancelReconnect();
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
+            self.reconnect.scroll = @min(self.reconnect.scroll +| 1, self.reconnect_scroll_max);
+            return;
+        }
+        if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            self.reconnect.scroll -|= 1;
+            return;
+        }
+        if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) {
+            self.reconnect.scroll = @min(self.reconnect.scroll +| 4, self.reconnect_scroll_max);
+            return;
+        }
+        if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) {
+            self.reconnect.scroll -|= 4;
+            return;
+        }
         if (tabDirection(key) != null or key.matches(Key.left, .{}) or key.matches(Key.right, .{}) or key.matches('h', .{}) or key.matches('l', .{})) {
             self.reconnect.focus = if (has_primary) self.reconnect.focus ^ 1 else 1;
             return;
@@ -6633,6 +6692,8 @@ const App = struct {
         if (key.matches(Key.enter, .{})) return self.activateReconnect(if (has_primary) self.reconnect.focus else 1);
     }
     fn activateReconnect(self: *App, control: u8) !void {
+        self.syncReconnectProgress();
+        if (!self.reconnect.cancellable()) return;
         if (control == 1 or !self.reconnect.canStart()) return self.cancelReconnect();
         return self.beginReconnect();
     }
@@ -6682,7 +6743,7 @@ const App = struct {
             self.calendar.notice.display(try std.fmt.allocPrint(self.frame.allocator(), "Reconnected {s} · loading its calendars", .{name}));
             if (same(self.calendar.error_code.slice(), "InvalidGrant")) self.calendar.error_code = .{};
             self.reconnect_refresh = index;
-            try self.calendarBeginDiscovery();
+            if (self.job.future == null) try self.calendarBeginDiscovery() else self.calendar.resume_lists = true;
             return;
         }
         try self.refreshAccount(index);
@@ -6692,6 +6753,7 @@ const App = struct {
         const address = state.account.slice();
         const google = if (state.reason_description.len > 0) try std.fmt.allocPrint(a, "\nGoogle said: \"{s}\"", .{state.reason_description.slice()}) else "";
         const reason = try std.fmt.allocPrint(a, "{s}.{s}", .{ state.reasonText(), google });
+        if (state.finishing) return std.fmt.allocPrint(a, "Account: {s}\n\nGoogle approved. Storing the renewed sign-in…\n\nThis finishes on its own and cannot be cancelled now.", .{address});
         return switch (state.phase) {
             .checking => try std.fmt.allocPrint(a, "Account: {s}\n\nReading this account's recorded sign-in…", .{address}),
             .ready => try std.fmt.allocPrint(a, "Account: {s}\n{s}\n\nReconnect opens Google consent in this account's Chrome profile and renews the same permissions:\n{s}\n\nSign in as {s}. Nothing is sent or changed in your mail.", .{ address, reason, try state.capabilityText(a), address }),
@@ -6700,27 +6762,48 @@ const App = struct {
             else => "",
         };
     }
+    /// A centred modal that keeps the header and both footer rows visible
+    /// when there is room, scrolls its text (j/k) when it does not fit, and
+    /// always draws whole buttons, stacking them in very narrow terminals.
     fn drawReconnect(self: *App, win: vaxis.Window) !void {
         if (!self.reconnect.active()) return;
+        self.syncReconnectProgress();
         const a = self.frame.allocator();
         self.mouse_hits.clear();
+        const top: u16 = if (win.height >= 12) 1 else 0;
+        const bottom: u16 = if (win.height >= 12) 2 else 0;
+        const band: u16 = win.height -| top -| bottom;
         const width: u16 = if (win.width <= 80) win.width else 76;
+        if (width < 16 or band < 6) return;
+        const inner_width: u16 = width -| 4;
+        const compact = inner_width < 36;
+        const primary = self.reconnect.primaryLabel(compact);
+        const secondary = self.reconnect.secondaryLabel(compact);
+        const one_row = primary.len == 0 or secondary.len == 0 or primary.len + 2 + secondary.len <= inner_width;
+        const button_rows: usize = if (one_row) 1 else 2;
         const body = try self.reconnectBody(a);
         const clean = try safe(a, body, true);
-        const rows = text_layout.caret(clean, clean.len, width -| 4, win.screen.width_method, .words).row + 1;
-        const height: u16 = @intCast(@min(@as(usize, win.height), rows + 5));
-        if (width < 20 or height < 6) return;
-        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        const rows = text_layout.caret(clean, clean.len, inner_width, win.screen.width_method, .words).row + 1;
+        // Borders, a separator row and the buttons.
+        const chrome_rows = 3 + button_rows;
+        const height: u16 = @intCast(@min(@as(usize, band), rows + chrome_rows));
+        const visible: usize = height -| chrome_rows;
+        if (visible == 0) return;
+        self.reconnect_scroll_max = rows -| visible;
+        self.reconnect.scroll = @min(self.reconnect.scroll, self.reconnect_scroll_max);
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast(top + (band - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, " Reconnect Google sign-in ", true);
-        _ = try self.flow(inner.child(.{ .height = inner.height -| 2 }), body, 0, 0);
-        const row = inner.height -| 1;
+        _ = try self.flow(inner.child(.{ .height = @intCast(visible) }), body, self.reconnect.scroll, 0);
+        if (self.reconnect_scroll_max > 0) try self.line(inner, visible, if (self.reconnect.scroll < self.reconnect_scroll_max) "↓ j More" else "↑ k Back", .muted);
+        const row = inner.height -| @as(u16, @intCast(button_rows));
         var x: u16 = 0;
-        const primary = self.reconnect.primaryLabel();
-        if (primary.len > 0) x = try self.actionButton(inner, row, x, primary, self.reconnect.focus == 0, true, .dialog_action, 950);
-        _ = try self.actionButton(inner, row, x, self.reconnect.secondaryLabel(), self.reconnect.focus == 1 or primary.len == 0, true, .dialog_action, 951);
+        if (primary.len > 0) x = try self.actionButton(inner, row, 0, primary, self.reconnect.focus == 0, true, .dialog_action, 950);
+        if (secondary.len > 0) {
+            if (one_row) _ = try self.actionButton(inner, row, x, secondary, self.reconnect.focus == 1 or primary.len == 0, true, .dialog_action, 951) else _ = try self.actionButton(inner, row + 1, 0, secondary, self.reconnect.focus == 1, true, .dialog_action, 951);
+        }
         // Calendar draws its own footer; the dialog's keys replace it.
-        if (self.calendar.open and win.height >= 2) {
+        if (self.calendar.open and bottom > 0) {
             win.child(.{ .y_off = win.height - 2, .height = 1 }).fill(.{ .style = self.style(.text) });
             try self.drawHints(win, win.height - 2, self.reconnect.hints());
         }
@@ -13650,7 +13733,9 @@ const App = struct {
         const status = &self.sync[self.account_index];
         if (status.state == .fetching) return "Fetching mail…";
         if (self.job.future != null and self.drafts_list) return "Loading drafts…";
-        if (status.state == .failed) return if (status.cache_ready) "Mail unavailable · Ctrl+R Retry" else "No downloaded mail yet · Ctrl+R Retry";
+        // An expired sign-in fails again on Ctrl+R; name the fix instead.
+        const expired = status.error_len > 0 and same(status.error_code[0..status.error_len], "InvalidGrant");
+        if (status.state == .failed) return if (expired) (if (status.cache_ready) "Mail unavailable · Google sign-in expired · Ctrl+O Reconnect" else "No downloaded mail yet · Google sign-in expired · Ctrl+O Reconnect") else if (status.cache_ready) "Mail unavailable · Ctrl+R Retry" else "No downloaded mail yet · Ctrl+R Retry";
         if (self.cacheSearch()) return "No matches in downloaded mail · \\ searches Gmail · q clears";
         if (self.query.value().len > 0) return "No matches in Gmail · q clears the search";
         if (self.custom_label.value().len > 0) return "No mail with this label";
@@ -21708,7 +21793,7 @@ const App = struct {
         const absent = self.calendarAbsentAccounts();
         if (absent.count > 0) {
             const code = self.calendar.list_errors[absent.first].slice();
-            const sign_in = std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null;
+            const sign_in = signInFailure(code);
             const who = if (absent.count > 1) try std.fmt.allocPrint(a, "{d} accounts", .{absent.count}) else if (absent.first < self.accounts.len) text(get(self.accounts[absent.first], "address")) else "1 account";
             return try std.fmt.allocPrint(a, "Not shown: {s} · {s} · all other calendars are complete", .{ who, if (sign_in) @as([]const u8, "Google sign-in expired · Ctrl+O Reconnect") else try std.fmt.allocPrint(a, "its calendars could not be loaded ({s}) · Ctrl+R Retry", .{code}) });
         }
@@ -39010,6 +39095,13 @@ const ReconnectTestClient = struct {
     outcome: []const u8 = "",
     grant: bool = true,
     block_authorize: bool = false,
+    /// No refusal recorded for the account (a healthy sign-in).
+    healthy: bool = false,
+    /// Report Google's callback, then hold the reply until released.
+    finishing_gate: bool = false,
+    released: std.atomic.Value(bool) = .init(false),
+    /// Hold mail.refresh until released (work running before the dialog).
+    hold_refresh: std.atomic.Value(bool) = .init(false),
     requests: [16][1024]u8 = undefined,
     lengths: [16]usize = @splat(0),
     count: std.atomic.Value(usize) = .init(0),
@@ -39042,6 +39134,7 @@ const ReconnectTestClient = struct {
         const account_address = text(get(request.value, "account"));
         if (same(cmd, "auth.status")) {
             if (!self.grant) return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .account = account_address, .configured = false, .credentialStore = "keyring", .lastRefreshError = null } }, .{});
+            if (self.healthy) return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .account = account_address, .configured = true, .credentialStore = "keyring", .grant = .{ .grantId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", .capabilities = .{ "mail-read", "mail-send", "calendar-read" }, .enabled = true }, .lastRefreshError = null } }, .{});
             return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .account = account_address, .configured = true, .credentialStore = "keyring", .grant = .{ .grantId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", .capabilities = .{ "mail-read", "mail-send", "calendar-read" }, .enabled = true }, .lastRefreshError = .{ .@"error" = "invalid_grant", .subtype = "invalid_rapt", .description = "reauth related error (invalid_rapt)", .kind = "reauthenticationRequired", .at = 1 } } }, .{});
         }
         if (same(cmd, "auth.authorize")) {
@@ -39049,8 +39142,22 @@ const ReconnectTestClient = struct {
             if (self.outcome.len > 0) return std.json.Stringify.valueAlloc(a, .{ .ok = false, .@"error" = .{ .code = self.outcome } }, .{});
             return std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .account = account_address, .authorized = true, .reconnected = true, .capabilities = get(request.value, "capabilities") } }, .{});
         }
-        if (same(cmd, "mail.refresh")) return a.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[],\"cacheReady\":true,\"lastSyncAt\":1,\"refreshed\":true}}");
+        if (same(cmd, "mail.refresh")) {
+            while (self.hold_refresh.load(.acquire)) try std.testing.io.sleep(.fromMilliseconds(5), .awake);
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[],\"cacheReady\":true,\"lastSyncAt\":1,\"refreshed\":true}}");
+        }
         return error.UnexpectedReconnectRequest;
+    }
+    fn callProgress(ctx: *anyopaque, a: Allocator, raw: []const u8, sink: types.ProgressSink) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.finishing_gate and std.mem.indexOf(u8, raw, "auth.authorize") != null) {
+            // Google answered: the backend reports it and finishes regardless.
+            sink.report(.{ .phase = .authorizing, .completed = 1, .total = 1 });
+            const protection = std.testing.io.swapCancelProtection(.blocked);
+            defer _ = std.testing.io.swapCancelProtection(protection);
+            while (!self.released.load(.acquire)) std.testing.io.sleep(.fromMilliseconds(5), .awake) catch {};
+        }
+        return call(ctx, a, raw);
     }
     fn cached(_: *anyopaque, a: Allocator, _: []const u8) ![]const u8 {
         return a.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[],\"cached\":true,\"cacheReady\":true}}");
@@ -39060,7 +39167,7 @@ fn reconnectTestApp(client: *ReconnectTestClient, a: Allocator, loop: *Loop) !Ap
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
     app.loop = loop;
-    app.client = .{ .ctx = client, .callFn = ReconnectTestClient.call, .cachedFn = ReconnectTestClient.cached };
+    app.client = .{ .ctx = client, .callFn = ReconnectTestClient.call, .cachedFn = ReconnectTestClient.cached, .callProgressFn = ReconnectTestClient.callProgress };
     app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"},{\"address\":\"work@example.com\"}]", .{}));
     app.account_index = 1;
     app.syncFailed(1, "InvalidGrant");
@@ -39182,11 +39289,14 @@ test "local UI: reconnect without a recorded grant explains setup and cannot sta
     try app.openReconnect(0);
     try reconnectSettle(&app);
     try std.testing.expectEqual(reconnect_ui.Phase.failed, app.reconnect.phase);
-    try std.testing.expectEqualStrings("[Close · Enter]", app.reconnect.primaryLabel());
+    try std.testing.expectEqualStrings("[Close · Enter]", app.reconnect.primaryLabel(false));
     try app.onKey(.{ .codepoint = Key.enter });
     try std.testing.expect(!app.reconnect.active());
     try std.testing.expectEqual(@as(usize, 0), client.commands("auth.authorize"));
-    try std.testing.expectError(error.UnknownAccount, app.onUxCommand("reconnect nobody@example.com"));
+    // An unknown address is a readable sentence, not an error code.
+    try std.testing.expect(try app.onUxCommand("reconnect nobody@example.com"));
+    try std.testing.expect(!app.reconnect.active());
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Not a configured account: nobody@example.com") != null);
 }
 
 test "local UI: reconnect is offered in help and the action palette with its real key" {
@@ -39201,4 +39311,141 @@ test "local UI: reconnect is offered in help and the action palette with its rea
 
 test {
     _ = @import("reconnect.zig");
+}
+
+fn reconnectTestLoop(a: Allocator, tty: *vaxis.Tty, vx: *vaxis.Vaxis) !*Loop {
+    const loop = try a.create(Loop);
+    loop.init(std.testing.io, a, tty, vx);
+    return loop;
+}
+
+test "local UI: reconnect after Google's callback ignores Esc and keeps the renewed sign-in" {
+    const a = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try reconnectTestLoop(a, &tty, &vx);
+    defer a.destroy(loop);
+    defer loop.deinit();
+    var client: ReconnectTestClient = .{ .finishing_gate = true };
+    var app = try reconnectTestApp(&client, a, loop);
+    defer app.deinit();
+    try app.openReconnect(null);
+    try reconnectSettle(&app);
+    try app.onKey(.{ .codepoint = Key.enter });
+    while (app.job.progress.snapshot().phase != .authorizing) try std.testing.io.sleep(.fromMilliseconds(5), .awake);
+    // Every cancel key waits for the stored result once Google has answered.
+    for ([_]Key{ .{ .codepoint = Key.escape }, .{ .codepoint = 'c', .mods = .{ .ctrl = true } }, .{ .codepoint = 'q' }, .{ .codepoint = Key.enter } }) |key| try app.onKey(key);
+    try std.testing.expect(app.reconnect.active());
+    try std.testing.expect(app.reconnect.finishing);
+    try std.testing.expect(app.job.future != null);
+    try std.testing.expect(std.mem.indexOf(u8, try app.reconnectBody(app.frame.allocator()), "Storing the renewed sign-in") != null);
+    try std.testing.expectEqualStrings("", app.reconnect.secondaryLabel(false));
+    try std.testing.expect(std.mem.indexOf(u8, app.rawHints(120), "Esc") == null);
+    client.released.store(true, .release);
+    try reconnectSettle(&app);
+    try std.testing.expect(!app.reconnect.active());
+    try std.testing.expectEqual(@as(usize, 1), client.commands("mail.refresh"));
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Reconnected work@example.com") != null);
+}
+
+test "local UI: a reconnect reply that finished as Esc arrived is used, never discarded" {
+    const a = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try reconnectTestLoop(a, &tty, &vx);
+    defer a.destroy(loop);
+    defer loop.deinit();
+    var client: ReconnectTestClient = .{};
+    var app = try reconnectTestApp(&client, a, loop);
+    defer app.deinit();
+    try app.openReconnect(null);
+    try reconnectSettle(&app);
+    try app.onKey(.{ .codepoint = Key.enter });
+    // The worker completed; the UI has not processed it yet when Esc lands.
+    app.job.future.?.await(app.io);
+    try app.onKey(.{ .codepoint = Key.escape });
+    try reconnectSettle(&app);
+    try std.testing.expect(!app.reconnect.active());
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Reconnect canceled") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Reconnected work@example.com") != null);
+    try std.testing.expectEqual(@as(usize, 1), client.commands("mail.refresh"));
+    try std.testing.expectEqual(@as(usize, 0), app.sync[1].error_len);
+}
+
+test "local UI: opening and cancelling reconnect never preempts work or drops queued intents" {
+    const a = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try reconnectTestLoop(a, &tty, &vx);
+    defer a.destroy(loop);
+    defer loop.deinit();
+    var client: ReconnectTestClient = .{};
+    var app = try reconnectTestApp(&client, a, loop);
+    defer app.deinit();
+    // A read-only refresh is running and other intents are queued.
+    client.hold_refresh.store(true, .release);
+    try app.refreshMailbox();
+    app.pending_list = true;
+    app.pending_contacts = true;
+    app.autosave_due = true;
+    try app.openReconnect(null);
+    try std.testing.expect(app.job.future != null and app.job.kind == .refresh);
+    try std.testing.expect(!app.reconnect.requested);
+    client.hold_refresh.store(false, .release);
+    try reconnectSettle(&app);
+    // The refresh finished normally, then the status read ran; the modal held
+    // every queued intent instead of dispatching or clearing it.
+    try std.testing.expectEqual(reconnect_ui.Phase.ready, app.reconnect.phase);
+    try std.testing.expectEqual(@as(usize, 1), client.commands("mail.refresh"));
+    try std.testing.expect(app.pending_list and app.pending_contacts and app.autosave_due);
+    try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.reconnect.active());
+    try std.testing.expect(app.pending_list and app.pending_contacts and app.autosave_due);
+    // Cancelling a pending status read keeps them too.
+    try app.openReconnect(null);
+    try std.testing.expect(app.job.future != null and app.job.kind == .auth_status);
+    try app.onKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expect(app.pending_list and app.pending_contacts and app.autosave_due);
+}
+
+test "local UI: Calendar Ctrl+O targets an account whose sign-in failed, never an offline one" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"},{\"address\":\"work@example.com\"},{\"address\":\"optional@example.com\"}]", .{}));
+    app.calendar.open = true;
+    try app.calendar.account.set("optional@example.com");
+    try app.calendar.list_errors[0].set("ConnectionRefused");
+    try app.calendar.list_errors[1].set("InvalidGrant");
+    try std.testing.expectEqual(@as(usize, 1), app.reconnectAccountFor());
+    app.calendar.list_errors[1] = .{};
+    // Only an offline account is missing: the calendar's own account, with
+    // wording that does not claim an expiry.
+    try std.testing.expectEqual(@as(usize, 2), app.reconnectAccountFor());
+}
+
+test "local UI: reconnect for a healthy account does not say the sign-in expired" {
+    const a = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try reconnectTestLoop(a, &tty, &vx);
+    defer a.destroy(loop);
+    defer loop.deinit();
+    var client: ReconnectTestClient = .{ .healthy = true };
+    var app = try reconnectTestApp(&client, a, loop);
+    defer app.deinit();
+    app.say(true, "Reconnect canceled · Google sign-in for work@example.com unchanged", .{});
+    try app.openReconnect(0);
+    // A notice from an earlier attempt does not stay under the new dialog.
+    try std.testing.expectEqual(@as(usize, 0), app.status_len);
+    try reconnectSettle(&app);
+    const body = try app.reconnectBody(app.frame.allocator());
+    try std.testing.expect(std.mem.indexOf(u8, body, "expired") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "No refusal of this sign-in is recorded") != null);
+    // An expired account's empty mailbox names the fix instead of Retry.
+    app.account_index = 1;
+    app.sync[1].state = .failed;
+    try std.testing.expectEqualStrings("No downloaded mail yet · Google sign-in expired · Ctrl+O Reconnect", try app.emptyListText());
 }

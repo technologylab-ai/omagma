@@ -293,10 +293,12 @@ reason and the permissions that will be kept. Nothing happens until you press
 **Enter** on **Reconnect**: Omagma then opens Google consent in that account's
 configured Chrome profile — sign in as that account and allow every requested
 permission — and shows `Waiting for Google consent in Chrome · Esc Cancel`.
-Esc cancels at any time and closes the local callback listener; the consent
-wait ends after three minutes. Declining, closing Chrome, signing in as another
-Google account or unchecking a permission stores nothing, and **Try again**
-starts a new consent. On success the new refresh token is stored in your
+Esc cancels while the dialog waits for Google and closes the local callback
+listener; the consent wait ends after three minutes. Once Google has answered,
+the dialog says `Google approved · storing the renewed sign-in…` and closes
+once it is stored; that step cannot be cancelled. Declining, closing Chrome,
+signing in as another Google account or unchecking a permission stores
+nothing, and **Try again** starts a new consent. On success the new refresh token is stored in your
 selected credential store (Secret Service, Keychain, private files or the
 encrypted vault, unchanged), and that account's mail and calendars refresh in
 the same TUI; no restart is needed.
@@ -312,9 +314,12 @@ here; the dialog says so.
 `invalid_rapt`, a re-authentication policy), a sanitized `description` and a
 `kind`: `reauthenticationRequired`, `expiredOrRevoked` (Google uses the same
 words for revoked access, password changes and a Testing-mode expiry) or
-`invalidGrant`. It never contains token material. Plaintext credential stores
-keep it in a private `terminal-auth-diagnostics.json` beside the grant
-registry; the encrypted vault keeps it only in the running backend.
+`invalidGrant`. It never contains token material. It describes only the
+current terminal grant, never the bar's read-only credential, and the grant's
+next verified refresh, a new authorization or `terminal-auth revoke` clears
+it. Plaintext credential stores keep it in a private
+`terminal-auth-diagnostics.json` beside the grant registry; the encrypted vault
+keeps it only in the running backend.
 
 ### Change permissions
 

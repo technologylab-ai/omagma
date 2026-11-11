@@ -306,6 +306,8 @@ const Server = struct {
         // Waiting for browser consent also ends when its requester goes away
         // (a TUI Cancel or an interrupted CLI): the listener closes and
         // nothing is stored, rather than holding the lane for 180 seconds.
+        // Once Google's callback has arrived it is no longer cancellable; see
+        // stillCommitting.
         if (meta.cancel_disconnect or std.mem.eql(u8, meta.command, "auth.authorize") or std.mem.eql(u8, meta.command, "draft.measure") or std.mem.eql(u8, meta.command, "draft.preview") or std.mem.eql(u8, meta.command, "draft.delivery-plan") or std.mem.eql(u8, meta.command, "draft.selection-plan") or std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
             try select.concurrent(.read_peer, waitReadPeer, .{ self.io, stream });
         while (true) switch (try select.await()) {
@@ -316,10 +318,12 @@ const Server = struct {
             },
             .timeout => |result| {
                 try result;
+                if (stillCommitting(meta.command, oauth_committing())) continue;
                 return error.Timeout;
             },
             .lock => |result| {
                 try result;
+                if (stillCommitting(meta.command, oauth_committing())) continue;
                 return error.VaultOperationCanceled;
             },
             .progress_writer => |result| {
@@ -335,9 +339,20 @@ const Server = struct {
                 // read. The Select defer joins execution before lane/key
                 // reuse; an admitted cache mutation remains UnknownOutcome.
                 result catch |err| if (err == error.Canceled) return err;
+                if (stillCommitting(meta.command, oauth_committing())) continue;
                 return error.VaultOperationCanceled;
             },
         };
+    }
+    fn oauth_committing() bool {
+        return @import("../oauth.zig").committing();
+    }
+    /// An authorization past Google's consent callback is exchanging and
+    /// storing an already issued credential. A disconnect, the execution budget
+    /// or a lock request then waits for its result instead of discarding it.
+    /// Before the callback (and for every other command) they end execution.
+    pub fn stillCommitting(command: []const u8, committing: bool) bool {
+        return committing and std.mem.eql(u8, command, "auth.authorize");
     }
     fn drainAndLock(self: *Server) !void {
         while (self.network_lane.load(.acquire)) try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(self.io);
@@ -1065,4 +1080,22 @@ test "vault progress: fixed sixteen-worker pool acknowledges submitting before G
     try std.testing.expectEqual(@as(usize, 16), runtime.workerCount());
     try std.testing.expectEqual(pool, runtime.threaded.worker_threads.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), runtime.io_meter.snapshot().rejectedAllocations);
+}
+
+test "reconnect vault daemon: consent ends on disconnect, timeout or lock only until Google's callback has arrived" {
+    try std.testing.expect(!Server.stillCommitting("auth.authorize", false));
+    try std.testing.expect(Server.stillCommitting("auth.authorize", true));
+    try std.testing.expect(!Server.stillCommitting("mail.refresh", true));
+    try std.testing.expect(!Server.stillCommitting("auth.status", true));
+    // The process-wide flag follows the commit: set at the callback, cleared
+    // by its owner after the durable writes.
+    const oauth = @import("../oauth.zig");
+    try std.testing.expect(!oauth.committing());
+    var commit: oauth.Commit = .{};
+    commit.begin(std.testing.io);
+    try std.testing.expect(oauth.committing());
+    try std.testing.expect(Server.stillCommitting("auth.authorize", oauth.committing()));
+    commit.end(std.testing.io);
+    try std.testing.expect(!oauth.committing());
+    try std.testing.expectEqual(@as(i64, 240), transport.executionSeconds("auth.authorize"));
 }

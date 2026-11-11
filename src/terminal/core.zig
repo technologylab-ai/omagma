@@ -289,23 +289,30 @@ pub const Session = struct {
             // Internal cached callers own a cancelable lifetime. Keep the
             // cancellation signal out of protocol normalization for that path.
             if (cached_only and err == error.Canceled) return err;
-            if (err == error.InvalidGrant) s.keepRefusal(a, req, account);
+            s.syncRefusal(a, req, account, err);
             return s.failureFor(out_allocator, a, id, account, req, reconciliationFailure(req, err));
         };
+        s.syncRefusal(a, req, account, null);
         // Requested views only reshape an already committed result; a shaping
         // failure returns the complete result instead of hiding a mutation.
         const shaped = @import("cli_view.zig").shape(a, req, data, resolved_date) catch data;
         return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, shaped);
     }
-    /// Google refused this account's stored sign-in. A plaintext store keeps
-    /// the sanitized reason beside its grant registry for later status reads;
-    /// the vault and fixtures keep it in this process only. Best-effort.
-    fn keepRefusal(s: *Session, a: std.mem.Allocator, req: Value, account: []const u8) void {
+    /// Keep the plaintext sidecar beside the grant registry in line with what
+    /// this process saw of the terminal grant's credential: persist a refusal,
+    /// and remove a persisted one after the first verified refresh. The bar's
+    /// read-only credential (barGrantOnly/auto) is never described; the vault
+    /// and fixtures keep their observation in this process only. Best-effort.
+    fn syncRefusal(s: *Session, a: std.mem.Allocator, req: Value, account: []const u8, outcome: ?anyerror) void {
         if (s.options.fixtures or s.config.credential_store == .vault or account.len == 0) return;
+        if ((j.boolean(req, "barGrantOnly", false) catch true) or (j.boolean(req, "auto", false) catch true)) return;
+        const diagnostics = @import("auth_diagnostic.zig");
+        const refused = if (outcome) |err| err == error.InvalidGrant else false;
+        if (!refused and !diagnostics.needsPersistedClear(account)) return;
         const grant_file = j.text(req, "grantFile");
         if (grant_file.len == 0) return;
-        const diagnostics = @import("auth_diagnostic.zig");
-        diagnostics.persist(s.io, a, diagnostics.sidecarPath(a, grant_file) catch return, account) catch {};
+        const sidecar = diagnostics.sidecarPath(a, grant_file) catch return;
+        if (refused) diagnostics.persist(s.io, a, sidecar, account) catch {} else diagnostics.clearPersisted(s.io, a, sidecar, account) catch {};
     }
     /// Error frame with field-level guidance from the request contract. Any
     /// failure to explain falls back to the plain stable code and sentence.
@@ -383,6 +390,9 @@ pub const Session = struct {
             error.ReconnectRequiresGrant => "This account has no recorded terminal grant to renew; authorize it with an explicit capability list instead",
             error.ReconnectCapabilitiesChanged => "Reconnect renews the recorded grant only: request exactly its recorded capabilities",
             error.GrantChanged => "The recorded grant changed since it was read; read auth.status again before reconnecting",
+            error.ReconnectRegistrationChanged => "Reconnect keeps the recorded OAuth registration: omit clientFile or pass the recorded grant.clientFile",
+            error.GrantDisabled => "This account's terminal grant is disabled; it cannot be reconnected",
+            error.FixtureConsentPageRequired => "Synthetic fixture consent opens only config fixtureConsentPage, never a browser",
             error.AuthorizationDenied => "Google consent was declined; nothing was changed",
             error.FollowUpMetadataUnavailableOffline => "Message metadata is no longer cached; reconnect to create this follow-up. Existing reminders remain available offline.",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
@@ -527,8 +537,8 @@ pub const Session = struct {
         try recipients.validateAddress(address);
         if ((j.text(req, "beforeMessageId").len != 0 or j.text(req, "afterMessageId").len != 0) and !try j.boolean(req, "cacheOnly", false) and !(std.mem.eql(u8, cmd, "mail.thread") and try j.boolean(req, "progressive", false))) return error.CacheWindowRequiresCached;
         if (std.mem.startsWith(u8, cmd, "auth.")) {
-            if (s.options.fixtures) return @import("auth.zig").runFixture(s.io, a, &s.config, s.options, s.cache_root, req);
-            const result = try @import("auth.zig").run(s.io, a, &s.config, s.env, req);
+            if (s.options.fixtures) return @import("auth.zig").runFixture(s.io, a, &s.config, s.options, s.cache_root, req, s.progress_sink);
+            const result = try @import("auth.zig").runWithProgress(s.io, a, &s.config, s.env, req, s.progress_sink);
             if (!std.mem.eql(u8, cmd, "auth.status")) if (s.config.runtime_access_cache) |cache| cache.invalidateAccount(index);
             return result;
         }
