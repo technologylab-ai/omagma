@@ -690,12 +690,21 @@ an invitation.
 On the selected event, or in its event card, `D` (or the Delete key) opens
 **Delete event?** and `r` opens **Your answer**. Both are also buttons on the
 selected row and in the card (`[D Delete]`, `[r RSVP]`, reachable with Tab,
-Enter activates) and entries in `Ctrl+P` actions. Neither key changes Calendar:
-the dialog first reads the latest version of the event, shows its calendar,
-account, time, your role and guests, and then waits for an explicit choice and
-a separate `y` (or its button). Esc, `q` or `n` close it without changing
-anything; in an untouched delete Enter is on **Esc Cancel**, as in Mail's Trash
-dialog.
+Enter activates) and entries in `Ctrl+P` actions (offered only when Ctrl+P was
+opened on the agenda with an event selected or on its card). Neither key
+changes Calendar: the dialog first reads the latest version of the event, shows
+its calendar, account, time, your role and guests, and then waits for an
+explicit choice and a separate `y` (or its button). Esc, `q` or `n` close it
+without changing anything; in an untouched delete Enter is on **Esc Cancel**, as
+in Mail's Trash dialog.
+
+`y`, Enter on the confirm button and a click act only when the event's title,
+time and calendar, the sentence saying what happens and the confirm button are
+all on screen together, and only once that step has been shown for a moment: a
+key typed ahead or the second click of a double click never confirms (the
+status asks to **press y again**). On a short terminal scroll (`Ctrl+D`/`Ctrl+U`,
+PgDn/PgUp) or enlarge it; a terminal too small for Calendar does not open the
+dialog. The mouse wheel only scrolls the dialog.
 
 - **Events you organize with guests**: choose **Email N guests a cancellation**
   or **Don't email the guests** first; the button then says exactly what `y`
@@ -704,7 +713,9 @@ dialog.
 - **Someone else's event** (an invitation or a copy in your calendar) is
   **removed from your calendar only**; the organizer's event stays for the
   other guests and Omagma sends no email. To tell the organizer you won't
-  attend, use `r` and Decline instead.
+  attend, use `r` and Decline instead. On a shared or delegated calendar the
+  dialog names that calendar (**Remove from this calendar?**): everyone who
+  sees it loses the event.
 - **Your answer**: `a` Accept, `m` Maybe or `x` Decline only *choose* (as do
   j/k and Enter on a row); `y` sends it once. The current answer is shown and
   cannot be resent. **Email my answer to the organizer** is on by default and
@@ -712,20 +723,25 @@ dialog.
   Events you organize have no RSVP (`r` says so); a private invitation copy is
   answered from its mail with `I`.
 - **Repeating events**: **This event only** (the default) or **All events in
-  the series**. *This and following* is not offered; `b` opens Google Calendar
-  for it. A series answer may leave occurrences you answered separately as they
-  were.
+  the series**. Each shows its own facts: the series shows its own title,
+  **Repeats daily · from …**, guests and answer, and switching scope asks again
+  whether to email the guests. *This and following* is not offered; `b` opens
+  Google Calendar for it. A series answer may leave occurrences you answered
+  separately as they were.
 
 The write is conditional on the version the dialog showed: if the event
 changed meanwhile, nothing is changed and the dialog says so. After a confirmed
-write the event disappears (or shows its new `?`/`~`/`×` mark) at once, the
-status reads **Deleted · title · time**, **Removed from your calendar · …** or
-**Declined · …**, and the range then refreshes from Google. If Calendar did not
-confirm the outcome, the dialog stays **unconfirmed**: `r` checks Calendar with
-reads only, `Ctrl+R` sends the identical request once more only after a check
-found the event unchanged, and `Ctrl+D` stops tracking it; each asks for its own
-`y`. An unconfirmed change survives a restart: pressing `D` or `r` on that
-event resumes it. Read-only calendars, locked or special events and a missing
+write the event disappears (or shows its new `?`/`~`/`×` mark, on every loaded
+occurrence for a series answer) at once, the status reads **Deleted · title ·
+time**, **Removed from Personal · …** or **Declined · … · Google was asked to
+email the organizer**, and the range then refreshes from Google (from a card,
+when the agenda shows again). If Calendar did not confirm the outcome, the
+dialog stays **unconfirmed**: `r` checks Calendar with reads only, `Ctrl+R`
+sends the identical request once more only after a check found the event
+unchanged, and `Ctrl+D` stops tracking it; each asks for its own `y`, placed
+on its own row so a double click on **Retry** lands on **Back**. An
+unconfirmed change survives a restart: pressing `D` or `r` on that event, or on
+any occurrence of a series it changed, resumes it. Read-only calendars, locked or special events and a missing
 Calendar write permission keep the action visible but disabled, with the
 reason; for the permission, Enter opens the same copyable authorization guide
 as the editor. See [deleting events and answering invitations](CALENDAR-EVENTS.md#delete-events-and-answer-invitations).
