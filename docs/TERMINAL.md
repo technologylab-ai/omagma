@@ -702,8 +702,9 @@ dialog.
   does (**[y Delete & email 2 guests]**, **[y Delete, no email]**). Without
   guests nobody is emailed. There is no undo.
 - **Someone else's event** (an invitation or a copy in your calendar) is
-  **removed from your calendar only**; the organizer and other guests are not
-  told. To tell the organizer you won't attend, use `r` and Decline instead.
+  **removed from your calendar only**; the organizer's event stays for the
+  other guests and Omagma sends no email. To tell the organizer you won't
+  attend, use `r` and Decline instead.
 - **Your answer**: `a` Accept, `m` Maybe or `x` Decline only *choose* (as do
   j/k and Enter on a row); `y` sends it once. The current answer is shown and
   cannot be resent. **Email my answer to the organizer** is on by default and

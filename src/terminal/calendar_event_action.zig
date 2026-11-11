@@ -226,7 +226,10 @@ pub fn consequence(a: std.mem.Allocator, prepared: Prepared, calendar_name: []co
     switch (prepared.action) {
         .delete => {
             const removed: []const u8 = if (prepared.scope == .series) "every event in this series" else if (prepared.recurring) "this occurrence" else "this event";
-            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event and other guests are not changed, and no email is sent.{s}", .{ removed, calendar_name, if (prepared.role == .attendee) @as([]const u8, " To tell the organizer you won't attend, decline it instead.") else "" });
+            // Google decides how an invitee's removal shows on the organizer's
+            // event; say only what Omagma controls.
+            if (prepared.role == .attendee) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event stays for the other guests and Omagma sends no email. To tell the organizer you won't attend, decline it instead.", .{ removed, calendar_name });
+            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event and its guests are not changed, and no email is sent.", .{ removed, calendar_name });
             if (prepared.guest_count == 0 and !prepared.guests_omitted) return std.fmt.allocPrint(a, "Deletes {s} from {s}. It has no guests, so no email is sent.", .{ what, calendar_name });
             const guests = if (prepared.guests_omitted) try a.dupe(u8, "its guests") else try std.fmt.allocPrint(a, "{d} guest{s}", .{ prepared.guest_count, plural(prepared.guest_count) });
             if (prepared.send_updates == .all) return std.fmt.allocPrint(a, "Deletes {s} from {s} and emails {s} a cancellation.", .{ what, calendar_name, guests });

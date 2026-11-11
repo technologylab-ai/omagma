@@ -20454,7 +20454,7 @@ const App = struct {
                     try rows.append(a, .{ .text = try std.fmt.allocPrint(a, "{s} Don't email the guests", .{radio(if (dialog.notify) |value| !value else false)}), .tone = .text, .control = .notify_no });
                 }
                 // Until the email choice is made, no sentence claims either outcome.
-                if (dialog.kind == .respond or dialog.notify != null) try rows.append(a, .{ .text = try dialog.consequence(a), .tone = .text });
+                if (if (dialog.kind == .respond) dialog.response != null else dialog.notify != null) try rows.append(a, .{ .text = try dialog.consequence(a), .tone = .text });
                 if (dialog.kind == .delete) try rows.append(a, .{ .text = "No undo: Omagma cannot restore it.", .tone = .muted });
                 if (dialog.blocker()) |why| if (why.len > 0) try rows.append(a, .{ .text = why, .tone = .offline });
             },

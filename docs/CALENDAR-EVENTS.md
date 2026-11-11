@@ -120,7 +120,7 @@ choices and one sentence stating exactly what will happen, for example
 | --- | --- | --- |
 | This calendar organizes the event and it has guests | Choose **Email N guests a cancellation** or **Don't email the guests** before `y` is available | No RSVP: `r` explains that organizers have nothing to answer |
 | Organized here, no guests | Deleted without email | No RSVP |
-| You are invited | **Removed from your calendar only**; the organizer is not told (decline instead) | `a` Accept, `m` Maybe, `x` Decline choose; `y` sends; the current answer cannot be resent |
+| You are invited | **Removed from your calendar only**; the organizer's event stays and Omagma sends no email (Google may still show the organizer that you removed it). To say you won't attend, decline instead | `a` Accept, `m` Maybe, `x` Decline choose; `y` sends; the current answer cannot be resent |
 | Someone else's event without your guest entry | Removed from this calendar only | Not invited: nothing to answer |
 | Repeating event | **This event only** (default) or **All events in the series** | the same two scopes |
 | Read-only calendar, locked, special (focus time, out of office, birthdays) or private copy | Disabled with the reason; `b` opens Google Calendar | Disabled with the reason; a private copy is answered from its mail (`I`) |

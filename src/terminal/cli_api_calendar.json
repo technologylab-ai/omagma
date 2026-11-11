@@ -733,7 +733,7 @@
       ],
       "notes": [
         "Returns action delete_event, role organizer|attendee|copy, scope, sendUpdates, eventId/expectedEtag, targetEventId/targetEtag (the If-Match version), summary, start, end, recurring, guestCount, organizer, consequence and reviewHash. Inspect consequence before calendar.event-apply with the same operationId and reviewHash.",
-        "role attendee or copy: only this calendar's copy is removed; the organizer's event and other guests are unchanged and no email is sent. To tell the organizer you will not attend, use calendar.event-respond-review with response declined instead.",
+        "role attendee or copy: only this calendar's copy is removed and Omagma sends no email; the organizer's event stays for the other guests. To tell the organizer you will not attend, use calendar.event-respond-review with response declined instead.",
         "Refused with a stable code: CalendarReadOnly, CalendarWritePermissionRequired, CalendarEventLocked, CalendarPrivateCopy, CalendarSpecialEvent, CalendarEventCancelled, CalendarSeriesScopeRequired (eventId is a series master), CalendarNotRecurring, CalendarNotificationUnavailable, CalendarReviewStale, CalendarOperationPending.",
         "Apply, reconcile, retry and archive use calendar.event-apply, calendar.event-reconcile, calendar.event-retry and calendar.event-abandon. A deletion is proven when Google reports the event cancelled; a missing event stays unknown. No undo is offered."
       ],
