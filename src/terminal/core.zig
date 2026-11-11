@@ -312,7 +312,7 @@ pub const Session = struct {
         const grant_file = j.text(req, "grantFile");
         if (grant_file.len == 0) return;
         const sidecar = diagnostics.sidecarPath(a, grant_file) catch return;
-        if (refused) diagnostics.persist(s.io, a, sidecar, account) catch {} else diagnostics.clearPersisted(s.io, a, sidecar, account) catch {};
+        if (refused) diagnostics.persist(s.io, a, sidecar, account) catch {} else diagnostics.markOk(s.io, a, sidecar, account, false) catch {};
     }
     /// Error frame with field-level guidance from the request contract. Any
     /// failure to explain falls back to the plain stable code and sentence.
@@ -330,6 +330,13 @@ pub const Session = struct {
             count += 1;
         };
         var detail = @import("cli_contract.zig").explain(a, req, code, message, configured[0..count]) catch return failure(out, id, account, code, message);
+        // An authorization that failed after Google's callback names the
+        // underlying error (an identifier, never provider text).
+        if ((std.mem.eql(u8, code, "TokenExchangeFailed") or std.mem.eql(u8, code, "SignInStoreUnconfirmed")) and detail == .object) {
+            var cause: [64]u8 = undefined;
+            const name = @import("../oauth.zig").takeCommitCause(&cause);
+            if (name.len != 0) detail.object.put(a, "cause", .{ .string = try a.dupe(u8, name) }) catch {};
+        }
         // Name the exact unconfirmed write that refused this request, so a
         // client opens that one (event-pending operationId) without guessing.
         if (std.mem.eql(u8, code, "CalendarOperationPending") and s.calendar_blocked.len != 0 and detail == .object) {
@@ -390,10 +397,12 @@ pub const Session = struct {
             error.ReconnectRequiresGrant => "This account has no recorded terminal grant to renew; authorize it with an explicit capability list instead",
             error.ReconnectCapabilitiesChanged => "Reconnect renews the recorded grant only: request exactly its recorded capabilities",
             error.GrantChanged => "The recorded grant changed since it was read; read auth.status again before reconnecting",
-            error.ReconnectRegistrationChanged => "Reconnect keeps the recorded OAuth registration: omit clientFile or pass the recorded grant.clientFile",
+            error.ReconnectRegistrationChanged => "Reconnect keeps the recorded OAuth registration: the client file must hold the grant's clientId; omit clientFile to use the recorded one",
             error.GrantDisabled => "This account's terminal grant is disabled; it cannot be reconnected",
             error.FixtureConsentPageRequired => "Synthetic fixture consent opens only config fixtureConsentPage, never a browser",
             error.AuthorizationDenied => "Google consent was declined; nothing was changed",
+            error.TokenExchangeFailed => "Google approved, but exchanging the approval for a sign-in failed; nothing was stored. Try again",
+            error.SignInStoreUnconfirmed => "Google approved, but storing the sign-in could not be confirmed; check with terminal-auth status or try the account before authorizing again",
             error.FollowUpMetadataUnavailableOffline => "Message metadata is no longer cached; reconnect to create this follow-up. Existing reminders remain available offline.",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",
@@ -2673,7 +2682,7 @@ pub const Session = struct {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
         // Every synthetic provider read refuses an expired sign-in, as Google's
         // token endpoint would; cached reads never come through here.
-        if (try @import("fixture_auth.zig").expired(s.io, a, s.options, &s.config, s.cache_root, address)) return @import("fixture_auth.zig").refuse(s.io, a, address);
+        try @import("fixture_auth.zig").check(s.io, a, s.options, &s.config, s.cache_root, address);
         if (s.options.fixture_root) |root| {
             const key = if (std.mem.eql(u8, address, "personal@example.com")) "personal" else if (std.mem.eql(u8, address, "work@example.com")) "work" else if (std.mem.eql(u8, address, "optional@example.com")) "optional" else return error.FixtureAccountRequired;
             const directory = try std.Io.Dir.cwd().openDir(s.io, root, .{});

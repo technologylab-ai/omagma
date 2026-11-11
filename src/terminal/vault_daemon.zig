@@ -151,7 +151,7 @@ const Server = struct {
     fn executeInto(self: *Server, raw: []const u8, output: *?[]const u8, progress: ?*ProgressWriter) !void {
         output.* = try self.owner.executeWithProgress(@import("send_memory.zig").operationBacking(self.a, raw, false), raw, if (progress) |writer| writer.sink() else null);
     }
-    const ExecutionEvent = union(enum) { operation: anyerror!void, timeout: anyerror!void, lock: std.Io.Cancelable!void, read_peer: anyerror!void, progress_writer: anyerror!void };
+    const ExecutionEvent = union(enum) { operation: anyerror!void, timeout: anyerror!void, lock: std.Io.Cancelable!void, read_peer: anyerror!void, progress_writer: anyerror!void, commit_grace: anyerror!void };
     const ProgressWriteGate = struct {
         entered: std.Io.Event = .unset,
         release: std.Io.Event = .unset,
@@ -282,7 +282,7 @@ const Server = struct {
         var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
         const meta = try transport.requestMetadata(fixed.allocator(), frame.body);
         const Event = ExecutionEvent;
-        var events: [5]Event = undefined;
+        var events: [6]Event = undefined;
         var select: std.Io.Select(Event) = .init(self.io, &events);
         var budget = @import("send_budget.zig").Budget.init(self.io, transport.executionSeconds(meta.command));
         var progress_writer: ProgressWriter = .{ .io = self.io, .stream = stream, .completion = &select.queue, .enabled = meta.progress, .execution_budget = &budget };
@@ -310,6 +310,11 @@ const Server = struct {
         // stillCommitting.
         if (meta.cancel_disconnect or std.mem.eql(u8, meta.command, "auth.authorize") or std.mem.eql(u8, meta.command, "draft.measure") or std.mem.eql(u8, meta.command, "draft.preview") or std.mem.eql(u8, meta.command, "draft.delivery-plan") or std.mem.eql(u8, meta.command, "draft.selection-plan") or std.mem.eql(u8, meta.command, "mail.refresh") or std.mem.eql(u8, meta.command, "calendar.list") or std.mem.eql(u8, meta.command, "calendar.agenda"))
             try select.concurrent(.read_peer, waitReadPeer, .{ self.io, stream });
+        // A disconnect, the budget or a lock that arrives while an
+        // authorization is committing waits for it, but only for a bounded
+        // grace: the commit's own bound ends it first, so the grace firing
+        // means its outcome cannot be confirmed.
+        var grace_armed = false;
         while (true) switch (try select.await()) {
             .operation => |result| {
                 try finishProgressWriter(self.io, &progress_writer, &writer_future, progress_stream_safe);
@@ -318,13 +323,17 @@ const Server = struct {
             },
             .timeout => |result| {
                 try result;
-                if (stillCommitting(meta.command, oauth_committing())) continue;
+                if (try self.awaitCommit(&select, meta.command, &grace_armed)) continue;
                 return error.Timeout;
             },
             .lock => |result| {
                 try result;
-                if (stillCommitting(meta.command, oauth_committing())) continue;
+                if (try self.awaitCommit(&select, meta.command, &grace_armed)) continue;
                 return error.VaultOperationCanceled;
+            },
+            .commit_grace => |result| {
+                try result;
+                if (commitWait(meta.command, oauth_committing(), true) != .stop) return error.SignInStoreUnconfirmed;
             },
             .progress_writer => |result| {
                 result catch {
@@ -339,13 +348,36 @@ const Server = struct {
                 // read. The Select defer joins execution before lane/key
                 // reuse; an admitted cache mutation remains UnknownOutcome.
                 result catch |err| if (err == error.Canceled) return err;
-                if (stillCommitting(meta.command, oauth_committing())) continue;
+                if (try self.awaitCommit(&select, meta.command, &grace_armed)) continue;
                 return error.VaultOperationCanceled;
             },
         };
     }
     fn oauth_committing() bool {
         return @import("../oauth.zig").committing();
+    }
+    /// Whether an ending event must wait for a committing authorization; arms
+    /// the commit grace on the first such wait.
+    fn awaitCommit(self: *Server, select: *std.Io.Select(ExecutionEvent), command: []const u8, grace_armed: *bool) !bool {
+        switch (commitWait(command, oauth_committing(), grace_armed.*)) {
+            .stop => return false,
+            .wait => return true,
+            .arm_and_wait => {
+                grace_armed.* = true;
+                try select.concurrent(.commit_grace, commitGrace, .{self.io});
+                return true;
+            },
+        }
+    }
+    fn commitGrace(io: std.Io) anyerror!void {
+        try io.sleep(.fromSeconds(commit_grace_seconds), .awake);
+    }
+    /// Longer than the commit's own bound, so it is the last resort.
+    pub const commit_grace_seconds = @import("../oauth.zig").commit_seconds + 10;
+    pub const CommitWait = enum { stop, wait, arm_and_wait };
+    pub fn commitWait(command: []const u8, committing: bool, grace_armed: bool) CommitWait {
+        if (!stillCommitting(command, committing)) return .stop;
+        return if (grace_armed) .wait else .arm_and_wait;
     }
     /// An authorization past Google's consent callback is exchanging and
     /// storing an already issued credential. A disconnect, the execution budget
@@ -1092,10 +1124,20 @@ test "reconnect vault daemon: consent ends on disconnect, timeout or lock only u
     const oauth = @import("../oauth.zig");
     try std.testing.expect(!oauth.committing());
     var commit: oauth.Commit = .{};
-    commit.begin(std.testing.io);
+    try commit.begin(std.testing.io);
     try std.testing.expect(oauth.committing());
     try std.testing.expect(Server.stillCommitting("auth.authorize", oauth.committing()));
     commit.end(std.testing.io);
     try std.testing.expect(!oauth.committing());
     try std.testing.expectEqual(@as(i64, 240), transport.executionSeconds("auth.authorize"));
+}
+
+test "reconnect vault daemon: a commit is awaited only for a re-armed, bounded grace" {
+    // The first ending event during a commit arms the grace; later ones wait.
+    try std.testing.expectEqual(Server.CommitWait.arm_and_wait, Server.commitWait("auth.authorize", true, false));
+    try std.testing.expectEqual(Server.CommitWait.wait, Server.commitWait("auth.authorize", true, true));
+    try std.testing.expectEqual(Server.CommitWait.stop, Server.commitWait("auth.authorize", false, true));
+    try std.testing.expectEqual(Server.CommitWait.stop, Server.commitWait("mail.refresh", true, false));
+    // The grace outlasts the commit's own bound, which ends the commit first.
+    try std.testing.expect(Server.commit_grace_seconds > @import("../oauth.zig").commit_seconds);
 }

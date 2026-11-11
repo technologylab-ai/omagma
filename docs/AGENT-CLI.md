@@ -100,12 +100,16 @@ fails the same way. `auth.status` then reports `lastRefreshError`, for example
 project's seven-day limit, which Google words identically) or
 `invalidGrant`; `null` means no refusal of the recorded terminal grant is
 known. The description is sanitized, printable ASCII of at most 160 bytes with
-token-like runs replaced by `[redacted]`; no field contains token material.
-Only refusals of the current terminal grant (by `grant.grantId`) are reported,
-never the bar's read-only credential. Plaintext credential stores keep the last
-refusal beside the grant registry for later processes; the encrypted vault
-keeps it in the running backend only. The grant's next verified refresh,
-authorization or `auth.revoke` clears it.
+credential-shaped runs (known token prefixes, long mixed-case or hex runs)
+replaced by `[redacted]`; ordinary words and help URLs stay readable, and no
+field contains token material. Only refusals of the current terminal grant
+(by `grant.grantId`) are reported, never the bar's read-only credential.
+`grantId` names the capability set, so a reconnect keeps it: a refusal is
+reported only while it is newer than the grant's latest verified refresh or
+authorization in any process (a request that still used a replaced token
+cannot outdate a reconnect). Plaintext credential stores keep this beside the
+grant registry, under a lock, for later and concurrent processes; the
+encrypted vault keeps it in the running backend only. `auth.revoke` removes it.
 
 Reconnecting needs the user's browser consent, so ask the user first. The user
 can press Ctrl+O in the TUI. From an agent context, read `auth.status`, then
@@ -118,17 +122,25 @@ send `auth.authorize` with `reconnect:true`, exactly `grant.capabilities` and
 
 A different capability set fails with `ReconnectCapabilitiesChanged`, a grant
 changed since the read with `GrantChanged`, a malformed `expectedGrantId` with
-`InvalidRequest`, a `clientFile` other than the recorded registration with
-`ReconnectRegistrationChanged`, a disabled grant with `GrantDisabled` and an
-account without a recorded terminal grant with `ReconnectRequiresGrant`, all
-before consent. Consent then
-fails with `AuthorizationDenied`, `WrongAccount` (another Google account signed
-in), `UnexpectedScope` (a requested permission was unchecked) or `Timeout`
-after 180 seconds, storing nothing. Once Google's callback has arrived, the
-exchange and storage complete even if the request is cancelled. Success
-returns `reconnected:true` and
-clears `lastRefreshError`; an already open session uses the renewed credential
-for its next request without a restart.
+`InvalidRequest`, a registration file whose client ID is not the grant's
+`clientId` (an explicit `clientFile`, or another registration now at the
+recorded path) with `ReconnectRegistrationChanged`, a disabled grant with
+`GrantDisabled` and an account without a recorded terminal grant with
+`ReconnectRequiresGrant`, all before consent. Another spelling of the same
+registration file (a symlink, a relative path) is accepted.
+
+While waiting for consent the request fails with `AuthorizationDenied` or
+`Timeout` (no answer within 180 seconds), storing nothing. Once Google's
+callback has arrived, a cancellation or disconnect no longer stops it: the
+exchange, the identity check and the store finish within 25 seconds. A failure
+then says how far it got. `WrongAccount` (another Google account signed in),
+`UnexpectedScope` (a requested permission was unchecked) and
+`TokenExchangeFailed` stored nothing. `SignInStoreUnconfirmed` means the store
+began and its outcome is unknown: check `auth.status` or one read of the
+account before authorizing again. Both name the underlying error in `cause`.
+Success returns `reconnected:true` and outdates `lastRefreshError`; an already
+open session uses the renewed credential for its next request without a
+restart.
 
 ## CLI and TUI coverage
 

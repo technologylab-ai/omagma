@@ -14,6 +14,7 @@ const io = std.testing.io;
 const account = "self@example.test";
 const client_id = "synthetic-reconnect.apps.googleusercontent.com";
 const client_json = "{\"installed\":{\"client_id\":\"synthetic-reconnect.apps.googleusercontent.com\",\"client_secret\":\"synthetic-reconnect-secret\"}}";
+const other_client_json = "{\"installed\":{\"client_id\":\"synthetic-other.apps.googleusercontent.com\",\"client_secret\":\"synthetic-other-secret\"}}";
 const recorded = [_][]const u8{ "mail-read", "mail-send", "contacts-read", "calendar-read" };
 const fresh_refresh = "synthetic-renewed-refresh";
 
@@ -140,6 +141,8 @@ const Oracle = struct {
     exchange_entered: std.atomic.Value(bool) = .init(false),
     /// A refresh of the stored token is refused like Google's invalid_rapt.
     refuse_refresh: std.atomic.Value(bool) = .init(false),
+    /// The code exchange fails (a token endpoint outage after consent).
+    fail_exchange: std.atomic.Value(bool) = .init(false),
     fn run(self: *Oracle) anyerror!void {
         while (true) {
             const stream = try self.listener.accept(io);
@@ -175,6 +178,10 @@ const Oracle = struct {
                 _ = self.exchanges.fetchAdd(1, .acq_rel);
                 self.exchange_entered.store(true, .release);
                 while (self.hold_exchange.load(.acquire)) try io.sleep(.fromMilliseconds(5), .awake);
+                if (self.fail_exchange.load(.acquire)) {
+                    try request.respond("{\"error\":\"internal_failure\"}", .{ .status = .internal_server_error, .keep_alive = false });
+                    return;
+                }
                 try std.testing.expect(std.mem.indexOf(u8, form, "grant_type=authorization_code") != null);
                 try std.testing.expect(std.mem.indexOf(u8, form, "code=synthetic-code") != null);
                 const at = (std.mem.indexOf(u8, form, "code_verifier=") orelse return error.MissingVerifier) + "code_verifier=".len;
@@ -195,6 +202,11 @@ const Oracle = struct {
 const Vault = struct {
     registry: []const u8,
     applies: usize = 0,
+    /// The recorded registration name now holds another registration.
+    replaced: bool = false,
+    fail_apply: ?anyerror = null,
+    /// The durable write hangs (until the commit bound cancels it).
+    block_apply: bool = false,
     saved_registry: [4096]u8 = undefined,
     saved_registry_len: usize = 0,
     token: [128]u8 = undefined,
@@ -203,12 +215,14 @@ const Vault = struct {
         const self: *Vault = @ptrCast(@alignCast(context));
         return switch (kind) {
             .grants => self.registry,
-            .desktop_client => if (std.mem.eql(u8, key.name, "synthetic-terminal-client")) client_json else null,
+            .desktop_client => if (std.mem.eql(u8, key.name, "synthetic-terminal-client")) (if (self.replaced) other_client_json else client_json) else if (std.mem.eql(u8, key.name, "same-registration-copy")) client_json else if (std.mem.eql(u8, key.name, "another-registration")) other_client_json else null,
             else => null,
         };
     }
     fn apply(context: *anyopaque, changes: []const native.Change) !void {
         const self: *Vault = @ptrCast(@alignCast(context));
+        if (self.block_apply) while (true) try io.sleep(.fromMilliseconds(5), .awake);
+        if (self.fail_apply) |err| return err;
         self.applies += 1;
         for (changes) |change| {
             if (change.kind == .grants) {
@@ -322,9 +336,13 @@ test "reconnect auth: a narrower, broader, changed or re-registered grant is ref
     // A malformed identity is a malformed request, not a changed grant.
     try std.testing.expectError(error.InvalidRequest, setup.authorize(&recorded, "x"));
     try std.testing.expectError(error.InvalidRequest, setup.authorize(&recorded, "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"));
-    // Reconnect never switches the OAuth registration.
+    // Reconnect never switches the OAuth registration: neither an explicit
+    // other one, nor another registration put at the recorded path.
     var moved = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .reconnect = true, .clientFile = "another-registration" });
     try std.testing.expectError(error.ReconnectRegistrationChanged, auth.run(io, a, setup.config, &setup.env, moved));
+    setup.vault.replaced = true;
+    try std.testing.expectError(error.ReconnectRegistrationChanged, setup.authorize(&recorded, &setup.grant_id));
+    setup.vault.replaced = false;
     moved = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .expectedGrantId = &setup.grant_id });
     try std.testing.expectError(error.ExpectedGrantRequiresReconnect, auth.run(io, a, setup.config, &setup.env, moved));
     try Consent.finish();
@@ -363,6 +381,83 @@ test "reconnect auth: denial, a different Google account and a narrowed grant st
     try std.testing.expectEqual(@as(usize, 2), setup.oracle.exchanges.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
     try std.testing.expect(!oauth.committing());
+}
+
+test "reconnect auth: the same registration under another spelling is accepted" {
+    var setup: Setup = undefined;
+    try setup.init(true);
+    defer setup.deinit();
+    const a = setup.arena.allocator();
+    for ([_][]const u8{ "same-registration-copy", "synthetic-terminal-client/", "synthetic-terminal-client//" }) |spelling| {
+        Consent.reset(.deny);
+        const request = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .reconnect = true, .clientFile = spelling, .expectedGrantId = &setup.grant_id });
+        // Consent opened with the recorded registration, then was declined.
+        try std.testing.expectError(error.AuthorizationDenied, auth.run(io, a, setup.config, &setup.env, request));
+        try Consent.finish();
+        try std.testing.expectEqual(@as(usize, 1), Consent.opened);
+        try std.testing.expectEqualStrings(client_id, Consent.client[0..Consent.client_len]);
+    }
+}
+
+test "reconnect auth: a failure after Google's callback says whether anything may have been stored" {
+    var setup: Setup = undefined;
+    try setup.init(true);
+    defer setup.deinit();
+    var cause: [64]u8 = undefined;
+    // The token endpoint fails after consent: nothing was stored.
+    setup.oracle.fail_exchange.store(true, .release);
+    Consent.reset(.approve);
+    try std.testing.expectError(error.TokenExchangeFailed, setup.authorize(&recorded, &setup.grant_id));
+    try Consent.finish();
+    try std.testing.expect(oauth.takeCommitCause(&cause).len > 0);
+    try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
+    setup.oracle.fail_exchange.store(false, .release);
+    // The durable write fails: whether it landed is unknown.
+    setup.vault.fail_apply = error.AccessDenied;
+    Consent.reset(.approve);
+    try std.testing.expectError(error.SignInStoreUnconfirmed, setup.authorize(&recorded, &setup.grant_id));
+    try Consent.finish();
+    try std.testing.expectEqualStrings("AccessDenied", oauth.takeCommitCause(&cause));
+    setup.vault.fail_apply = null;
+    // A hung durable write is ended by the commit bound, not waited on.
+    oauth.TestBound.ms = 300;
+    defer oauth.TestBound.ms = null;
+    setup.vault.block_apply = true;
+    Consent.reset(.approve);
+    const started = std.Io.Timestamp.now(io, .awake).toMilliseconds();
+    try std.testing.expectError(error.SignInStoreUnconfirmed, setup.authorize(&recorded, &setup.grant_id));
+    try Consent.finish();
+    try std.testing.expect(std.Io.Timestamp.now(io, .awake).toMilliseconds() - started < 5000);
+    try std.testing.expectEqualStrings("Timeout", oauth.takeCommitCause(&cause));
+    try std.testing.expect(!oauth.committing());
+}
+
+test "reconnect auth: an in-process canceller and Google's callback cannot both win" {
+    var setup: Setup = undefined;
+    try setup.init(true);
+    defer setup.deinit();
+    const a = setup.arena.allocator();
+    const types = @import("types.zig");
+    const Quiet = struct {
+        fn report(_: *anyopaque, _: types.FetchProgress) void {}
+    };
+    var context: u8 = 0;
+    const request = try j.value(a, .{ .cmd = "auth.authorize", .account = account, .capabilities = &recorded, .reconnect = true, .expectedGrantId = &setup.grant_id });
+    // The canceller won before the callback: the commit never starts.
+    var gate: std.atomic.Value(u8) = .init(oauth.gate_canceled);
+    Consent.reset(.approve);
+    try std.testing.expectError(error.Canceled, auth.runWithProgress(io, a, setup.config, &setup.env, request, .{ .ctx = &context, .reportFn = Quiet.report, .commit_gate = &gate }));
+    try Consent.finish();
+    try std.testing.expectEqual(@as(usize, 0), setup.oracle.exchanges.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), setup.vault.applies);
+    try std.testing.expect(!oauth.committing());
+    // The callback won: the commit completes and a later cancel cannot claim the gate.
+    gate.store(oauth.gate_open, .release);
+    Consent.reset(.approve);
+    _ = try auth.runWithProgress(io, a, setup.config, &setup.env, request, .{ .ctx = &context, .reportFn = Quiet.report, .commit_gate = &gate });
+    try Consent.finish();
+    try std.testing.expect(gate.cmpxchgStrong(oauth.gate_open, oauth.gate_canceled, .acq_rel, .acquire) != null);
+    try std.testing.expectEqual(@as(usize, 1), setup.vault.applies);
 }
 
 const Authorization = struct {
@@ -423,9 +518,13 @@ test "reconnect auth: fixture consent checks PKCE and identity, times out and ca
     Consent.reset(.fixture_other);
     try std.testing.expectError(error.WrongAccount, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null));
     try Consent.finish();
+    // A code the token exchange refuses arrives after Google's callback:
+    // nothing was stored, and the underlying refusal is named.
     Consent.reset(.fixture_bad_pkce);
-    try std.testing.expectError(error.InvalidGrant, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null));
+    try std.testing.expectError(error.TokenExchangeFailed, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, platform.seconds(5), null));
     try Consent.finish();
+    var cause: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("InvalidGrant", oauth.takeCommitCause(&cause));
     // A closed browser never calls back: the bounded wait ends cleanly.
     Consent.reset(.ignore);
     try std.testing.expectError(error.Timeout, oauth.authorizeFixture(io, account, "Synthetic Profile", "/nonexistent/consent-page", &scopes, .{ .clock = .awake, .raw = .fromMilliseconds(200) }, null));
@@ -587,13 +686,16 @@ test "reconnect auth: production sessions persist only the terminal grant's refu
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, sidecar, .{}));
     try std.testing.expectEqual(auth_diagnostic.Observed.unknown, auth_diagnostic.observed(account).observed);
     // Refused again, then the grant works again (re-authorized elsewhere):
-    // the first verified refresh removes the persisted reason for every process.
+    // the first verified refresh outdates the persisted reason for every process.
     _ = try session.execute(a, labels);
     _ = try std.Io.Dir.cwd().statFile(io, sidecar, .{});
     oracle.refuse_refresh.store(false, .release);
     const recovered = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, labels), .{});
     try std.testing.expect(try j.boolean(recovered, "ok", false));
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, sidecar, .{}));
+    var kept: [2048]u8 = undefined;
+    const row = try std.Io.Dir.cwd().readFile(io, sidecar, &kept);
+    try std.testing.expect(std.mem.indexOf(u8, row, "invalid_grant") == null);
+    try std.testing.expect(std.mem.indexOf(u8, row, "\"okAt\":") != null);
     auth_diagnostic.reset();
     const clean = try std.json.parseFromSliceLeaky(j.Value, a, try session.execute(a, status), .{});
     try std.testing.expect(j.get(j.get(clean, "data").?, "lastRefreshError").? == .null);

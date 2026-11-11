@@ -176,7 +176,7 @@ pub const Host = struct {
         if (commands.localRequest(request)) return commands.dispatch(local, request, inputs);
         if (try j.boolean(request, "cacheOnly", false)) return cached.dispatch(self.allocator, transport.grants(), store, request, inputs, "");
         // An expired synthetic sign-in refuses provider reads, as Google would.
-        if (try @import("fixture_auth.zig").expired(self.io, self.allocator, self.options, self.config, self.cache_root, store.account)) return @import("fixture_auth.zig").refuse(self.io, self.allocator, store.account);
+        try @import("fixture_auth.zig").check(self.io, self.allocator, self.options, self.config, self.cache_root, store.account);
         if (std.mem.eql(u8, self.options.fixture_scenario, "calendar-offline")) {
             if (std.mem.eql(u8, j.text(request, "cmd"), "calendar.event-pending")) return commands.dispatch(local, request, inputs);
             return self.offlineFallback(request, transport.grants(), store, inputs, error.ConnectionRefused);

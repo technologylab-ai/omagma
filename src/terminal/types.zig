@@ -93,6 +93,10 @@ pub const ProgressSink = struct {
     /// fence. A transport may wait for that final frame; reportFn never waits.
     beforeMailFn: ?*const fn (*anyopaque) anyerror!void = null,
     execution_budget: ?*@import("send_budget.zig").Budget = null,
+    /// In-process authorization only (the TUI): the cancel/commit gate of
+    /// oauth.Commit, so a canceller and Google's callback cannot both win.
+    /// Never crosses a process boundary.
+    commit_gate: ?*std.atomic.Value(u8) = null,
     pub fn beforeMail(self: ProgressSink) !void {
         if (self.beforeMailFn) |function| try function(self.ctx);
     }
