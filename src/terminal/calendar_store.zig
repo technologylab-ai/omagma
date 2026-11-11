@@ -298,7 +298,8 @@ pub const Host = struct {
     }
     /// The unknown event write to resume for `event_id`: one on the event
     /// itself, on its series (from any occurrence) or, for a series, on one
-    /// of its occurrences. An empty ID finds any unknown edit or action.
+    /// of its occurrences. An empty ID finds an unknown creation (which has
+    /// no provider event yet).
     pub fn loadPending(self: *Host, out: std.mem.Allocator, target: t.Target, event_id: []const u8) !?svc.Pending {
         try self.check(target);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -315,7 +316,7 @@ pub const Host = struct {
             const operation = entry.state.operation orelse continue;
             if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
             const review = entry.review orelse continue;
-            if (!review.journaledEvent() or operation.intent.kind == .insert_event) continue;
+            if (!review.journaledEvent() or operation.intent.kind != .insert_event) continue;
             return try clone(svc.Pending, out, .{ .review = review, .operation = operation });
         }
         return null;
