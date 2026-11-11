@@ -45,19 +45,38 @@ pub const Prepared = struct {
     guest_count: usize = 0,
     guests_omitted: bool = false,
     organizer: []const u8 = "",
+    /// The series the selected occurrence belongs to (its master's ID).
+    series_event_id: []const u8 = "",
+    /// For the series scope: how the series repeats ("Repeats daily").
+    recurrence: []const u8 = "",
+    /// The account's own calendar (primary or named by the account). On a
+    /// shared or delegated calendar the calendar, not "you", organizes,
+    /// attends and loses the event.
+    own_calendar: bool = true,
+};
+
+/// The facts a dialog shows for the whole series, read from the series
+/// itself: an occurrence can have its own guests, answer and time.
+pub const SeriesFacts = struct {
+    available: bool = false,
+    reason: []const u8 = "",
+    eventId: []const u8 = "",
+    etag: []const u8 = "",
+    summary: []const u8 = "",
+    role: []const u8 = "",
+    guestCount: usize = 0,
+    guestsOmitted: bool = false,
+    response: []const u8 = "",
+    attendee: []const u8 = "",
+    organizer: []const u8 = "",
+    start: ?t.time.Point = null,
+    end: ?t.time.Point = null,
+    recurrence: []const u8 = "",
 };
 
 /// What the caller may choose besides the reviewed request. Never persisted.
 pub const Options = struct {
-    series: struct {
-        available: bool = false,
-        reason: []const u8 = "",
-        eventId: []const u8 = "",
-        etag: []const u8 = "",
-        summary: []const u8 = "",
-        guestCount: usize = 0,
-        response: []const u8 = "",
-    } = .{},
+    series: SeriesFacts = .{},
     /// delete: email guests a cancellation. respond: email the organizer.
     notify: struct { available: bool = false, reason: []const u8 = "", recipients: []const u8 = "" } = .{},
     thisAndFollowing: struct { available: bool = false, reason: []const u8 = "not_supported" } = .{},
@@ -80,6 +99,68 @@ pub fn wire(response: Response) []const u8 {
 pub fn isSeries(document: p.EventDocument) bool {
     const rules = j.get(document.value, "recurrence") orelse return false;
     return rules != .array or rules.array.items.len != 0;
+}
+
+/// A short word for how a series repeats, from its first RRULE frequency.
+/// The exact rules stay in Google Calendar; this only names the series.
+pub fn recurrenceLabel(document: p.EventDocument) []const u8 {
+    const rules = j.get(document.value, "recurrence") orelse return "";
+    if (rules != .array) return "Repeats";
+    for (rules.array.items) |rule| {
+        if (rule != .string or !std.ascii.startsWithIgnoreCase(rule.string, "RRULE:")) continue;
+        var parts = std.mem.splitScalar(u8, rule.string["RRULE:".len..], ';');
+        while (parts.next()) |part| if (std.ascii.startsWithIgnoreCase(part, "FREQ=")) {
+            const frequency = part["FREQ=".len..];
+            for ([_][2][]const u8{ .{ "DAILY", "Repeats daily" }, .{ "WEEKLY", "Repeats weekly" }, .{ "MONTHLY", "Repeats monthly" }, .{ "YEARLY", "Repeats yearly" } }) |pair| if (std.ascii.eqlIgnoreCase(frequency, pair[0])) return pair[1];
+        };
+    }
+    return "Repeats";
+}
+
+/// Which events a write can change. An unconfirmed write blocks any other
+/// write that overlaps it: the same event, its series, or (for a series
+/// write) every occurrence of that series, in both directions.
+pub const Reach = struct {
+    /// The selected event and the event written (equal unless series scope).
+    events: [2][]const u8 = .{ "", "" },
+    /// The series master the selected event belongs to, if any.
+    series: []const u8 = "",
+    /// Series scope: every occurrence of this series is changed.
+    whole_series: []const u8 = "",
+
+    fn has(self: Reach, id: []const u8) bool {
+        if (id.len == 0) return false;
+        for (self.events) |event| if (std.mem.eql(u8, event, id)) return true;
+        return false;
+    }
+    pub fn overlaps(self: Reach, other: Reach) bool {
+        for (self.events) |id| if (other.has(id)) return true;
+        if (self.whole_series.len != 0 and (other.has(self.whole_series) or std.mem.eql(u8, other.series, self.whole_series))) return true;
+        if (other.whole_series.len != 0 and (self.has(other.whole_series) or std.mem.eql(u8, self.series, other.whole_series))) return true;
+        return false;
+    }
+    /// A lookup by one event ID: the event, its series (by Google's
+    /// occurrence ID form) and, if it is a series, its occurrences.
+    pub fn lookup(event_id: []const u8) Reach {
+        return .{ .events = .{ event_id, "" }, .series = seriesOf(event_id), .whole_series = event_id };
+    }
+    /// What a saved delete/RSVP (or an edit, `prepared` null) can change.
+    pub fn saved(prepared: ?Prepared, event_id: []const u8) Reach {
+        const value = prepared orelse return .{ .events = .{ event_id, "" }, .series = seriesOf(event_id) };
+        return .{
+            .events = .{ event_id, value.selected_event_id },
+            .series = if (value.series_event_id.len != 0) value.series_event_id else seriesOf(value.selected_event_id),
+            .whole_series = if (value.scope == .series) event_id else "",
+        };
+    }
+};
+
+/// Google names an occurrence `<series ID>_<original start>`; series and
+/// ordinary event IDs use base32hex only. This finds related writes; it
+/// never authorizes one.
+pub fn seriesOf(event_id: []const u8) []const u8 {
+    const at = std.mem.indexOfScalar(u8, event_id, '_') orelse return "";
+    return event_id[0..at];
 }
 
 /// Same organizer evidence as the editor: Google's organizer.self marker,
@@ -227,9 +308,14 @@ pub fn consequence(a: std.mem.Allocator, prepared: Prepared, calendar_name: []co
         .delete => {
             const removed: []const u8 = if (prepared.scope == .series) "every event in this series" else if (prepared.recurring) "this occurrence" else "this event";
             // Google decides how an invitee's removal shows on the organizer's
-            // event; say only what Omagma controls.
-            if (prepared.role == .attendee) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event stays for the other guests and Omagma sends no email. To tell the organizer you won't attend, decline it instead.", .{ removed, calendar_name });
-            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event and its guests are not changed, and no email is sent.", .{ removed, calendar_name });
+            // event; say only what Omagma controls. A shared or delegated
+            // calendar loses the event for everyone who sees that calendar.
+            const shared: []const u8 = if (prepared.own_calendar) "" else ", for everyone who sees that calendar";
+            if (prepared.role == .attendee) {
+                if (!prepared.own_calendar) return std.fmt.allocPrint(a, "Removes {s} from {s}{s}. The organizer's event stays for the other guests and Omagma sends no email.", .{ removed, calendar_name, shared });
+                return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event stays for the other guests and Omagma sends no email. To tell the organizer you won't attend, decline it instead.", .{ removed, calendar_name });
+            }
+            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s}{s}. The organizer's event and its guests are not changed, and Omagma sends no email.", .{ removed, calendar_name, if (prepared.own_calendar) @as([]const u8, " only") else shared });
             if (prepared.guest_count == 0 and !prepared.guests_omitted) return std.fmt.allocPrint(a, "Deletes {s} from {s}. It has no guests, so no email is sent.", .{ what, calendar_name });
             const guests = if (prepared.guests_omitted) try a.dupe(u8, "its guests") else try std.fmt.allocPrint(a, "{d} guest{s}", .{ prepared.guest_count, plural(prepared.guest_count) });
             if (prepared.send_updates == .all) return std.fmt.allocPrint(a, "Deletes {s} from {s} and emails {s} a cancellation.", .{ what, calendar_name, guests });

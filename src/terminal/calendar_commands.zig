@@ -50,9 +50,10 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
         const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
         const pending = try load(host.context, service.a, target, j.text(request, "eventId"));
         if (pending) |value| {
+            // Found from the event, its series or one of its occurrences.
             const wanted = j.text(request, "eventId");
-            const selected = if (value.review.event_action) |prepared| prepared.selected_event_id else "";
-            if (!value.review.journaledEvent() or value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target) or (wanted.len != 0 and !std.mem.eql(u8, wanted, value.review.intent.event_id) and !std.mem.eql(u8, wanted, selected))) return error.CalendarReviewMismatch;
+            const related = action.Reach.saved(value.review.event_action, value.review.intent.event_id).overlaps(action.Reach.lookup(wanted));
+            if (!value.review.journaledEvent() or value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target) or (wanted.len != 0 and !related)) return error.CalendarReviewMismatch;
             return j.value(service.a, .{ .pending = .{ .review = try eventReviewValue(service.a, value.review), .state = "unknown", .attempt = value.operation.attempt, .nextAttempt = value.operation.attempt +| 1, .retryPossible = false, .recoveryReason = "Check Calendar before retrying" } });
         }
         var empty = j.object(service.a);
@@ -230,7 +231,12 @@ fn validateFields(request: j.Value, command: []const u8) !void {
     if (actionCommand(command)) {
         for ([_][]const u8{ "messageId", "review", "request", "event", "reviewHash", "source" }) |field| if (j.get(request, field) != null) return error.InvalidCalendarRequest;
         try t.text(try j.required(request, "eventId"), 1024, false);
-        if (j.get(request, "expectedEtag")) |value| try t.text(try j.string(value), 1024, false);
+        // An empty version is no version: the same guidance as a missing one.
+        if (j.get(request, "expectedEtag")) |value| {
+            const etag = try j.string(value);
+            if (etag.len == 0) return error.CalendarExpectedEtagRequired;
+            try t.text(etag, 1024, false);
+        }
         _ = std.meta.stringToEnum(action.Scope, try j.required(request, "scope")) orelse return error.InvalidCalendarScope;
         _ = std.meta.stringToEnum(ordinary.UpdatePolicy, try j.required(request, "sendUpdates")) orelse return error.InvalidCalendarNotificationPolicy;
         _ = try j.boolean(request, "dryRun", false);
@@ -479,6 +485,9 @@ pub fn actionReviewValue(a: std.mem.Allocator, value: svc.ActionReview, operatio
         .guestsOmitted = prepared.guests_omitted,
         .organizer = prepared.organizer,
         .attendee = prepared.attendee,
+        .seriesEventId = prepared.series_event_id,
+        .recurrence = prepared.recurrence,
+        .ownCalendar = prepared.own_calendar,
         .consequence = try action.consequence(a, prepared, value.calendar.summary),
         .options = value.options,
         .dryRun = dry_run,

@@ -9,6 +9,7 @@ const t = @import("calendar_types.zig");
 const plan = @import("calendar_plan.zig");
 const svc = @import("calendar_service.zig");
 const history = @import("calendar_identity_history.zig");
+const action = @import("calendar_event_action.zig");
 
 pub const max_identities = 256;
 pub const state_bytes = 4 * 1024 * 1024;
@@ -36,7 +37,7 @@ pub const Host = struct {
     access: @import("store_access.zig").Access = .{},
 
     pub fn persistence(self: *Host) svc.Persistence {
-        return .{ .context = self, .journal = .{ .context = self, .claimFn = claim, .recordFn = record, .retryFn = retry }, .loadFn = load, .preserveFn = preserve };
+        return .{ .context = self, .journal = .{ .context = self, .claimFn = claim, .recordFn = record, .retryFn = retry }, .loadFn = load, .preserveFn = preserve, .pendingFn = relatedPending };
     }
     pub fn cache(self: *Host) svc.Cache {
         return .{ .context = self, .loadFn = cacheLoad, .saveFn = cacheSave, .loadCalendarsFn = calendarsLoad, .saveCalendarsFn = calendarsSave, .saveCalendarFn = calendarSave };
@@ -295,6 +296,9 @@ pub const Host = struct {
         };
         return null;
     }
+    /// The unknown event write to resume for `event_id`: one on the event
+    /// itself, on its series (from any occurrence) or, for a series, on one
+    /// of its occurrences. An empty ID finds any unknown edit or action.
     pub fn loadPending(self: *Host, out: std.mem.Allocator, target: t.Target, event_id: []const u8) !?svc.Pending {
         try self.check(target);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -303,15 +307,42 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         const state = try self.readState(&store, a);
+        if (event_id.len != 0) {
+            const entry = related(state, target, action.Reach.lookup(event_id), "") orelse return null;
+            return try clone(svc.Pending, out, .{ .review = entry.review.?, .operation = entry.state.operation.? });
+        }
         for (state.entries) |entry| {
             const operation = entry.state.operation orelse continue;
             if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
             const review = entry.review orelse continue;
-            if (!review.journaledEvent()) continue;
-            // A series action is also found from the occurrence it was chosen on.
-            const selected = if (review.event_action) |prepared| prepared.selected_event_id else "";
-            if (if (event_id.len == 0) operation.intent.kind != .insert_event else !std.mem.eql(u8, event_id, operation.intent.event_id) and !std.mem.eql(u8, event_id, selected)) continue;
+            if (!review.journaledEvent() or operation.intent.kind == .insert_event) continue;
             return try clone(svc.Pending, out, .{ .review = review, .operation = operation });
+        }
+        return null;
+    }
+    fn relatedPending(context: *anyopaque, out: std.mem.Allocator, target: t.Target, reach: action.Reach, skip: []const u8) anyerror!?svc.Pending {
+        const self = cast(context);
+        try self.check(target);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var store = try self.open(a);
+        defer store.close();
+        const state = try self.readState(&store, a);
+        const entry = related(state, target, reach, skip) orelse return null;
+        return try clone(svc.Pending, out, .{ .review = entry.review.?, .operation = entry.state.operation.? });
+    }
+    /// The first unknown event write (other than operation `skip`) that
+    /// could have changed what `reach` covers. Unknown operations always
+    /// stay in the active table, so this search is complete.
+    fn related(state: StateFile, target: t.Target, reach: action.Reach, skip: []const u8) ?Entry {
+        for (state.entries) |entry| {
+            const operation = entry.state.operation orelse continue;
+            if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
+            if (std.mem.eql(u8, operation.intent.operation_id, skip)) continue;
+            const review = entry.review orelse continue;
+            if (!review.journaledEvent()) continue;
+            if (action.Reach.saved(review.event_action, operation.intent.event_id).overlaps(reach)) return entry;
         }
         return null;
     }
@@ -386,6 +417,9 @@ pub const Host = struct {
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
+        // Another process may have left an unconfirmed write to this event's
+        // series or occurrences since the review; it is resolved first.
+        if (review.event_action) |prepared| if (related(state, intent.identity.target, action.Reach.saved(prepared, intent.event_id), intent.operation_id) != null) return error.CalendarOperationPending;
         // Another process may have completed an action after Service.apply's
         // read/lookup but before this locked claim. Recheck the durable target
         // and version here; only this transaction can grant fresh dispatch.
@@ -417,6 +451,9 @@ pub const Host = struct {
         try operation.intent.validate();
         try t.text(operation.provider_id, 1024, operation.state != .applied);
         try t.text(operation.error_code, 128, true);
+        // Synthetic acceptance only: Calendar answered, but the outcome
+        // cannot be recorded (as with a full disk).
+        if (self.options.fixtures and std.mem.eql(u8, self.options.fixture_scenario, "calendar-actions-journal-fail")) return error.NoSpaceLeft;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();

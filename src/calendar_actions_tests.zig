@@ -24,6 +24,10 @@ const standup_first = "fixture-standup_1791880200000";
 const standup_second = "fixture-standup_1791966600000";
 const office_first = "fixture-office_1791910800000";
 const office_second = "fixture-office_1791997200000";
+// Changed occurrences on the third day: the standup gained guests and a
+// title; the office hours were answered while the series is unanswered.
+const standup_exception = "fixture-standup_1792053000000";
+const office_exception = "fixture-office_1792083600000";
 const zero_hash: [64]u8 = @splat('0');
 
 const Harness = struct {
@@ -59,6 +63,19 @@ const Harness = struct {
     }
     fn writes(self: *Harness) !i64 {
         return j.integer(try self.provider(), "writes", -1);
+    }
+    /// The mutating requests as they reached the synthetic wire, oldest first.
+    fn sent(self: *Harness) ![]const j.Value {
+        return (j.get(try self.provider(), "requests") orelse return &.{}).array.items;
+    }
+    fn expectSent(self: *Harness, index: usize, method: []const u8, event_id: []const u8, if_match: []const u8, send_updates: []const u8) !void {
+        const requests = try self.sent();
+        try std.testing.expect(index < requests.len);
+        const request = requests[index];
+        try std.testing.expectEqualStrings(method, j.text(request, "method"));
+        try std.testing.expectEqualStrings(event_id, j.text(request, "eventId"));
+        try std.testing.expectEqualStrings(if_match, j.text(request, "ifMatch"));
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(self.a, "sendUpdates={s}", .{send_updates}), j.text(request, "query"));
     }
     fn stored(self: *Harness, id: []const u8) !?j.Value {
         for (j.get(try self.provider(), "events").?.array.items) |entry| {
@@ -129,6 +146,8 @@ test "calendar actions: organizer delete reviews guests, emails only when chosen
     try std.testing.expectEqualStrings("applied", j.text(applied, "state"));
     try std.testing.expectEqualStrings("fixture-hosted", j.text(applied, "providerId"));
     try std.testing.expectEqual(@as(i64, 1), try h.writes());
+    // On the wire: the event, its reviewed version and the chosen email.
+    try h.expectSent(0, "DELETE", "fixture-hosted", "\"fixture-seed-fixture-hosted\"", "all");
     try std.testing.expectEqualStrings("cancelled", j.text((try h.stored("fixture-hosted")).?, "status"));
     try std.testing.expect(!contains(try h.agendaIds("day"), "fixture-hosted"));
     // Replays return the receipt; nothing is deleted twice.
@@ -205,6 +224,9 @@ test "calendar actions: an unsent delete is retried only explicitly with the ide
     const retried = try h.run(try j.value(a, .{ .cmd = "calendar.event-retry", .account = account, .calendarId = account, .operationId = "retry-delete", .reviewHash = j.text(reviewed, "reviewHash"), .nextAttempt = @as(i64, 1) }));
     try std.testing.expectEqualStrings("applied", j.text(retried, "state"));
     try std.testing.expectEqualStrings("cancelled", j.text((try h.stored("fixture-hosted")).?, "status"));
+    // The retry is the identical request: same event, If-Match and email.
+    try h.expectSent(0, "DELETE", "fixture-hosted", "\"fixture-seed-fixture-hosted\"", "all");
+    try h.expectSent(1, "DELETE", "fixture-hosted", "\"fixture-seed-fixture-hosted\"", "all");
     // Archiving an uncertainty never claims the event was kept.
     h.options.fixture_scenario = "calendar-prewrite-unavailable";
     const second = try h.deleteReview("archive-delete", "fixture-focus", j.text(focus, "etag"), "event", "none", false);
@@ -245,6 +267,9 @@ test "calendar actions: one occurrence or the whole series, never this-and-follo
     try std.testing.expectEqualStrings("fixture-standup", j.text(series, "targetEventId"));
     try std.testing.expectEqualStrings("Deletes every event in this series from Personal without emailing 1 guest. Guests outside Google Calendar keep their copy.", j.text(series, "consequence"));
     try std.testing.expectEqualStrings("applied", j.text(try h.execute("calendar.event-apply", series), "state"));
+    // Each occurrence has its own version; the series binds the series'.
+    try h.expectSent(0, "DELETE", standup_first, "\"fixture-seed-fixture-standup-1791880200000\"", "all");
+    try h.expectSent(1, "DELETE", "fixture-standup", "\"fixture-seed-fixture-standup\"", "none");
     after = try h.agendaIds("week");
     for (after) |id| try std.testing.expect(!std.mem.startsWith(u8, id, "fixture-standup"));
     try std.testing.expect(contains(after, office_first));
@@ -285,6 +310,12 @@ test "calendar actions: RSVP answers as this account, refuses organizers and unc
     const reviewed = try h.respondReview("accept-invite", "fixture-invite", j.text(plan, "expectedEtag"), "event", "accepted", "all", false);
     try std.testing.expectEqualStrings("Accepts this event as self@example.test. Google emails your answer to the organizer host@example.test.", j.text(reviewed, "consequence"));
     try std.testing.expectEqualStrings("applied", j.text(try h.execute("calendar.event-apply", reviewed), "state"));
+    // Only this calendar's own answer is sent, against the reviewed version.
+    try h.expectSent(0, "PATCH", "fixture-invite", "\"fixture-seed-fixture-invite\"", "all");
+    const body = try std.json.parseFromSliceLeaky(j.Value, a, j.text((try h.sent())[0], "body"), .{});
+    try std.testing.expect(try j.boolean(body, "attendeesOmitted", false));
+    try std.testing.expectEqual(@as(usize, 1), j.get(body, "attendees").?.array.items.len);
+    try std.testing.expectEqualStrings("accepted", j.text(j.get(body, "attendees").?.array.items[0], "responseStatus"));
     const answered = try h.event("fixture-invite");
     try std.testing.expectEqualStrings("accepted", j.text(answered, "response"));
     // Only this calendar's response changed; the organizer's entry is kept.
@@ -322,6 +353,166 @@ test "calendar actions: RSVP to one occurrence or a whole series, and a lost ans
     // The series answer reaches unanswered days; the separate answer stays.
     try std.testing.expectEqualStrings("accepted", j.text(try h.event(office_second), "response"));
     try std.testing.expectEqualStrings("tentative", j.text(try h.event(office_first), "response"));
+}
+
+test "calendar actions: a changed occurrence and its series each show and bind their own facts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    // The plan on the changed occurrence: its own three guests and title...
+    const plan = try h.deleteReview("plan-exception", standup_exception, null, "event", "none", true);
+    try std.testing.expectEqualStrings("Standup with partners", j.text(plan, "summary"));
+    try std.testing.expectEqual(@as(i64, 3), try j.integer(plan, "guestCount", -1));
+    try std.testing.expectEqualStrings("fixture-standup", j.text(plan, "seriesEventId"));
+    // ...and the series' own facts for the series choice.
+    const series = j.get(j.get(plan, "options").?, "series").?;
+    try std.testing.expect(try j.boolean(series, "available", false));
+    try std.testing.expectEqualStrings("Standup", j.text(series, "summary"));
+    try std.testing.expectEqualStrings("organizer", j.text(series, "role"));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(series, "guestCount", -1));
+    try std.testing.expect(!try j.boolean(series, "guestsOmitted", true));
+    try std.testing.expectEqualStrings("Repeats daily", j.text(series, "recurrence"));
+    try std.testing.expectEqualStrings("\"fixture-seed-fixture-standup\"", j.text(series, "etag"));
+    // The series begins on the first day, not on the selected occurrence.
+    const series_start = try std.json.Stringify.valueAlloc(a, j.get(series, "start").?, .{});
+    try std.testing.expect(!std.mem.eql(u8, series_start, try std.json.Stringify.valueAlloc(a, j.get(plan, "start").?, .{})));
+    // The series review states and binds the series' facts.
+    const reviewed = try h.deleteReview("delete-series", standup_exception, j.text(plan, "expectedEtag"), "series", "all", false);
+    try std.testing.expectEqualStrings("fixture-standup", j.text(reviewed, "targetEventId"));
+    try std.testing.expectEqualStrings("Standup", j.text(reviewed, "summary"));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(reviewed, "guestCount", -1));
+    try std.testing.expectEqualStrings("Repeats daily", j.text(reviewed, "recurrence"));
+    try std.testing.expectEqualStrings(series_start, try std.json.Stringify.valueAlloc(a, j.get(reviewed, "start").?, .{}));
+    try std.testing.expectEqualStrings("Deletes every event in this series from Personal and emails 1 guest a cancellation.", j.text(reviewed, "consequence"));
+    try std.testing.expectEqualStrings("applied", j.text(try h.execute("calendar.event-apply", reviewed), "state"));
+    try h.expectSent(0, "DELETE", "fixture-standup", "\"fixture-seed-fixture-standup\"", "all");
+    // An answered occurrence of an unanswered series: each answer is its own.
+    const office = try h.respondReview("plan-office", office_exception, null, "event", null, "none", true);
+    try std.testing.expectEqualStrings("accepted", j.text(office, "previousResponse"));
+    try std.testing.expectEqualStrings("needsAction", j.text(j.get(j.get(office, "options").?, "series").?, "response"));
+    try std.testing.expectError(error.CalendarResponseUnchanged, h.respondReview("accept-again", office_exception, j.text(office, "expectedEtag"), "event", "accepted", "none", false));
+    const whole = try h.respondReview("accept-series", office_exception, j.text(office, "expectedEtag"), "series", "accepted", "none", false);
+    try std.testing.expectEqualStrings("needsAction", j.text(whole, "previousResponse"));
+    try std.testing.expectEqualStrings("applied", j.text(try h.execute("calendar.event-apply", whole), "state"));
+    try h.expectSent(1, "PATCH", "fixture-office", "\"fixture-seed-fixture-office\"", "none");
+}
+
+test "calendar actions: an unconfirmed series write blocks and is found from every occurrence, and the reverse" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    const first = try h.event(standup_first);
+    const second = try h.event(standup_second);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const series = try h.deleteReview("delete-series", standup_first, j.text(first, "etag"), "series", "all", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", series), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    // A sibling occurrence can be deleted by that series write: no new write
+    // to it (not even a plan), and its pending lookup finds the series write.
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("plan-sibling", standup_second, null, "event", "none", true));
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("delete-sibling", standup_second, j.text(second, "etag"), "event", "none", false));
+    for ([_][]const u8{ standup_second, standup_exception, "fixture-standup" }) |id| {
+        const found = j.get(try h.run(try j.value(a, .{ .cmd = "calendar.event-pending", .account = account, .calendarId = account, .eventId = id })), "pending").?;
+        try std.testing.expectEqualStrings("delete-series", j.text(j.get(found, "review").?, "operationId"));
+    }
+    // Other events are not held back.
+    try std.testing.expect(j.get(try h.run(try j.value(a, .{ .cmd = "calendar.event-pending", .account = account, .calendarId = account, .eventId = "fixture-hosted" })), "pending").? == .null);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-reconcile", series), "state"));
+    try std.testing.expectEqualStrings("archived", j.text(try h.execute("calendar.event-abandon", series), "state"));
+    // The reverse: an unconfirmed answer to one occurrence holds back the
+    // series (found from the series too), but not a sibling occurrence.
+    const office = try h.event(office_first);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const one = try h.respondReview("maybe-one", office_first, j.text(office, "etag"), "event", "tentative", "none", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", one), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    const sibling = try h.event(office_second);
+    try std.testing.expectError(error.CalendarOperationPending, h.respondReview("series", office_second, j.text(sibling, "etag"), "series", "accepted", "none", false));
+    const plan = try h.respondReview("plan-sibling", office_second, null, "event", null, "none", true);
+    const series_option = j.get(j.get(plan, "options").?, "series").?;
+    try std.testing.expect(!try j.boolean(series_option, "available", true));
+    try std.testing.expectEqualStrings("CalendarOperationPending", j.text(series_option, "reason"));
+    try std.testing.expectEqualStrings("maybe-one", j.text(j.get(j.get(try h.run(try j.value(a, .{ .cmd = "calendar.event-pending", .account = account, .calendarId = account, .eventId = "fixture-office" })), "pending").?, "review").?, "operationId"));
+    const answered = try h.respondReview("sibling", office_second, j.text(sibling, "etag"), "event", "accepted", "none", false);
+    try std.testing.expectEqualStrings("applied", j.text(try h.execute("calendar.event-apply", answered), "state"));
+}
+
+test "calendar actions: a write whose journal record fails after dispatch is an unknown outcome, then reconciles" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    const seen = try h.event("fixture-focus");
+    const reviewed = try h.deleteReview("journal-fail", "fixture-focus", j.text(seen, "etag"), "event", "none", false);
+    h.options.fixture_scenario = "calendar-actions-journal-fail";
+    try std.testing.expectError(error.UnknownOutcome, h.execute("calendar.event-apply", reviewed));
+    try std.testing.expectEqual(@as(i64, 1), try h.writes());
+    h.options.fixture_scenario = "calendar-actions";
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("again", "fixture-focus", null, "event", "none", true));
+    const checked = try h.execute("calendar.event-reconcile", reviewed);
+    try std.testing.expectEqualStrings("applied", j.text(checked, "state"));
+    try std.testing.expect(try j.boolean(checked, "reconciled", false));
+    try std.testing.expectEqual(@as(i64, 1), try h.writes());
+}
+
+test "calendar actions: a 0.2.18 reader refuses a journal with a saved action instead of misreading it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    const seen = try h.event("fixture-hosted");
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const reviewed = try h.deleteReview("downgrade", "fixture-hosted", j.text(seen, "etag"), "event", "all", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", reviewed), "state"));
+    var store = try storage.Store.open(std.testing.io, a, h.root, account, h.options);
+    defer store.close();
+    const raw = (try store.readDocument(a, "calendar-state.json", persistence.state_bytes)).?;
+    // The released 0.2.18 journal shapes, parsed as 0.2.18 parses them
+    // (strictly). It fails closed on the whole journal, so it can neither
+    // replay nor drop the unknown delete; reinstalling 0.2.19 resumes it.
+    const Release0218 = struct {
+        const Review = struct {
+            calendar: t.Calendar,
+            source: t.Invitation,
+            span: ?@import("terminal/calendar_invitation.zig").Span,
+            intent: @import("terminal/calendar_plan.zig").Intent,
+            request: @import("terminal/calendar_provider.zig").Request,
+            review_hash: [32]u8,
+            previous: ?t.Event = null,
+            rsvp_response: ?@import("terminal/calendar_provider.zig").RsvpResponse = null,
+            response_only: bool = false,
+            ordinary_event: ?@import("terminal/calendar_event.zig").Prepared = null,
+        };
+        const Entry = struct { identity: @import("terminal/calendar_plan.zig").Identity, state: service.State = .{}, review: ?Review = null, ordinary: bool = false, receipt_hash: ?[32]u8 = null, receipt_reserved: bool = false };
+        const StateFile = struct { schema: u8 = 1, account: []const u8, entries: []Entry = &.{}, history: @import("terminal/calendar_identity_history.zig").Root = .{} };
+    };
+    try std.testing.expect(std.mem.indexOf(u8, raw, "\"event_action\":{") != null);
+    // Every saved review (any kind) already carries 0.2.19's invitation reminders.
+    try std.testing.expect(std.mem.indexOf(u8, raw, "\"reminders\":[]") != null);
+    try std.testing.expectError(error.UnknownField, std.json.parseFromSliceLeaky(Release0218.StateFile, a, raw, .{ .allocate = .alloc_if_needed }));
+}
+
+test "calendar actions: a shared calendar's copy says who loses it, and nobody is 'you'" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    const plan = try h.run(try j.value(a, .{ .cmd = "calendar.event-delete-review", .account = account, .calendarId = "fixture-shared-team", .eventId = "fixture-team", .scope = "event", .sendUpdates = "none", .operationId = "plan-team", .dryRun = true }));
+    try std.testing.expectEqualStrings("copy", j.text(plan, "role"));
+    try std.testing.expect(!try j.boolean(plan, "ownCalendar", true));
+    try std.testing.expectEqualStrings("Removes this event from Shared team, for everyone who sees that calendar. The organizer's event and its guests are not changed, and Omagma sends no email.", j.text(plan, "consequence"));
 }
 
 test "calendar actions: JSONL requests are strict, explain the field and next step, and dry runs write nothing" {

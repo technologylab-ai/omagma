@@ -57,6 +57,10 @@ pub const Persistence = struct {
     /// Preserve the complete source and exact prepared request in encrypted
     /// account storage before claim. This callback does not authorize dispatch.
     preserveFn: *const fn (*anyopaque, Review) anyerror!void,
+    /// The first unknown event write (other than this operation ID) whose
+    /// reach overlaps `reach`: the same event, its series, or a series'
+    /// occurrences. Null when none.
+    pendingFn: ?*const fn (*anyopaque, std.mem.Allocator, t.Target, action.Reach, []const u8) anyerror!?Pending = null,
 
     /// Journal.claim must atomically serialize writes for the entire identity,
     /// including different operation IDs. Journal.record(applied) must retain
@@ -366,13 +370,16 @@ pub const Service = struct {
         if (request.expected_etag.len == 0 and !request.dry_run) return error.CalendarExpectedEtagRequired;
         if (request.action == .delete and request.response != null) return error.InvalidCalendarRequest;
         if (request.action == .respond and request.response == null and !request.dry_run) return error.CalendarResponseRequired;
-        // An uncertain earlier write to this event is resolved first (reads
-        // only, then an explicit decision), never overtaken by a new one.
-        try self.requireNoPending(calendar.target, request.event_id, operation_id);
+        // An uncertain earlier write to this event, its series or (for a
+        // series) any of its occurrences is resolved first (reads only, then
+        // an explicit decision), never overtaken by a new one.
+        const series_hint = action.seriesOf(request.event_id);
+        try self.requireNoPending(calendar.target, .{ .events = .{ request.event_id, "" }, .series = series_hint, .whole_series = if (request.scope == .series) series_hint else "" }, operation_id);
         const selected = try self.document(calendar, request.event_id);
         if (request.expected_etag.len != 0 and !std.mem.eql(u8, selected.event.etag, request.expected_etag)) return error.CalendarReviewStale;
         const master_selected = action.isSeries(selected);
         const occurrence = selected.event.recurring_event_id.len != 0;
+        const series_id = if (occurrence) selected.event.recurring_event_id else if (master_selected) selected.event.id else "";
         var options: action.Options = .{};
         var master: ?p.EventDocument = if (master_selected) selected else null;
         if (occurrence and (request.dry_run or request.scope == .series)) {
@@ -383,15 +390,24 @@ pub const Service = struct {
             };
         }
         if (master) |value| {
+            // The series' own facts: an occurrence can have its own guests,
+            // answer, title and time. A dialog shows these for the series.
             if (action.check(request.action, calendar, value, self.grants.account)) |found| {
-                options.series = .{ .available = true, .eventId = value.event.id, .etag = value.event.etag, .summary = value.event.summary, .guestCount = found.guest_count, .response = found.response };
+                options.series = .{ .available = true, .eventId = value.event.id, .etag = value.event.etag, .summary = value.event.summary, .role = @tagName(found.role), .guestCount = found.guest_count, .guestsOmitted = found.guests_omitted, .response = found.response, .attendee = found.attendee, .organizer = found.organizer, .start = value.event.start, .end = value.event.end, .recurrence = action.recurrenceLabel(value) };
+                // A series write would overtake an unconfirmed write to any
+                // of its occurrences; offer it once that is resolved.
+                if (request.scope == .event) self.requireNoPending(calendar.target, .{ .events = .{ selected.event.id, value.event.id }, .series = series_id, .whole_series = value.event.id }, operation_id) catch |err| {
+                    if (err != error.CalendarOperationPending) return err;
+                    options.series.available = false;
+                    options.series.reason = "CalendarOperationPending";
+                };
             } else |err| options.series.reason = @errorName(err);
         } else if (!occurrence) options.series.reason = "not_recurring";
         const target = switch (request.scope) {
             .event => if (master_selected) return error.CalendarSeriesScopeRequired else selected,
             .series => master orelse return error.CalendarNotRecurring,
         };
-        if (!std.mem.eql(u8, target.event.id, selected.event.id)) try self.requireNoPending(calendar.target, target.event.id, operation_id);
+        try self.requireNoPending(calendar.target, .{ .events = .{ selected.event.id, target.event.id }, .series = series_id, .whole_series = if (request.scope == .series) target.event.id else "" }, operation_id);
         // A locked or cancelled occurrence is no basis for its series either.
         const selected_facts = try action.check(request.action, calendar, selected, self.grants.account);
         const facts = if (request.scope == .series) try action.check(request.action, calendar, target, self.grants.account) else selected_facts;
@@ -401,6 +417,8 @@ pub const Service = struct {
         };
         if (request.send_updates == .all and !options.notify.available) return error.CalendarNotificationUnavailable;
         if (request.response) |response| if (std.mem.eql(u8, facts.response, action.wire(response))) return error.CalendarResponseUnchanged;
+        // Every fact comes from the event written: the occurrence for this
+        // event only, the series itself for the whole series.
         const prepared: action.Prepared = .{
             .action = request.action,
             .scope = request.scope,
@@ -413,12 +431,15 @@ pub const Service = struct {
             .selected_etag = selected.event.etag,
             .target_event_id = target.event.id,
             .summary = target.event.summary,
-            .start = selected.event.start,
-            .end = selected.event.end,
+            .start = target.event.start,
+            .end = target.event.end,
             .recurring = occurrence or master_selected,
             .guest_count = facts.guest_count,
             .guests_omitted = facts.guests_omitted,
             .organizer = facts.organizer,
+            .series_event_id = series_id,
+            .recurrence = if (request.scope == .series) action.recurrenceLabel(target) else "",
+            .own_calendar = calendar.primary or std.ascii.eqlIgnoreCase(calendar.target.calendar_id, self.grants.account),
         };
         var result: ActionReview = .{ .prepared = prepared, .options = options, .calendar = calendar, .target_etag = target.event.etag };
         if (prepared.response == null and request.action == .respond) return result;
@@ -440,10 +461,20 @@ pub const Service = struct {
         result.review = review;
         return result;
     }
-    fn requireNoPending(self: Service, target: t.Target, event_id: []const u8, operation_id: []const u8) !void {
+    /// Refuse while another unconfirmed event write could have changed what
+    /// `reach` covers (the event, its series, or a series' occurrences).
+    fn requireNoPending(self: Service, target: t.Target, reach: action.Reach, operation_id: []const u8) !void {
         const store = self.persistence orelse return;
-        const state = try store.load(self.a, .{ .target = target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{event_id}) });
-        if (state.operation) |operation| if (operation.state == .unknown and !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return error.CalendarOperationPending;
+        if (store.pendingFn) |find| {
+            if (try find(store.context, self.a, target, reach, operation_id) != null) return error.CalendarOperationPending;
+            return;
+        }
+        // Hosts without an index of unknown writes check each exact event.
+        for ([_][]const u8{ reach.events[0], reach.events[1], reach.whole_series }) |event_id| {
+            if (event_id.len == 0) continue;
+            const state = try store.load(self.a, .{ .target = target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{event_id}) });
+            if (state.operation) |operation| if (operation.state == .unknown and !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return error.CalendarOperationPending;
+        }
     }
 
     pub fn invitationPlan(self: Service, calendar: t.Calendar, raw: []const u8, verified_aliases: []const []const u8, bindings: Bindings) !InvitationPlan {
@@ -562,6 +593,9 @@ pub const Service = struct {
                 if (!sameEventIdentity(current, review.source) or current.cancelled or current.locked or !std.mem.eql(u8, current.etag, review.intent.expected_etag) or current.sequence > review.intent.version.sequence) return error.CalendarReviewStale;
             }
         } else if (review.event_action) |prepared| {
+            // An unconfirmed write to its series or occurrences, saved since
+            // the review, still comes first.
+            try self.requireNoPending(review.intent.identity.target, action.Reach.saved(prepared, review.intent.event_id), review.intent.operation_id);
             // The exact reviewed version must still be current and eligible.
             const current = try self.document(review.calendar, review.intent.event_id);
             if (!std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;
@@ -584,8 +618,9 @@ pub const Service = struct {
         if (try self.preflight(review, confirmation)) |operation| return self.reconcileOperation(review, operation);
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         const claim = try store.journal.claim(review.intent);
-        if (!claim.fresh) return self.reconcileOperation(review, claim.operation);
-        return self.dispatchClaimed(review, claim.operation, false);
+        // From here a write may exist: every failure is an unknown outcome.
+        if (!claim.fresh) return self.reconcileOperation(review, claim.operation) catch error.UnknownOutcome;
+        return self.dispatchClaimed(review, claim.operation, false) catch error.UnknownOutcome;
     }
 
     /// A retry is an explicit fresh confirmation of the identical saved wire
@@ -604,8 +639,8 @@ pub const Service = struct {
         if (checked.operation.state != .unknown) return checked;
         if (!checked.retry_possible) return error.CalendarRetryUnavailable;
         const claim = try store.journal.retry(review.intent, next_attempt);
-        if (!claim.fresh) return self.reconcileOperation(review, claim.operation);
-        return self.dispatchClaimed(review, claim.operation, true);
+        if (!claim.fresh) return self.reconcileOperation(review, claim.operation) catch error.UnknownOutcome;
+        return self.dispatchClaimed(review, claim.operation, true) catch error.UnknownOutcome;
     }
 
     /// Explicit local archiving releases the pending-operation guard. It never
