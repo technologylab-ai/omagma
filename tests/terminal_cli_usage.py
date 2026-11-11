@@ -832,6 +832,11 @@ def calendar_actions_contract(runner):
         states = [json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")]
         return sum(state["writes"] for state in states if state["account"] == account)
 
+    def last_sent():
+        """The newest mutating request as it reached the synthetic wire."""
+        states = [json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")]
+        return [state for state in states if state["account"] == account][0]["requests"][-1]
+
     target = ["--calendar-id", account]
     plan = run("calendar", "event-delete-review", *target, "--event-id", "fixture-hosted", "--scope", "event",
                "--send-updates", "none", "--operation-id", "plan-1", "--dry-run")
@@ -860,8 +865,29 @@ def calendar_actions_contract(runner):
             "an apply dry run wrote Calendar or misreported its request")
     require(run("calendar", "event-apply", *confirm)["state"] == "applied" and writes() == 1,
             "the reviewed delete was not applied exactly once")
+    wire = last_sent()
+    require(wire["method"] == "DELETE" and wire["eventId"] == "fixture-hosted" and wire["ifMatch"] == etag
+            and wire["query"] == "sendUpdates=all", f"the delete reached the wire as {wire}")
     require(run("calendar", "event-apply", *confirm)["state"] == "applied" and writes() == 1,
             "replaying the receipt deleted again")
+    # Flags that do not belong to the verb are usage errors (2), with words.
+    for arguments, words in ((["event-delete-review", *target, "--event-id", "fixture-focus", "--scope", "event", "--response", "accepted",
+                               "--send-updates", "none", "--operation-id", "bad-response", "--dry-run"], b"--response is not valid here"),
+                             (["event", *target, "--event-id", "fixture-focus", "--scope", "series"], b"--scope is not valid here"),
+                             (["event-reconcile", *confirm, "--dry-run"], b"event-delete-review, event-respond-review and event-apply")):
+        result = runner.usage(["calendar", *arguments, "--fixtures", *fixture.options(), "--fixture-scenario", "calendar-actions",
+                               "--cache-dir", str(cache), "--account", account], "omagma:")
+        require(result.returncode == 2 and words in result.stderr, f"calendar {arguments[0]} misuse: {result.stderr!r}")
+    # A review without the version it binds is refused with the field and the next step.
+    for etag_arguments in ([], ["--expected-etag", ""]):
+        missing = run("calendar", "event-delete-review", *target, "--event-id", "fixture-focus", *etag_arguments, "--scope", "event",
+                      "--send-updates", "none", "--operation-id", "no-etag", status=3, ok=False)
+        require(missing["code"] == "CalendarExpectedEtagRequired" and missing.get("field") == "expectedEtag"
+                and missing.get("hint") and "must be of type" not in missing["message"],
+                f"a missing or empty expected etag was explained as {missing}")
+    stranger = run("calendar", "event-respond-review", *target, "--event-id", "fixture-planning", "--scope", "event",
+                   "--send-updates", "none", "--operation-id", "stranger", "--dry-run", status=3, ok=False)
+    require(stranger["code"] == "NotAnAttendee" and stranger.get("hint"), "NotAnAttendee has no next step")
     refused = run("calendar", "event-respond-review", *target, "--event-id", "fixture-focus", "--scope", "event",
                   "--response", "accepted", "--send-updates", "all", "--operation-id", "host-rsvp", "--dry-run",
                   status=3, ok=False)
@@ -890,6 +916,20 @@ def calendar_actions_contract(runner):
             "a lost answer was not reported as unknown")
     require(run("calendar", "event-reconcile", *target, *lost)["state"] == "applied",
             "reconcile did not prove the saved answer")
+    wire = last_sent()
+    require(wire["method"] == "PATCH" and wire["eventId"] == "fixture-invite" and wire["ifMatch"] == invite
+            and wire["query"] == "sendUpdates=none" and json.loads(wire["body"])["attendeesOmitted"] is True,
+            f"the answer reached the wire as {wire}")
+    # Calendar answered but the outcome could not be recorded: unknown (6), then proven by reconcile.
+    copy_tag = run("calendar", "event", *target, "--event-id", "fixture-planning")["event"]["etag"]
+    journal = run("calendar", "event-delete-review", *target, "--event-id", "fixture-planning", "--expected-etag", copy_tag,
+                  "--scope", "event", "--send-updates", "none", "--operation-id", "journal-fail")
+    unrecorded = ["--operation-id", "journal-fail", "--review-hash", journal["reviewHash"]]
+    before = writes()
+    failed = run("calendar", "event-apply", *target, *unrecorded, scenario="calendar-actions-journal-fail", status=6, ok=False)
+    require(failed["code"] == "UnknownOutcome" and writes() == before + 1, "a write whose record failed was not reported unknown")
+    require(run("calendar", "event-reconcile", *target, *unrecorded)["state"] == "applied" and writes() == before + 1,
+            "reconcile did not prove the unrecorded delete without resending it")
     require(run("cache", "stats")["fixtureSends"] == 0, "Calendar actions sent mail")
 
 
