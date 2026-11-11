@@ -328,7 +328,9 @@ def discard_draft(binary, directory, capture_dir=None):
         command(terminal, "discard-draft")
         terminal.until(lambda: all(value in terminal.text() for value in review))
         capture(terminal, capture_dir, "ux-local-draft-discard-review")
-        # Tab reaches [Ctrl+X Discard]; Enter on it discards (Ctrl+Z restores).
+        # Tab reaches [Ctrl+X Discard]; Enter on it discards once the review
+        # has shown a second (Ctrl+Z restores).
+        terminal.gap(1.1)
         focus_button(terminal, "[Ctrl+X Discard]")
         terminal.send(ENTER)
         terminal.until(lambda: "Subject:" not in terminal.text() and "[Esc Cancel]" not in terminal.text()

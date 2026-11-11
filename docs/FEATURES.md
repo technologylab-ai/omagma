@@ -377,7 +377,8 @@ allocation exhaustion remain failures; individual malformed contacts are isolate
 - `:scope message|thread` makes conversation changes deliberate, pinning up to
   100 complete resolved targets and reviewing the actual account/count.
 - `:spam`/`:unspam` expose shared mailbox actions, and `:discard-draft` reviews
-  removal of a local draft and recovery copies without changing Gmail.
+  removal of a local draft and recovery copies without changing Gmail;
+  `:restore-draft` restores the account's last discarded draft for 7 days.
 - Send confirmation starts a default ten-second local countdown. Ctrl+Z or
   Undo cancels before submission; Ctrl+S or Send now submits the reviewed
   message immediately. Tab/Shift+Tab chooses a button and Enter activates it;
