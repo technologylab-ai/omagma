@@ -21,6 +21,11 @@ pub const Config = struct {
     access: @import("store_access.zig").Access = .{},
 };
 const StoredEvent = struct { calendar_id: []const u8, value: j.Value };
+/// One mutating request as it reached the synthetic wire, so acceptance
+/// tests can assert the event ID, If-Match, sendUpdates and body sent.
+const Sent = struct { method: []const u8, eventId: []const u8, query: []const u8 = "", ifMatch: []const u8 = "", body: []const u8 = "" };
+/// The newest mutating requests; older ones are dropped.
+const max_sent = 32;
 const State = struct {
     schema: u8 = 1,
     account: []const u8,
@@ -28,6 +33,7 @@ const State = struct {
     writes: u64 = 0,
     dispatch_attempts: u64 = 0,
     events: []StoredEvent = &.{},
+    requests: []Sent = &.{},
 };
 
 pub const Provider = struct {
@@ -73,6 +79,7 @@ pub const Provider = struct {
         if (request.kind.mutating() and (access == .reader or !self.grants().write_shared)) return failure(out, self.config.account, 403, "forbidden");
         if (request.kind.mutating()) {
             state.dispatch_attempts += 1;
+            try record(a, &state, request, event_id);
             try save(&store, a, state);
             if (std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-prewrite-unavailable")) return failure(out, self.config.account, 503, "backendError");
         }
@@ -249,6 +256,21 @@ pub const Provider = struct {
     }
 };
 
+fn record(a: std.mem.Allocator, state: *State, request: provider.Request, event_id: []const u8) !void {
+    const query_at = std.mem.indexOfScalar(u8, request.url, '?');
+    const sent: Sent = .{
+        .method = @tagName(request.method),
+        .eventId = event_id,
+        .query = if (query_at) |at| request.url[at + 1 ..] else "",
+        .ifMatch = request.if_match orelse "",
+        .body = if (request.body) |body| body[0..@min(body.len, 4096)] else "",
+    };
+    const kept = @min(state.requests.len, max_sent - 1);
+    const requests = try a.alloc(Sent, kept + 1);
+    @memcpy(requests[0..kept], state.requests[state.requests.len - kept ..]);
+    requests[kept] = sent;
+    state.requests = requests;
+}
 fn parse(a: std.mem.Allocator, bytes: []const u8) !j.Value {
     if (bytes.len > t.Limits.response_bytes) return error.CalendarResponseTooLarge;
     try @import("../bounded.zig").preflight(bytes);
@@ -258,7 +280,7 @@ fn load(a: std.mem.Allocator, account: []const u8, scenario: []const u8, bytes: 
     if (bytes.len > document_bytes) return error.CalendarFixtureTooLarge;
     try @import("../bounded.zig").preflight(bytes);
     const state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" });
-    if (state.schema != 1 or !std.mem.eql(u8, state.account, account) or state.events.len > 128 or state.writes != state.generation or state.generation == std.math.maxInt(u64)) return error.InvalidCalendarFixture;
+    if (state.schema != 1 or !std.mem.eql(u8, state.account, account) or state.events.len > 128 or state.requests.len > max_sent or state.writes != state.generation or state.generation == std.math.maxInt(u64)) return error.InvalidCalendarFixture;
     for (state.events, 0..) |event, index| {
         if (calendarAccess(account, event.calendar_id, scenario) == null) return error.InvalidCalendarFixture;
         const id = try j.required(event.value, "id");
@@ -388,7 +410,7 @@ pub fn actionsScenario(scenario: []const u8) bool {
 fn seed(a: std.mem.Allocator, account: []const u8, now_ms: i64, scenario: []const u8) !State {
     if (now_ms < 0 or now_ms > 253402214400000) return error.InvalidCalendarTime;
     const day = @divFloor(now_ms, 86400000) * 86400000;
-    const extra: usize = if (actionsScenario(scenario)) 5 else 0;
+    const extra: usize = if (actionsScenario(scenario)) 7 else 0;
     const events = try a.alloc(StoredEvent, 4 + extra);
     if (extra != 0) {
         const Guest = struct { email: []const u8, self: bool = false, organizer: bool = false, responseStatus: []const u8 = "needsAction" };
@@ -416,17 +438,30 @@ fn seed(a: std.mem.Allocator, account: []const u8, now_ms: i64, scenario: []cons
         var focus = try timedEvent(a, "fixture-focus", "fixture-focus@example.test", "Focus block", day + 19 * 3600000, day + 20 * 3600000);
         try focus.object.put(a, "organizer", try j.value(a, .{ .email = account, .self = true }));
         events[8] = .{ .calendar_id = account, .value = focus };
+        // Changed occurrences on the third day, with their own versions:
+        // the standup gained two guests and a new title, and the office hours
+        // were already accepted while the series is unanswered.
+        const own: t.Target = .{ .account = account, .calendar_id = account };
+        var planning = try expandedInstance(a, standup, (try provider.decodeDocument(a, own, try std.json.Stringify.valueAlloc(a, standup, .{}))).event, day + 2 * 86400000 + 8 * 3600000 + 1800000);
+        try planning.object.put(a, "etag", .{ .string = "\"fixture-seed-standup-exception\"" });
+        try planning.object.put(a, "summary", .{ .string = "Standup with partners" });
+        try planning.object.put(a, "attendees", try j.value(a, [_]Guest{ .{ .email = account, .self = true, .organizer = true, .responseStatus = "accepted" }, .{ .email = "guest-one@example.test" }, .{ .email = "partner-one@example.test" }, .{ .email = "partner-two@example.test" } }));
+        events[9] = .{ .calendar_id = account, .value = planning };
+        var answered = try expandedInstance(a, office, (try provider.decodeDocument(a, own, try std.json.Stringify.valueAlloc(a, office, .{}))).event, day + 2 * 86400000 + 17 * 3600000);
+        try answered.object.put(a, "etag", .{ .string = "\"fixture-seed-office-exception\"" });
+        try answered.object.put(a, "attendees", try j.value(a, [_]Guest{ .{ .email = "host@example.test", .organizer = true, .responseStatus = "accepted" }, .{ .email = account, .self = true, .responseStatus = "accepted" } }));
+        events[10] = .{ .calendar_id = account, .value = answered };
     }
     events[0] = .{ .calendar_id = account, .value = try timedEvent(a, "fixture-planning", "fixture-planning@example.test", "Project planning", day + 9 * 3600000, day + 10 * 3600000) };
     events[1] = .{ .calendar_id = "fixture-shared-team", .value = try timedEvent(a, "fixture-team", "fixture-team@example.test", "Team check-in", day + 14 * 3600000, day + 15 * 3600000) };
-    events[2] = .{ .calendar_id = "fixture-readonly", .value = try j.value(a, .{ .id = "fixture-day", .iCalUID = "fixture-day@example.test", .etag = "\"fixture-seed-1\"", .status = "confirmed", .organizer = .{ .email = "calendar-owner@example.test" }, .summary = "Company day", .start = .{ .date = try t.time.format(a, .{ .kind = .date, .value = @divFloor(day, 86400000) }) }, .end = .{ .date = try t.time.format(a, .{ .kind = .date, .value = @divFloor(day, 86400000) + 1 }) }, .sequence = 0 }) };
+    events[2] = .{ .calendar_id = "fixture-readonly", .value = try j.value(a, .{ .id = "fixture-day", .iCalUID = "fixture-day@example.test", .etag = "\"fixture-seed-fixture-day\"", .status = "confirmed", .organizer = .{ .email = "calendar-owner@example.test" }, .summary = "Company day", .start = .{ .date = try t.time.format(a, .{ .kind = .date, .value = @divFloor(day, 86400000) }) }, .end = .{ .date = try t.time.format(a, .{ .kind = .date, .value = @divFloor(day, 86400000) + 1 }) }, .sequence = 0 }) };
     var recurring = try timedEvent(a, "fixture-daily", "fixture-daily@example.test", "Daily review", day + 16 * 3600000, day + 16 * 3600000 + 1800000);
     try recurring.object.put(a, "recurrence", try j.value(a, [_][]const u8{"RRULE:FREQ=DAILY"}));
     events[3] = .{ .calendar_id = account, .value = recurring };
     return .{ .account = account, .events = events };
 }
 fn timedEvent(a: std.mem.Allocator, id: []const u8, uid: []const u8, summary: []const u8, start: i64, end: i64) !j.Value {
-    return j.value(a, .{ .id = id, .iCalUID = uid, .etag = "\"fixture-seed-1\"", .status = "confirmed", .organizer = .{ .email = "host@example.test" }, .summary = summary, .description = "Synthetic Calendar acceptance event.", .location = "Meeting room", .start = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = start }) }, .end = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = end }) }, .sequence = 0, .htmlLink = try std.fmt.allocPrint(a, "https://calendar.google.com/calendar/event?eid={s}", .{id}), .hangoutLink = "https://meet.example.test/fixture", .extendedProperties = .{ .private = .{ .fixtureProperty = "preserved" } } });
+    return j.value(a, .{ .id = id, .iCalUID = uid, .etag = try std.fmt.allocPrint(a, "\"fixture-seed-{s}\"", .{id}), .status = "confirmed", .organizer = .{ .email = "host@example.test" }, .summary = summary, .description = "Synthetic Calendar acceptance event.", .location = "Meeting room", .start = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = start }) }, .end = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = end }) }, .sequence = 0, .htmlLink = try std.fmt.allocPrint(a, "https://calendar.google.com/calendar/event?eid={s}", .{id}), .hangoutLink = "https://meet.example.test/fixture", .extendedProperties = .{ .private = .{ .fixtureProperty = "preserved" } } });
 }
 fn agendaItems(a: std.mem.Allocator, state: State, target: t.Target, window: t.Window) ![]const j.Value {
     var items: std.ArrayList(j.Value) = .empty;
@@ -477,6 +512,11 @@ fn expandedInstance(a: std.mem.Allocator, value: j.Value, event: t.Event, first:
     _ = instance.object.swapRemove("recurrence");
     try instance.object.put(a, "id", .{ .string = try std.fmt.allocPrint(a, "{s}_{d}", .{ event.id, first }) });
     try instance.object.put(a, "recurringEventId", .{ .string = event.id });
+    // Each occurrence has its own version, derived from the series version
+    // as Google's change whenever the series changes.
+    const series_etag = j.text(value, "etag");
+    if (series_etag.len < 2) return error.InvalidCalendarFixture;
+    try instance.object.put(a, "etag", .{ .string = try std.fmt.allocPrint(a, "\"{s}-{d}\"", .{ series_etag[1 .. series_etag.len - 1], first }) });
     const start = try j.value(a, .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = first }) });
     try instance.object.put(a, "originalStartTime", start);
     try instance.object.put(a, "start", start);
