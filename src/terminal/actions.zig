@@ -112,7 +112,7 @@ pub const entries = [_]Entry{
     .{ .id = .add_contact, .name = "Add sender to contacts", .detail = "Prefill a contact from this mail", .needs_mail = true, .contact_write = true },
     .{ .id = .files, .name = "Attachments", .detail = "Save or open received files", .keys = "B", .needs_mail = true },
     .{ .id = .save_all, .name = "Save attachments", .detail = "Choose files and a destination folder", .keys = ":save-all", .needs_mail = true },
-    .{ .id = .discard_draft, .name = "Discard local draft", .detail = "Review and remove this draft; Gmail is unchanged", .keys = "Ctrl+X / :discard-draft", .needs_draft = true },
+    .{ .id = .discard_draft, .name = "Discard local draft", .detail = "Review and remove this draft (Ctrl+X while composing); Gmail is unchanged", .keys = ":discard-draft", .needs_draft = true },
     .{ .id = .undo, .name = "Undo last mail action", .detail = "Reverse this account's completed operation", .keys = "Ctrl+Z", .needs_mail = true, .write = true },
     .{ .id = .send_grace, .name = "Send cancellation period", .detail = "Configure the local 0–30 second grace period", .keys = ":send-grace" },
     .{ .id = .resume_send, .name = "Resume pending send", .detail = "Explicitly restart a paused local countdown", .keys = ":resume-send", .needs_compose = true },

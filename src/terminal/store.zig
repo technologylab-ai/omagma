@@ -2054,6 +2054,10 @@ pub const Store = struct {
         };
         return if (try @import("operation_history.zig").source(s, s.allocator, id) != null) error.ArchivedDraftReadOnly else error.DraftNotFound;
     }
+    /// A discard that must never cancel a queued or paused send refuses.
+    pub fn requireNoQueuedSend(s: *const Store, id: []const u8) !void {
+        for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and entry.state == .queued) return error.DraftSendQueued;
+    }
     fn cancelDraftQueue(s: *Store, id: []const u8) !void {
         for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and (entry.state == .preparing or entry.state == .submitting or entry.state == .unknown)) return error.UnknownOutcome;
         for (s.state.sendQueue) |*entry| if (std.mem.eql(u8, entry.draftId, id) and entry.state == .queued) {

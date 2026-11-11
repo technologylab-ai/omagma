@@ -250,7 +250,7 @@ class Terminal:
             require(self.process.poll() is not None, "exit oracle used before child actually exited")
         elif signal_mode:
             self.process.send_signal(signal.SIGINT if signal_mode is True else signal_mode)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 8
         next_back = 0
         backs = 0
         while self.process.poll() is None and time.monotonic() < deadline:
@@ -262,9 +262,12 @@ class Terminal:
                 if self.process.poll() is None:
                     self.send(b"q")
                 backs += 1
-                next_back = time.monotonic() + .4
+                # Leaving an unchanged composer (or a discard) drops keys
+                # until the keyboard has been quiet for 0.6 s; pause longer
+                # than that between backs, as a person would.
+                next_back = time.monotonic() + .75
             self.pump()
-        require(self.process.poll() is not None, "TUI did not exit within5s")
+        require(self.process.poll() is not None, "TUI did not exit within 8s")
         require(self.process.returncode == 0, "TUI did not exit cleanly after the owned workflow")
         restored = termios.tcgetattr(self.slave)
         # Check the complete saved termios tuple, including control characters.
@@ -497,6 +500,11 @@ def exercise(terminal, action):
         terminal.until(lambda: "Diagnostic: NotRegularFile" in terminal.text())
         terminal.send(b"q")
         terminal.gap()
+        # Back from the untouched composer; keys right after it are dropped
+        # until the keyboard has been quiet.
+        terminal.send(b"q")
+        terminal.until(lambda: "Subject:" not in terminal.text())
+        terminal.gap(.75)
         result = terminal.finish()
         with Client(terminal.binary, terminal.directory) as client:
             # A refused file changes nothing, so Back from this otherwise

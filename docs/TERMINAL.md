@@ -247,27 +247,44 @@ created when the composer opened and shows "Nothing written · no draft kept".
 The generated quote, attribution line, signature and a recipient prefilled from
 Contacts do not count as changes; typing, a recipient, an attachment, another
 sender, a format or original-inclusion choice does, and that draft is kept as
-before. A draft reopened from Drafts is always kept when you leave it.
+before. A draft reopened from Drafts is always kept when you leave it. Before
+removing anything, Omagma checks that the stored draft is still exactly what the
+composer created: if an agent or another program filled it in meanwhile, the
+draft stays and the usual "saved draft changed" choice opens instead.
 
 **Ctrl+X** reviews discarding the current draft from every compose state:
 normal mode, INSERT (Ctrl+X is never text), the compose buttons, the narrow
 full preview and send review. `d` in normal mode and `:discard-draft` open the
 same review, and **[Ctrl+X Discard]** is the last Tab stop below the composer.
-The review names the draft (subject or "(no subject)" and the number of
+The button and its footer key stay visible at every terminal width: shortened
+to **^X Discard** where space is short, and the button moves to a row of its
+own when needed. The review names the draft (subject or "(no subject)" and the number of
 recipients) and says what is removed: the local draft, its recovery and preview
 copies and the local copies of its attached files; your original files and
-received mail are untouched. `y` or Enter on **[y Discard]** discards, then
-returns to the mailbox, reader or Drafts view the composer came from with
-"Draft discarded". **[Esc Cancel]** is focused first; Esc, `q` or Enter on it
-keeps the draft and returns to the composer unchanged. `y` acts only after the
-review has been on screen for a moment, so a key typed ahead or held down never
-discards. A discarded draft cannot be restored; Ctrl+Z does not bring it back.
+received mail are untouched. `y`, Enter on **[y Discard]** or a click on it
+discards, then returns to the mailbox, reader or Drafts view the composer came
+from with "Draft discarded". **[Esc Cancel]** is focused first; Esc or Enter on
+it keeps the draft and returns to the composer unchanged (`q` too when the
+review was opened outside INSERT). Only Tab and Shift+Tab move between the two
+buttons; arrows, `j`/`k` and Ctrl+N/P do nothing here.
+
+The review confirms only on a still keyboard: the whole review must have been
+on screen, and no key pressed, for a moment (0.6 s; every key, the opening
+Ctrl+X included, starts that moment again), and a refused confirm asks for 2 s
+of quiet before the next one. Text typed on after a stray Ctrl+X, a held or
+repeating `y`, nano's Ctrl+X `y` and the second click of a double click never
+discard; opened from INSERT, other letters only show "Esc keeps the draft · y
+discards it". After a discard, or Back from an unchanged composer, keys are
+dropped until the keyboard has been quiet for a moment, so typed-ahead letters
+never act on the mailbox. A discarded draft cannot be restored; Ctrl+Z does not
+bring it back.
 
 Discard never deletes anything in Gmail. A draft taken back from Gmail keeps its
 Gmail copy in Gmail Drafts, and the review says so. A draft paused in Gmail, a
 send with an unknown outcome and a queued send stay protected: Ctrl+X names the
 reason (take the draft back with `g`, check `:receipt`, or `:cancel-send`
-first) and removes nothing.
+first) and removes nothing. The same applies to a review opened from the Drafts
+list: a queued or paused send is never cancelled by a discard there either.
 Editing invalidates the count until autosave and measurement finish. The measured
 content is checked again before sending; another process changing the saved
 draft requires a new review. A cancelled or rejected send also requires a fresh

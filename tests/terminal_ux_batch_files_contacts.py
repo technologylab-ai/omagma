@@ -16,9 +16,9 @@ from terminal_integration import ACCOUNTS, Client, FIXTURES, require
 from terminal_mouse import click, point
 from terminal_pty import wait_saved_compose
 from terminal_reader import reader_contains
-from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture,
+from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture, focus_button,
     command, compose, diagnose, no_writes, read_draft, run_cases, start,
-    wait_send_review, wait_ux_dialog)
+    wait_send_review)
 
 
 def action_label(terminal, word):
@@ -318,21 +318,27 @@ def discard_draft(binary, directory, capture_dir=None):
         terminal.send(ENTER)
         terminal.until(lambda: "Review send" not in terminal.text())
         before = read_draft(binary, directory, extra)
+        # The review shows its own keys: footer and the line under its buttons.
+        review = ("Discard local draft", "[y Discard]", "[Esc Cancel]", "y Discard · Esc Keep draft · Tab Buttons")
         command(terminal, "discard-draft")
-        wait_ux_dialog(terminal, "Discard local draft", "[y Discard]", "Discard only this local draft · 1 recipient",
-                       cancel="[Esc Cancel]", filtered=False)
+        terminal.until(lambda: all(value in terminal.text() for value in (*review, "Discard only this local draft · 1 recipient")))
         terminal.send(ENTER)
         terminal.until(lambda: "[Esc Cancel]" not in terminal.text() and "Subject:" in terminal.text())
         require(read_draft(binary, directory, extra)["id"] == before["id"], "default discard Enter deleted the draft")
         command(terminal, "discard-draft")
-        wait_ux_dialog(terminal, "Discard local draft", "[y Discard]", cancel="[Esc Cancel]", filtered=False)
+        terminal.until(lambda: all(value in terminal.text() for value in review))
         capture(terminal, capture_dir, "ux-local-draft-discard-review")
-        activate_button(terminal, "[y Discard]")
+        # The review confirms only after the keyboard has been still.
+        focus_button(terminal, "[y Discard]")
+        terminal.gap(.75)
+        terminal.send(ENTER)
         terminal.until(lambda: "Subject:" not in terminal.text() and "[Esc Cancel]" not in terminal.text()
                        and "Draft discarded" in terminal.text())
         with Client(binary, directory, extra=extra) as client:
             require(client.request("draft.list")["drafts"] == [], "explicit local discard left recovery draft behind")
         no_writes(binary, directory, extra)
+        # Keys right after a discard are dropped until the keyboard is quiet.
+        terminal.gap(.75)
         terminal.finish()
     except Exception:
         diagnose(terminal)

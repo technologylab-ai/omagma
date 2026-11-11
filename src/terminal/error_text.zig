@@ -29,6 +29,7 @@ const entries = [_]Entry{
     .{ .code = "FollowUpVersionRequired", .text = "expectedVersion is required; use 0 for a new follow-up or the version from reminder.list" },
     .{ .code = "GmailDraftImportUnsupported", .text = "This Gmail draft cannot be imported completely; continue in Gmail" },
     .{ .code = "DraftPausedInGmail", .text = "This draft is paused in Gmail; check or take it back first" },
+    .{ .code = "DraftSendQueued", .text = "A send is queued for this draft; cancel it (queue.cancel) before discarding" },
     .{ .code = "GmailDraftOutcomeUnknown", .text = "The Gmail draft upload is unconfirmed; check status and do not upload again" },
     .{ .code = "GmailDraftChanged", .text = "The Gmail draft handoff changed; read it again" },
     .{ .code = "GmailDraftConflict", .text = "The Gmail draft changed; check status before choosing a local copy" },

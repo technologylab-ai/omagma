@@ -676,7 +676,14 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "draft.list")) {
             const limit = try j.integer(req, "limit", 100);
             if (limit < 1 or limit > 100) return error.InvalidPageLimit;
-            return draft_summary.list(a, store.state.drafts, store.state.draftLinks, j.text(req, "cursor"), @intCast(limit));
+            const listed = try draft_summary.list(a, store.state.drafts, store.state.draftLinks, j.text(req, "cursor"), @intCast(limit));
+            // A draft whose send is queued (or paused) says so, so a list
+            // can refuse to discard it before asking (the bounded queue
+            // adds a few bytes to at most a handful of rows).
+            for ((j.get(listed, "drafts") orelse return listed).array.items) |*row| {
+                store.requireNoQueuedSend(j.text(row.*, "id")) catch try row.object.put(a, "sendQueued", .{ .bool = true });
+            }
+            return listed;
         }
         if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.read")) return @import("draft_gmail_commands.zig").readResponse(a, &store, try store.draft(try j.required(req, "draftId")));
@@ -776,7 +783,10 @@ pub const Session = struct {
             return response;
         }
         if (std.mem.eql(u8, cmd, "draft.discard")) {
-            try store.discardDraft(try j.required(req, "draftId"));
+            const draft_id = try j.required(req, "draftId");
+            // Checked under the same store lock as the removal itself.
+            if (try j.boolean(req, "keepQueuedSend", false)) try store.requireNoQueuedSend(draft_id);
+            try store.discardDraft(draft_id);
             return j.value(a, .{ .discarded = true });
         }
         if (std.mem.eql(u8, cmd, "draft.patch")) return s.patchDraft(a, &store, req);
@@ -7285,4 +7295,37 @@ test "invitation inspect: a published event's notes are bounded at a character b
     // An invitation (REQUEST) is not a published event: nothing is added.
     const request = try std.mem.replaceOwned(u8, a, ics.items, "METHOD:PUBLISH", "METHOD:REQUEST");
     try std.testing.expect(!Session.publishedDetails(a, request, "self@example.test", &.{}).known);
+}
+
+test "draft discard: keepQueuedSend refuses a queued send instead of cancelling it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/queued-discard", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const created = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Queued", .bodyText = "Queued note" } }));
+    const id = j.text(created, "id");
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = "queued-discard", .delaySeconds = 30 }));
+    try std.testing.expectError(error.DraftSendQueued, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id, .keepQueuedSend = true })));
+    const queue = j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.list", .account = account })), "queue").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), queue.len);
+    try std.testing.expectEqualStrings("queued", j.text(queue[0], "state"));
+    const rows = j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    // The list names the queued send, so a list can refuse before asking.
+    try std.testing.expect(j.get(rows[0], "sendQueued").?.bool);
+    // Without the flag the documented behaviour stays: the queued send is
+    // cancelled and the draft removed.
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id }));
+    try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 }

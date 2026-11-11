@@ -487,6 +487,11 @@
         "draftId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "keepQueuedSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Refuse with DraftSendQueued instead of cancelling a queued or paused send for this draft."
         }
       },
       "required": [

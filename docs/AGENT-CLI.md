@@ -299,7 +299,7 @@ empty `mail.mark` (`EmptyMutation`), conflicting labels or an invalid `scope`.
 | draft.preview | draft or draftId, optional operationId (reuses that send's recorded Drive receipts in attachmentPlan); bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
 | draft.open-preview | draftId; writes a bounded private sandboxed HTML preview and explicitly opens this account's Chrome profile; sends no mail |
 | draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent; explicit forkIfSettled/copyFromDraftId preserve local edits under a new ID |
-| draft.list / read / send / discard | list pages compact active summaries with limit/cursor; read/send/discard require draftId; send also requires operationId |
+| draft.list / read / send / discard | list pages compact active summaries with limit/cursor (a draft with a queued or paused send adds sendQueued:true); read/send/discard require draftId; send also requires operationId; discard with keepQueuedSend:true refuses (DraftSendQueued) instead of cancelling a queued send |
 | draft.queue | draftId, operationId, optional delaySeconds 0..30 (default 10); stages a durable unsent intent and returns queueId/dueAtMs/dueAtIso/state; dryRun:true plans without staging |
 | queue.list / read / cancel / resume / process | read/cancel/resume/process require queueId; resume accepts delaySeconds; process requires due time or wait:true; no automatic processing after restart |
 | attachment.import / discard | import takes path and optional mimeType, returning immutable account blobId metadata; discard takes blobId and refuses referenced content |
