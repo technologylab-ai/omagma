@@ -263,7 +263,8 @@ pub fn execute(io: std.Io, a: std.mem.Allocator, client: t.Client, input: j.Valu
         try request.object.put(a, "draft", draft);
     }
     const label_state = eq(command, "mail.label-state") or (eq(command, "labels.list") and (j.get(request, "messageIds") != null or j.get(request, "messageId") != null or j.get(request, "scope") != null));
-    const scoped = j.get(request, "scope") != null and !eq(command, "mail.triage-scope");
+    // Calendar delete/RSVP reviews carry their own event|series scope.
+    const scoped = j.get(request, "scope") != null and !eq(command, "mail.triage-scope") and !std.mem.startsWith(u8, command, "calendar.");
     if (scoped) {
         if (!label_state and !eq(command, "mail.batch") and action(command) == null) return error.ScopeRequiresTriageCommand;
         const scope = try @import("triage.zig").scope(request);

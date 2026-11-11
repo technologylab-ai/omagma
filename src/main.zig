@@ -84,6 +84,7 @@ fn usageError(err: anyerror) bool {
         error.SendDelayRequiresSend,
         error.InvalidSendDelay,
         error.InvalidTriageScope,
+        error.InvalidCalendarScope,
         error.ScopeRequiresTriageCommand,
         error.ScopeRequiresSingleMessage,
         error.AttachmentsRequireDraftSource,
