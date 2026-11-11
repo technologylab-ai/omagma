@@ -930,6 +930,30 @@ def calendar_actions_contract(runner):
     require(failed["code"] == "UnknownOutcome" and writes() == before + 1, "a write whose record failed was not reported unknown")
     require(run("calendar", "event-reconcile", *target, *unrecorded)["state"] == "applied" and writes() == before + 1,
             "reconcile did not prove the unrecorded delete without resending it")
+    # An unconfirmed series delete: a review on another occurrence is refused
+    # and names it; event-pending opens it by ID or finds it from the event.
+    import datetime
+    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    week = run("calendar", "agenda", *target, "--date", today, "--view", "week", "--time-zone", "UTC")["snapshot"]["events"]
+    standups = sorted((event for event in week if event["summary"] == "Standup"), key=lambda event: event["start"]["value"])
+    first, second = standups[0], standups[1]
+    series = run("calendar", "event-delete-review", *target, "--event-id", first["id"], "--expected-etag", first["etag"],
+                 "--scope", "series", "--send-updates", "none", "--operation-id", "series-unknown")
+    require(run("calendar", "event-apply", *target, "--operation-id", "series-unknown", "--review-hash", series["reviewHash"],
+                scenario="calendar-prewrite-unavailable", status=6)["state"] == "unknown", "the series delete was not unknown")
+    held = run("calendar", "event-delete-review", *target, "--event-id", second["id"], "--scope", "event",
+               "--send-updates", "none", "--operation-id", "held", "--dry-run", status=3, ok=False)
+    require(held["code"] == "CalendarOperationPending" and held.get("blockingOperationId") == "series-unknown"
+            and held.get("blockingKind") == "event", f"the refusal does not name the blocking write: {held}")
+    by_id = run("calendar", "event-pending", *target, "--operation-id", "series-unknown")
+    require(by_id["pending"]["review"]["operationId"] == "series-unknown", "event-pending did not open the write by ID")
+    for extra in ([], ["--series-event-id", second["recurring_event_id"]]):
+        found = run("calendar", "event-pending", *target, "--event-id", second["id"], *extra)
+        require(found["pending"] and found["pending"]["review"]["operationId"] == "series-unknown" and found["seriesChecked"],
+                f"event-pending from another occurrence missed the series delete: {found}")
+    result = runner.usage(["calendar", "event", *target, "--event-id", second["id"], "--series-event-id", "x", "--fixtures",
+                           *fixture.options(), "--fixture-scenario", "calendar-actions", "--cache-dir", str(cache), "--account", account], "omagma:")
+    require(result.returncode == 2 and b"--series-event-id is not valid here" in result.stderr, "--series-event-id outside event-pending was accepted")
     require(run("cache", "stats")["fixtureSends"] == 0, "Calendar actions sent mail")
 
 

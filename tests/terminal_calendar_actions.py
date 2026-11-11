@@ -9,6 +9,7 @@ Run under this repository's cooperative measurement reservation.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 from pathlib import Path
 import tempfile
@@ -383,25 +384,39 @@ def narrow(binary, directory, captures, frames):
         terminal.until(lambda: "( ) Accept · a" in terminal.text() and "Checking" not in terminal.text())
         terminal.send(b"a")
         terminal.until(lambda: "(•) Accept · a" in terminal.text() and "[y Accept" in terminal.text())
-        require("a/m/x Choose · y Send" in terminal.text(), "narrow chooser lost its keys")
+        require("Accept · a" in terminal.text() and "[y Accept" in terminal.text() and "[Esc]" in terminal.text(), "narrow chooser lost its keys")
         capture(terminal, captures, "calendar-rsvp-narrow-mono")
         frame(frames, terminal, "rsvp-narrow-40x12")
-        terminal.send(b"\x1b")
-        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        # At 40x12 the title stays pinned above the choices and the
+        # consequence above the button: the answer can really be sent.
+        flat = " ".join(terminal.text().split())
+        require("Partner sync" in flat and "Google emails your answer" in flat, "the 40x12 RSVP hides the event or what happens")
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Accepted · Partner sync" in terminal.text())
+        require_sent(owned, 0, "PATCH", "fixture-invite", '"fixture-seed-fixture-invite"', "all")
         clear_filter(terminal)
         pick(terminal, "Roadmap")
         terminal.send(b"D")
         terminal.until(lambda: "Email 2 guests" in terminal.text() and "Checking" not in terminal.text())
         frame(frames, terminal, "delete-narrow-40x12")
-        terminal.send(b"\x1b")
-        require(writes(owned) == 0, "the narrow dialogs wrote Calendar")
+        terminal.send(b"j\r")
+        terminal.until(lambda: "[y Delete, no email]" in terminal.text())
+        flat = " ".join(terminal.text().split())
+        require("Roadmap review" in flat and "without emailing 2 guests" in flat, "the 40x12 delete hides the event or what happens")
+        frame(frames, terminal, "delete-narrow-40x12-chosen")
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Deleted · Roadmap review" in terminal.text())
+        require(writes(owned) == 2, "the 40x12 dialogs did not each write once")
+        require_sent(owned, 1, "DELETE", "fixture-hosted", '"fixture-seed-fixture-hosted"', "none")
         terminal.finish()
     except Exception:
         print(terminal.text())
         raise
     finally:
         terminal.close()
-    return {"case": "narrow-40x12-mono", "writes": 0}
+    return {"case": "narrow-40x12-mono", "writes": 2}
 
 
 def guards(binary, directory, frames):
@@ -434,6 +449,44 @@ def guards(binary, directory, frames):
         terminal.send(b"\r")
         terminal.until(lambda: "Nothing was changed" in terminal.text())
         require(writes(owned) == 0, "wheel and Enter deleted the event")
+        # A held y (key repeat) never confirms: each early press restarts the wait.
+        terminal.send(b"D")
+        ready(terminal, "It has no guests, so no email is sent")
+        held = time.monotonic()
+        while time.monotonic() - held < 1.7:
+            terminal.send(b"y")
+            terminal.gap(.03)
+        terminal.gap(.3)
+        require(writes(owned) == 0, "holding y deleted the event")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        # A changed choice is a different write: shown and settled first.
+        clear_filter(terminal)
+        pick(terminal, "Partner")
+        terminal.send(b"r")
+        ready(terminal, "Your answer now")
+        terminal.send(b"a")
+        terminal.until(lambda: "[y Accept" in terminal.text())
+        settle(terminal)
+        terminal.send(b"xy")
+        terminal.gap(.6)
+        require(writes(owned) == 0, "y typed with a changed answer sent it")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        clear_filter(terminal)
+        pick(terminal, "Roadmap")
+        terminal.send(b"D")
+        ready(terminal, "Email 2 guests")
+        terminal.send(b"j\r")
+        terminal.until(lambda: "[y Delete, no email]" in terminal.text())
+        settle(terminal)
+        terminal.send(b"k\ry")
+        terminal.gap(.6)
+        require(writes(owned) == 0, "y typed with a changed email choice deleted the event")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        clear_filter(terminal)
+        pick(terminal, "Focus block")
         # Too small for Calendar: D opens nothing and y sends nothing.
         terminal.resize(24, 10)
         terminal.gap(.5)
@@ -449,14 +502,14 @@ def guards(binary, directory, frames):
         # Too short to show the event, what happens and the button together.
         clear_filter(terminal)
         pick(terminal, "Roadmap")
-        terminal.resize(60, 11)
+        terminal.resize(40, 10)
         terminal.gap(.5)
         terminal.send(b"D")
         terminal.until(lambda: "Checking" not in terminal.text() and "Email 2 guests" in terminal.text())
         terminal.send(b"j\r")
         settle(terminal)
         terminal.send(b"y")
-        terminal.until(lambda: "Scroll or enlarge the terminal" in terminal.text())
+        terminal.until(lambda: "Enlarge the terminal" in terminal.text())
         frame(frames, terminal, "delete-short-refused")
         require(writes(owned) == 0, "a confirm on a dialog shown only in part wrote Calendar")
         terminal.send(b"\x1b")
@@ -584,6 +637,208 @@ def pending_series(binary, directory, frames):
     return {"case": "series-pending-and-double-click", "writes": writes(owned)}
 
 
+def midnight_ms():
+    now = datetime.datetime.now(datetime.UTC)
+    return int(datetime.datetime(now.year, now.month, now.day, tzinfo=datetime.UTC).timestamp() * 1000)
+
+
+def iso(ms):
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def provider_path(owned):
+    for path in (owned / "cache").rglob("calendar-provider-fixture.json"):
+        if json.loads(path.read_text())["account"] == ACCOUNTS[0]:
+            return path
+    return None
+
+
+def status_line(terminal):
+    return terminal.screen.lines()[-1]
+
+
+def meeting_card(binary, directory, frames):
+    """A due meeting card never covers a Delete/RSVP dialog: it waits (the
+    status says so) while the dialog is open; once focused with M it covers
+    the dialog and y does nothing there. Delete, RSVP, retry and archive."""
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    # Five minutes before Roadmap review (11:00): its card is due.
+    (fixture.root / "calendar-notification-now-ms").write_text(str(midnight_ms() + 10 * 3600000 + 55 * 60000) + "\n")
+
+    def open_calendar(terminal):
+        terminal.send(b"C")
+        terminal.until(lambda: "Calendar · Agenda" in terminal.text() and "Loading" not in terminal.text(), seconds=15)
+        terminal.until(lambda: "Starts in" in terminal.text(), seconds=12)
+        terminal.gap(.2)
+
+    def deferred(terminal):
+        require("Starts in" not in terminal.text() and "Upcoming meeting" not in terminal.text(),
+                "the meeting card was drawn over the dialog")
+        require("Meeting due · M shows it" in status_line(terminal), "the held-back meeting is not announced")
+
+    terminal = start(binary, owned, fixture, scenario="calendar-actions", columns=80, rows=24)
+    try:
+        open_calendar(terminal)
+        # RSVP: the email toggle, the consequence and the button stay in view.
+        pick(terminal, "Partner")
+        terminal.send(b"r")
+        ready(terminal, "Your answer now")
+        terminal.send(b"a")
+        terminal.until(lambda: "[y Accept" in terminal.text())
+        deferred(terminal)
+        require("Google emails your answer" in " ".join(terminal.text().split()), "the RSVP consequence is hidden")
+        frame(frames, terminal, "rsvp-meeting-deferred")
+        # M brings the card over the dialog: y now acts on the card, never
+        # on the hidden dialog.
+        terminal.send(b"M")
+        terminal.until(lambda: "keys here" in terminal.text())
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.gap(.6)
+        require(writes(owned) == 0, "y wrote through a meeting card covering the dialog")
+        frame(frames, terminal, "rsvp-meeting-focused")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "keys here" not in terminal.text() and "[y Accept" in terminal.text())
+        # Shown whole again: the wait starts over, then y sends.
+        terminal.send(b"y")
+        terminal.until(lambda: "press y again" in terminal.text())
+        require(writes(owned) == 0, "y confirmed the moment the dialog reappeared")
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Accepted · Partner sync" in terminal.text())
+        require_sent(owned, 0, "PATCH", "fixture-invite", '"fixture-seed-fixture-invite"', "all")
+        # Delete with the card due.
+        clear_filter(terminal)
+        pick(terminal, "Focus block")
+        terminal.send(b"D")
+        ready(terminal, "It has no guests, so no email is sent")
+        deferred(terminal)
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Deleted · Focus block" in terminal.text())
+        require_sent(owned, 1, "DELETE", "fixture-focus", '"fixture-seed-fixture-focus"', "none")
+        # The card returns once the dialog is closed.
+        terminal.until(lambda: "Starts in" in terminal.text(), seconds=12)
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    # Retry and archive confirmations under the due card.
+    terminal = start(binary, owned, fixture, scenario="calendar-prewrite-unavailable", columns=80, rows=24)
+    try:
+        open_calendar(terminal)
+        pick(terminal, "Daily review")
+        terminal.send(b"D")
+        ready(terminal, "Organized by host@example.test")
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Calendar did not confirm the outcome" in terminal.text())
+        terminal.send(b"r")
+        terminal.until(lambda: "Ctrl+R" in terminal.text() and "Checking" not in terminal.text())
+        terminal.send(CTRL_R)
+        terminal.until(lambda: "Send the identical request once more?" in terminal.text())
+        deferred(terminal)
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: len(sent(owned)) == 4)
+        require_sent(owned, 3, "DELETE", "fixture-daily_" + str(midnight_ms() + 16 * 3600000), sent(owned)[2]["ifMatch"], "none")
+        terminal.until(lambda: "Ctrl+D" in terminal.text() and "Sending" not in terminal.text())
+        terminal.send(b"\x04")
+        terminal.until(lambda: "Stop tracking this unconfirmed delete?" in terminal.text())
+        deferred(terminal)
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Stopped tracking the unconfirmed delete" in terminal.text())
+        frame(frames, terminal, "archive-meeting-deferred")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    return {"case": "meeting-card-defers", "writes": writes(owned)}
+
+
+def split_series(binary, directory, frames):
+    """A Google split series ID (`abc_R…`): an unconfirmed series delete is
+    found from another occurrence by the provider series, the lookup is
+    bounded, and the dialog resumes it."""
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        terminal.finish()
+    finally:
+        terminal.close()
+    path = provider_path(owned)
+    state = json.loads(path.read_text())
+    begin = midnight_ms() + 15 * 3600000
+    for series_id, summary in (("weeklysync", "Plain weekly sync"), ("weeklysync_R20261111T150000", "Imported weekly sync")):
+        state["events"].append({"calendar_id": ACCOUNTS[0], "value": {
+            "id": series_id, "iCalUID": series_id + "@example.test", "etag": '"imp-' + series_id + '"', "status": "confirmed",
+            "organizer": {"email": ACCOUNTS[0], "self": True}, "summary": summary,
+            "attendees": [{"email": ACCOUNTS[0], "self": True, "organizer": True, "responseStatus": "accepted"},
+                          {"email": "guest-one@example.test", "responseStatus": "needsAction"}],
+            "start": {"dateTime": iso(begin)}, "end": {"dateTime": iso(begin + 1800000)}, "sequence": 0,
+            "recurrence": ["RRULE:FREQ=DAILY"]}})
+    path.write_text(json.dumps(state))
+    terminal = start(binary, owned, fixture, scenario="calendar-prewrite-unavailable")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        pick(terminal, "Imported weekly sync")
+        terminal.send(b"D")
+        ready(terminal, "This event only")
+        terminal.send(SHIFT_TAB + b"\r" + b"\t\r")
+        terminal.until(lambda: "[y Delete series & email 1 guest]" in terminal.text())
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Calendar did not confirm the outcome" in terminal.text())
+        terminal.send(b"\x1b")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    require(sent(owned)[-1]["eventId"] == "weeklysync_R20261111T150000", "the split series was not the delete target")
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        # The plain series that shares the ID prefix is not held back.
+        pick(terminal, "Plain weekly sync")
+        terminal.send(b"D")
+        ready(terminal, "This event only")
+        require("saved but unconfirmed" not in terminal.text(), "another series sharing the ID prefix was held back")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        clear_filter(terminal)
+        # Another occurrence of the split series resumes its unconfirmed delete.
+        pick(terminal, "Imported weekly sync")
+        terminal.send(b"j")
+        terminal.gap(.3)
+        reads = json.loads(provider_path(owned).read_text())["reads"]
+        terminal.send(b"D")
+        terminal.until(lambda: "whole series is saved but unconfirmed" in " ".join(terminal.text().split()))
+        terminal.gap(2)
+        spent = json.loads(provider_path(owned).read_text())["reads"] - reads
+        require(spent <= 6, f"resuming the unconfirmed series delete read Calendar {spent} times")
+        frame(frames, terminal, "split-series-pending")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    return {"case": "split-series-pending", "reads": spent}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -603,7 +858,9 @@ def main():
                           ("narrow", lambda d: narrow(binary, d, args.capture_dir, args.frames_dir)),
                           ("guards", lambda d: guards(binary, d, args.frames_dir)),
                           ("series-facts", lambda d: series_facts(binary, d, args.frames_dir)),
-                          ("pending-series", lambda d: pending_series(binary, d, args.frames_dir))):
+                          ("pending-series", lambda d: pending_series(binary, d, args.frames_dir)),
+                          ("meeting-card", lambda d: meeting_card(binary, d, args.frames_dir)),
+                          ("split-series", lambda d: split_series(binary, d, args.frames_dir))):
             if args.case and name not in args.case:
                 continue
             directory = root / name
