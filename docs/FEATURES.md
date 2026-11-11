@@ -88,6 +88,11 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   Uncertain saves survive restart, with read-only checks, explicitly confirmed
   identical-request retry and uncertainty archival. The native CLI shares the
   review, apply and recovery workflow. [Calendar event guide](CALENDAR-EVENTS.md).
+- Delete an event or answer an invitation (Accept, Maybe, Decline) from the
+  Calendar view: a dialog names the event, time and calendar, asks whether guests
+  or the organizer are emailed, offers this occurrence or the whole series, and
+  writes only after `y`, conditional on the version shown. An attendee's delete
+  removes only their own copy. The CLI offers the same reviews with dry runs.
 - Save local follow-up reminders and browse due messages, including offline.
 - Explicitly continue a draft in Gmail while preserving its local copy and
   pausing local editing/sending; check status or import supported content into

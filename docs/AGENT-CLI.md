@@ -118,7 +118,10 @@ requests. Drafts are local in both interfaces, with optional explicit
 [Gmail draft handoff](TERMINAL.md#continue-a-draft-in-gmail).
 Both native interfaces support [Calendar reads and reviewed imports](CALENDAR-PERMISSIONS.md),
 plus reviewed ordinary timed/all-day event creation, editing and rescheduling,
-generated Google Meet details and pasted HTTPS meeting links. Uncertain saves
+generated Google Meet details and pasted HTTPS meeting links, and reviewed
+deletes and invitation answers on existing events (`calendar.event-delete-review`,
+`calendar.event-respond-review`; see
+[Delete events and answer invitations](CALENDAR-EVENTS.md#delete-events-and-answer-invitations)). Uncertain saves
 survive restart and support read-only checks, explicitly confirmed
 identical-request retry and uncertainty archival. The TUI adds agenda/day/week
 views and a guest picker using the destination account's Contacts (with an
@@ -201,7 +204,7 @@ requests retain the 3 MiB limit. See [all limits](TERMINAL.md#bounds-and-recover
 Optional string fields must be strings or omitted, not JSON null. Tokens never
 appear in this interface.
 
-Except `accounts.list`, **every command requires an explicit configured account**. `omagma cli --account ADDRESS` fills it in for lines that omit it; a line's own `account` always wins (an invalid `--account` is a usage error, status 2). `omagma cli --strict` exits at EOF with 6 when any reply was `UnknownOutcome` or reported a send/RSVP outcome or queue state `unknown`/`submitting` (or an interrupted write without replay identity), else 3 when any reply had `ok:false` or reported a send/RSVP that was not applied (rejected, blocked, preparationStopped, stopped, canceled, a blocked dry run), else 0. Provider message/thread IDs can collide across accounts. Never reuse a cursor, draft ID, contact or operation from another account. `accounts.list` reports enabled accounts and locally configured capabilities; successful provider authorization is checked again before network access. Private config and grant registry are not message data.
+Except `accounts.list`, **every command requires an explicit configured account**. `omagma cli --account ADDRESS` fills it in for lines that omit it; a line's own `account` always wins (an invalid `--account` is a usage error, status 2). `omagma cli --strict` exits at EOF with 6 when any reply was `UnknownOutcome` or reported a send/RSVP outcome, Calendar write state or queue state `unknown`/`submitting` (or an interrupted write without replay identity), else 3 when any reply had `ok:false` or reported a send/RSVP or Calendar write that was not applied (rejected, blocked, preparationStopped, stopped, canceled, a blocked dry run), else 0. Provider message/thread IDs can collide across accounts. Never reuse a cursor, draft ID, contact or operation from another account. `accounts.list` reports enabled accounts and locally configured capabilities; successful provider authorization is checked again before network access. Private config and grant registry are not message data.
 
 ```sh
 omagma cli --fixtures --cache-dir /absolute/private/mock-cache
@@ -822,7 +825,8 @@ accepted for compatibility.
 | `--rsvp-only` | Explicit email-only invitation reply; bypasses the default Accept/Tentative Calendar preflight and save. Its saved policy survives reconciliation |
 | `--to LIST`, `--cc LIST`, `--bcc LIST`, `--subject TEXT` | Outgoing address lists and subject |
 | `--body-file FILE`, `--body-stdin`, `--body TEXT` | UTF-8 source body; file/stdin avoids putting it in argv. For `mail reply`/`mail forward` it is the note above the quote (top-level `bodyText`); other compose flags are refused there |
-| `--dry-run` | `draft send`/`draft queue` and `mail archive`/`trash`/`restore`/`mark`/`batch`/`spam`/`unspam`: the JSONL `dryRun` plan, nothing sent, staged or relabeled; with supplied draft source (`mail send`, `draft create/update/preview`) the local file plan |
+| `--dry-run` | `draft send`/`draft queue` and `mail archive`/`trash`/`restore`/`mark`/`batch`/`spam`/`unspam`: the JSONL `dryRun` plan, nothing sent, staged or relabeled; with supplied draft source (`mail send`, `draft create/update/preview`) the local file plan; `calendar event-delete-review`/`event-respond-review` (a read-only plan, nothing saved) and `calendar event-apply` (apply's checks and `wouldSend`, nothing sent) |
+| `--scope event\|series`, `--response accepted\|tentative\|declined` | Calendar delete/RSVP reviews: one event or occurrence versus the whole series (this-and-following is not supported), and the answer. `--scope` on another Calendar verb and `--response` on a delete are usage errors (2); `--dry-run` on a Calendar verb without one is `DryRunUnsupported` (2) |
 | `--replace`, `--expected-content-digest DIGEST` | `draft update --replace` allows dropping saved recipients/threading; the digest binds `draft patch`, `draft send` or `draft queue` to a reviewed version |
 | `--format markdown\|plain` | Explicit source interpretation for compose/create/update/direct send/reply/forward or supplied-source preview; new CLI source defaults to plain |
 | `--preserve-formatting` | Reply/reply-all or forward with a read-only formatted original below the editable note |
@@ -851,13 +855,13 @@ Use --body-file or --body-stdin to keep content out of argv. --draft-file/--cont
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Success: `ok:true`, and for a send/RSVP an `applied` outcome, a `queued` staging or a sendable dry-run plan |
+| 0 | Success: `ok:true`, and for a send/RSVP an `applied` outcome, a `queued` staging or a sendable dry-run plan; for a Calendar write (`calendar apply`/`import`/`update`/`cancel`/`reconcile`, `event-apply`/`event-reconcile`/`event-retry`, `meet-event-apply`/`meet-event-reconcile`) a `state` other than unknown or rejected |
 | 1 | Other failure, such as configuration or I/O |
 | 2 | Usage error: unknown option or command, missing or malformed option value (including `cli --account`), or a flag on the wrong command; stderr names the option and the nearest valid one |
-| 3 | Rejected or not applied: validation, provider refusal, a blocked dry run, a send/RSVP outcome `rejected`, `blocked` or `preparationStopped`, `status:"stopped"`, or a queue state `canceled`, `preparing` or (after processing) still `queued` |
-| 4 | Missing authorization or capability |
+| 3 | Rejected or not applied: validation, provider refusal, a blocked dry run, a send/RSVP outcome `rejected`, `blocked` or `preparationStopped`, `status:"stopped"`, a queue state `canceled`, `preparing` or (after processing) still `queued`, or a Calendar write `state:"rejected"` |
+| 4 | Missing authorization or capability, including `CalendarReadPermissionRequired`/`CalendarWritePermissionRequired` |
 | 5 | The account, message, draft, label or other target was not found |
-| 6 | Unknown outcome: `UnknownOutcome`, a send/RSVP outcome or queue state `unknown`/`submitting`, a dry run replaying an unknown receipt, or an interrupted write without replay identity (Timeout, Canceled, TransientFailure, NetworkFailure or a reset connection on a write without `operationId`/`undoToken`) |
+| 6 | Unknown outcome: `UnknownOutcome` (also for a Calendar apply or retry ended by the deadline, cancellation or a failed journal write after its claim), a send/RSVP outcome, Calendar write state (including Meet notes) or queue state `unknown`/`submitting`, any failed `calendar event-retry` other than a malformed request (the earlier write stays unknown), a dry run replaying an unknown receipt, or an interrupted write without replay identity (Timeout, Canceled, TransientFailure, NetworkFailure or a reset connection on a write without `operationId`/`undoToken`) |
 | 7 | Transient: the error says `retryable:true` (CacheBusy, RateLimited, VaultBusy, refused connection, or an interruption of a read or of an operationId/undoToken write); repeat later unchanged |
 
 `omagma cli` exits 0 regardless of replies unless `--strict` is given (see the protocol section). JSONL command errors allow the next frame, while output failures may end the process. A live mutation's `UnknownOutcome` survives that exit path. Never put tokens in argv, logs, shell history or agent messages.

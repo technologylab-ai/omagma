@@ -26,7 +26,8 @@ CANARY = "fictional-private-argument-canary"
 LEGACY_MODES = ("daemon", "auth", "status")
 FAMILIES = {
     "calendar": ("list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile",
-                 "event-review", "event-apply", "event-reconcile", "open", "event-open", "event-retry", "event-abandon", "event-pending",
+                 "event-review", "event-delete-review", "event-respond-review", "event-apply", "event-reconcile", "open", "event-open",
+                 "event-retry", "event-abandon", "event-pending",
                  "meet-event-review", "meet-event-apply", "meet-event-reconcile", "meet-event-pending"),
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
@@ -322,6 +323,7 @@ calendar.list calendar.agenda calendar.event calendar.freebusy calendar.invitati
 calendar.review calendar.apply calendar.import calendar.update calendar.cancel calendar.reconcile
 calendar.event-review calendar.event-apply calendar.event-reconcile calendar.open calendar.event-open
 calendar.event-retry calendar.event-abandon calendar.event-pending
+calendar.event-delete-review calendar.event-respond-review
 calendar.meet-event-review calendar.meet-event-apply calendar.meet-event-reconcile calendar.meet-event-pending
 """.split())
 
@@ -349,7 +351,8 @@ def discovery(runner):
     for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply",
                     "calendar.agenda", "calendar.review", "calendar.event-review", "calendar.event-apply",
                     "calendar.event-reconcile", "calendar.open", "calendar.event-open", "calendar.event-retry",
-                    "calendar.event-abandon", "calendar.event-pending", "calendar.meet-event-review",
+                    "calendar.event-abandon", "calendar.event-pending", "calendar.event-delete-review",
+                    "calendar.event-respond-review", "calendar.meet-event-review",
                     "calendar.meet-event-apply", "calendar.meet-event-reconcile", "calendar.meet-event-pending",
                     "draft.gmail-save", "reminder.set"):
         result = runner.run(["cli", "--config", str(runner.invalid_config), "--schema", command], without_home=True)
@@ -806,6 +809,130 @@ def rsvp_contract(runner):
     counts(2)
 
 
+def calendar_actions_contract(runner):
+    """One-shot delete/RSVP reviews: dry runs, exact apply, refusals and the
+    differentiated exit statuses (0 applied, 2 usage, 3 refused, 4 permission,
+    6 unknown) through the synthetic provider."""
+    from terminal_calendar import Invitations
+
+    root = runner.directory / "calendar-actions"
+    fixture = Invitations(root)
+    cache = root / "cache"
+    account = ACCOUNTS[0]
+
+    def run(family, verb, *arguments, scenario="calendar-actions", status=0, ok=True):
+        result = runner.run([family, verb, "--fixtures", *fixture.options(), "--fixture-scenario", scenario,
+                             "--cache-dir", str(cache), "--account", account, *arguments])
+        reply = json.loads(result.stdout)
+        require(result.returncode == status and reply.get("ok") is ok,
+                f"calendar {verb} exited {result.returncode} with {reply}")
+        return reply["data"] if ok else reply["error"]
+
+    def writes():
+        states = [json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")]
+        return sum(state["writes"] for state in states if state["account"] == account)
+
+    def last_sent():
+        """The newest mutating request as it reached the synthetic wire."""
+        states = [json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")]
+        return [state for state in states if state["account"] == account][0]["requests"][-1]
+
+    target = ["--calendar-id", account]
+    plan = run("calendar", "event-delete-review", *target, "--event-id", "fixture-hosted", "--scope", "event",
+               "--send-updates", "none", "--operation-id", "plan-1", "--dry-run")
+    require(plan["dryRun"] and not plan["saved"] and "reviewHash" not in plan and plan["guestCount"] == 2,
+            "a delete dry run saved a review or lost its guest facts")
+    etag = run("calendar", "event", *target, "--event-id", "fixture-hosted")["event"]["etag"]
+    # The printed shell example is executable once its returned IDs are filled in.
+    text = runner.run(["calendar", "event-delete-review", "--help"], without_configuration=True).stdout.decode()
+    argv = shlex.split(text.split("Shell example", 1)[1].splitlines()[1].strip())
+    require(argv[:3] == ["omagma", "calendar", "event-delete-review"], "delete shell example changed its operation")
+    values = {"--account": account, "--calendar-id": account, "--event-id": "fixture-hosted",
+              "--expected-etag": etag, "--operation-id": "delete-hosted"}
+    for index, value in enumerate(argv[:-1]):
+        if value in values:
+            argv[index + 1] = values[value]
+    result = runner.run([*argv[1:], "--fixtures", *fixture.options(), "--fixture-scenario", "calendar-actions",
+                         "--cache-dir", str(cache)])
+    require(result.returncode == 0, f"the printed delete example failed: {result.stdout[:400]!r}")
+    reviewed = json.loads(result.stdout)["data"]
+    require(reviewed["sendUpdates"] == "all" and "emails 2 guests" in reviewed["consequence"],
+            "the delete review hid its guest email consequence")
+    confirm = [*target, "--operation-id", "delete-hosted", "--review-hash", reviewed["reviewHash"]]
+    planned = run("calendar", "event-apply", *confirm, "--dry-run")
+    require(planned["state"] == "not_sent" and planned["wouldSend"]["method"] == "DELETE"
+            and planned["wouldSend"]["ifMatch"] == etag and writes() == 0,
+            "an apply dry run wrote Calendar or misreported its request")
+    require(run("calendar", "event-apply", *confirm)["state"] == "applied" and writes() == 1,
+            "the reviewed delete was not applied exactly once")
+    wire = last_sent()
+    require(wire["method"] == "DELETE" and wire["eventId"] == "fixture-hosted" and wire["ifMatch"] == etag
+            and wire["query"] == "sendUpdates=all", f"the delete reached the wire as {wire}")
+    require(run("calendar", "event-apply", *confirm)["state"] == "applied" and writes() == 1,
+            "replaying the receipt deleted again")
+    # Flags that do not belong to the verb are usage errors (2), with words.
+    for arguments, words in ((["event-delete-review", *target, "--event-id", "fixture-focus", "--scope", "event", "--response", "accepted",
+                               "--send-updates", "none", "--operation-id", "bad-response", "--dry-run"], b"--response is not valid here"),
+                             (["event", *target, "--event-id", "fixture-focus", "--scope", "series"], b"--scope is not valid here"),
+                             (["event-reconcile", *confirm, "--dry-run"], b"event-delete-review, event-respond-review and event-apply")):
+        result = runner.usage(["calendar", *arguments, "--fixtures", *fixture.options(), "--fixture-scenario", "calendar-actions",
+                               "--cache-dir", str(cache), "--account", account], "omagma:")
+        require(result.returncode == 2 and words in result.stderr, f"calendar {arguments[0]} misuse: {result.stderr!r}")
+    # A review without the version it binds is refused with the field and the next step.
+    for etag_arguments in ([], ["--expected-etag", ""]):
+        missing = run("calendar", "event-delete-review", *target, "--event-id", "fixture-focus", *etag_arguments, "--scope", "event",
+                      "--send-updates", "none", "--operation-id", "no-etag", status=3, ok=False)
+        require(missing["code"] == "CalendarExpectedEtagRequired" and missing.get("field") == "expectedEtag"
+                and missing.get("hint") and "must be of type" not in missing["message"],
+                f"a missing or empty expected etag was explained as {missing}")
+    stranger = run("calendar", "event-respond-review", *target, "--event-id", "fixture-planning", "--scope", "event",
+                   "--send-updates", "none", "--operation-id", "stranger", "--dry-run", status=3, ok=False)
+    require(stranger["code"] == "NotAnAttendee" and stranger.get("hint"), "NotAnAttendee has no next step")
+    refused = run("calendar", "event-respond-review", *target, "--event-id", "fixture-focus", "--scope", "event",
+                  "--response", "accepted", "--send-updates", "all", "--operation-id", "host-rsvp", "--dry-run",
+                  status=3, ok=False)
+    require(refused["code"] == "CalendarOrganizerCannotRespond" and refused.get("hint"),
+            "an organizer RSVP was not refused with a next step")
+    runner.usage(["calendar", "event-delete-review", "--fixtures", "--account", account, *target, "--event-id", "x",
+                  "--scope", "following", "--send-updates", "none", "--operation-id", "bad"], "InvalidCalendarScope")
+    denied = run("calendar", "event-delete-review", *target, "--event-id", "fixture-focus", "--scope", "event",
+                 "--send-updates", "none", "--operation-id", "no-scope", "--dry-run",
+                 scenario="calendar-actions-readonly", status=4, ok=False)
+    require(denied["code"] == "CalendarWritePermissionRequired" and "calendar-write" in denied.get("hint", ""),
+            "missing write permission lacks its status or enabling hint")
+    # A concurrent change is refused by If-Match (3); a lost answer is unknown (6) until reconciled.
+    focus = run("calendar", "event", *target, "--event-id", "fixture-focus")["event"]["etag"]
+    stale = run("calendar", "event-delete-review", *target, "--event-id", "fixture-focus", "--expected-etag", focus,
+                "--scope", "event", "--send-updates", "none", "--operation-id", "conflict")
+    rejected = run("calendar", "event-apply", *target, "--operation-id", "conflict", "--review-hash", stale["reviewHash"],
+                   scenario="calendar-actions-conflict", status=3)
+    require(rejected["state"] == "rejected" and rejected["errorCode"] == "CalendarVersionConflict",
+            "a concurrently changed event was not refused")
+    invite = run("calendar", "event", *target, "--event-id", "fixture-invite")["event"]["etag"]
+    answer = run("calendar", "event-respond-review", *target, "--event-id", "fixture-invite", "--expected-etag", invite,
+                 "--scope", "event", "--response", "declined", "--send-updates", "none", "--operation-id", "lost-rsvp")
+    lost = ["--operation-id", "lost-rsvp", "--review-hash", answer["reviewHash"]]
+    require(run("calendar", "event-apply", *target, *lost, scenario="calendar-actions-lost-response", status=6)["state"] == "unknown",
+            "a lost answer was not reported as unknown")
+    require(run("calendar", "event-reconcile", *target, *lost)["state"] == "applied",
+            "reconcile did not prove the saved answer")
+    wire = last_sent()
+    require(wire["method"] == "PATCH" and wire["eventId"] == "fixture-invite" and wire["ifMatch"] == invite
+            and wire["query"] == "sendUpdates=none" and json.loads(wire["body"])["attendeesOmitted"] is True,
+            f"the answer reached the wire as {wire}")
+    # Calendar answered but the outcome could not be recorded: unknown (6), then proven by reconcile.
+    copy_tag = run("calendar", "event", *target, "--event-id", "fixture-planning")["event"]["etag"]
+    journal = run("calendar", "event-delete-review", *target, "--event-id", "fixture-planning", "--expected-etag", copy_tag,
+                  "--scope", "event", "--send-updates", "none", "--operation-id", "journal-fail")
+    unrecorded = ["--operation-id", "journal-fail", "--review-hash", journal["reviewHash"]]
+    before = writes()
+    failed = run("calendar", "event-apply", *target, *unrecorded, scenario="calendar-actions-journal-fail", status=6, ok=False)
+    require(failed["code"] == "UnknownOutcome" and writes() == before + 1, "a write whose record failed was not reported unknown")
+    require(run("calendar", "event-reconcile", *target, *unrecorded)["state"] == "applied" and writes() == before + 1,
+            "reconcile did not prove the unrecorded delete without resending it")
+    require(run("cache", "stats")["fixtureSends"] == 0, "Calendar actions sent mail")
+
+
 def version(runner, expected):
     results = [runner.run([verb], without_home=True) for verb in ("version", "--version")]
     require(all(result.returncode == 0 and not result.stderr for result in results), "version alias needed configured accounts")
@@ -834,6 +961,7 @@ def main():
         runner = Runner(binary, Path(temporary))
         for name, exercise in (("guidance", guidance), ("options", options), ("file-option-guidance", file_option_guidance), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
                                ("meet-help-examples", meet_help_examples), ("agent-contract", agent_contract), ("protocol", protocol), ("rsvp-contract", rsvp_contract),
+                               ("calendar-actions-contract", calendar_actions_contract),
                                ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)

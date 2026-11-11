@@ -606,7 +606,7 @@
     },
     {
       "cmd": "calendar.event-apply",
-      "summary": "Apply one exact saved ordinary-event review, dispatching at most once.",
+      "summary": "Apply one exact saved event review (create, edit, delete or response), dispatching at most once.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -621,6 +621,11 @@
         },
         "reviewHash": {
           "$ref": "#/$defs/CalendarReviewHash"
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true runs the same fresh checks as apply (saved review, current ETag, permissions, pending operations) and returns state not_sent with wouldSend {action, method, eventId, ifMatch, sendUpdates}. Nothing is saved, claimed or sent. An operation already recorded under this ID is reported instead."
         }
       },
       "required": [
@@ -629,9 +634,9 @@
         "reviewHash"
       ],
       "notes": [
-        "Use the exact saved calendar.event-review result. Caller-supplied draft, request or ETag overrides are refused. Invitation-import reviews cannot be applied through this command.",
-        "After a durable unknown claim, the provider write is dispatched once with no automatic retries. Inspect state applied/rejected/unknown even if the outer result envelope is ok.",
-        "Unknown results must use calendar.event-reconcile; do not retry under another operationId. Read-only reconciliation never resends invitations."
+        "Use the exact saved calendar.event-review, calendar.event-delete-review or calendar.event-respond-review result. Caller-supplied draft, request or ETag overrides are refused. Invitation-import reviews cannot be applied through this command.",
+        "After a durable unknown claim, the provider write is dispatched once with no automatic retries. Inspect state applied/rejected/unknown even if the outer result envelope is ok; one-shot exit status is 6 for unknown and 3 for rejected.",
+        "Unknown results must use calendar.event-reconcile; do not retry under another operationId. Read-only reconciliation never resends invitations, cancellations or responses."
       ],
       "examples": [
         {
@@ -645,7 +650,7 @@
     },
     {
       "cmd": "calendar.event-reconcile",
-      "summary": "Resolve an unknown ordinary-event write by reading its exact provider event ID without resending it.",
+      "summary": "Resolve an unknown event write (create, edit, delete or response) by reading its exact provider event ID without resending it.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -669,8 +674,161 @@
         "reviewHash"
       ],
       "notes": [
-        "Loads the exact saved ordinary-event review and durable journal. Applied proof requires the bound account/calendar/event ID and immutable private operation/source markers, even after later content changes or cancellation. A missing event remains unknown and can offer explicit identical-request retry; an unchanged edit ETag also remains uncertain.",
+        "Loads the exact saved event review (create, edit, delete or response) and durable journal. A delete is proven by the exact event being cancelled; a response by the private markers together with the reviewed answer. Applied proof requires the bound account/calendar/event ID and immutable private operation/source markers, even after later content changes or cancellation. A missing event remains unknown and can offer explicit identical-request retry; an unchanged edit ETag also remains uncertain.",
         "Performs only reads. Never creates a second event, repeats a Meet request or resends attendee notifications."
+      ]
+    },
+    {
+      "cmd": "calendar.event-delete-review",
+      "summary": "Review deleting one existing event (or its whole recurring series) and save the exact conditional DELETE; nothing is deleted yet.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/CalendarEventId"
+        },
+        "expectedEtag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Exact etag of eventId as you last read it (calendar.event, calendar.agenda or a dryRun review). Required unless dryRun:true; a changed event fails CalendarReviewStale."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "event",
+            "series"
+          ],
+          "description": "event deletes eventId only (one occurrence when it belongs to a series). series deletes every event of the recurring series and binds the series master's own ETag. This-and-following is not supported."
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "none",
+            "all"
+          ],
+          "description": "all emails the guests a cancellation; only for an event this calendar organizes that has guests. none sends no email. Attendee copies always use none."
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true reads and checks only: no review is saved, so the reply has no reviewHash. It returns the role, guests, consequence and options (series, notify, thisAndFollowing) for choosing the real review."
+        }
+      },
+      "required": [
+        "calendarId",
+        "eventId",
+        "scope",
+        "sendUpdates",
+        "operationId"
+      ],
+      "notes": [
+        "Returns action delete_event, role organizer|attendee|copy, scope, sendUpdates, eventId/expectedEtag, targetEventId/targetEtag (the If-Match version), summary, start, end, recurring, guestCount, organizer, consequence and reviewHash. Inspect consequence before calendar.event-apply with the same operationId and reviewHash.",
+        "role attendee or copy: only this calendar's copy is removed and Omagma sends no email; the organizer's event stays for the other guests. To tell the organizer you will not attend, use calendar.event-respond-review with response declined instead.",
+        "Refused with a stable code: CalendarReadOnly, CalendarWritePermissionRequired, CalendarEventLocked, CalendarPrivateCopy, CalendarSpecialEvent, CalendarEventCancelled, CalendarSeriesScopeRequired (eventId is a series master), CalendarNotRecurring, CalendarNotificationUnavailable, CalendarReviewStale, CalendarOperationPending.",
+        "Apply, reconcile, retry and archive use calendar.event-apply, calendar.event-reconcile, calendar.event-retry and calendar.event-abandon. A deletion is proven when Google reports the event cancelled; a missing event stays unknown. No undo is offered."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-delete-review",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "eventId": "RETURNED_EVENT_ID",
+          "expectedEtag": "\"RETURNED_ETAG\"",
+          "scope": "event",
+          "sendUpdates": "all",
+          "operationId": "delete-review-1"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event-respond-review",
+      "summary": "Review accepting, tentatively accepting or declining an event this calendar is invited to, and save the exact conditional response; nothing is sent yet.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/CalendarEventId"
+        },
+        "expectedEtag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Exact etag of eventId as you last read it. Required unless dryRun:true; a changed event fails CalendarReviewStale."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "event",
+            "series"
+          ],
+          "description": "event answers eventId only (one occurrence when it belongs to a series). series answers the whole recurring series; occurrences answered separately may keep their own answer. This-and-following is not supported."
+        },
+        "response": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "tentative",
+            "declined"
+          ],
+          "description": "The answer. Required unless dryRun:true; a dry run without it returns the current previousResponse. The current answer is refused as CalendarResponseUnchanged."
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "none",
+            "all"
+          ],
+          "description": "all asks Google to email your answer to the organizer. none sends no email; an organizer using Google Calendar still sees the answer on the shared event."
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "true reads and checks only: no review is saved and the reply has no reviewHash."
+        }
+      },
+      "required": [
+        "calendarId",
+        "eventId",
+        "scope",
+        "sendUpdates",
+        "operationId"
+      ],
+      "notes": [
+        "Only this calendar's own attendee entry changes (Google's attendeesOmitted response form) with private receipt markers; other guests, organizer fields and shared properties are not sent. No mail is composed by Omagma.",
+        "Refused with a stable code: CalendarOrganizerCannotRespond (this calendar organizes the event), NotAnAttendee, CalendarAttendeesOmitted, CalendarRespondOtherAttendee (another person's calendar), CalendarPrivateCopy (answer from the invitation mail with invitation.reply), CalendarEventLocked, CalendarReadOnly, CalendarWritePermissionRequired, CalendarResponseUnchanged.",
+        "Apply with calendar.event-apply. A response is proven by the reviewed answer plus this operation's markers on the exact event; otherwise it stays unknown until calendar.event-reconcile."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-respond-review",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "eventId": "RETURNED_EVENT_ID",
+          "expectedEtag": "\"RETURNED_ETAG\"",
+          "scope": "event",
+          "response": "declined",
+          "sendUpdates": "all",
+          "operationId": "respond-review-1"
+        }
       ]
     },
     {
@@ -727,7 +885,7 @@
     },
     {
       "cmd": "calendar.event-retry",
-      "summary": "Explicitly retry an uncertain identical saved ordinary-event request once for this attempt token.",
+      "summary": "Explicitly retry an uncertain identical saved event request (edit, delete or response) once for this attempt token.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -774,7 +932,7 @@
     },
     {
       "cmd": "calendar.event-abandon",
-      "summary": "Explicitly archive an uncertain ordinary-event outcome locally.",
+      "summary": "Explicitly archive an uncertain event write (create, edit, delete or response) locally.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -815,7 +973,7 @@
     },
     {
       "cmd": "calendar.event-pending",
-      "summary": "Resume a saved uncertain ordinary-event operation after restart without provider traffic.",
+      "summary": "Resume a saved uncertain event write (edit, delete or response; found from the event, its series or an occurrence) after restart without provider traffic.",
       "capabilities": [
         "mail-read",
         "calendar-read",

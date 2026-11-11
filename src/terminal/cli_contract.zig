@@ -645,6 +645,15 @@ const code_fields = [_]CodeField{
     .{ .code = "ConflictingReplyAll", .field = "replyAll" },               .{ .code = "InvalidView", .field = "view" },
     .{ .code = "InvalidBodySelection", .field = "body" },                  .{ .code = "InvalidFields", .field = "fields" },
     .{ .code = "InvalidMaxBodyBytes", .field = "maxBodyBytes" },           .{ .code = "InvalidCivilTime", .field = "date" },
+} ++ calendar_action_fields;
+/// Calendar delete/respond review fields named by their executor codes.
+const calendar_action_fields = [_]CodeField{
+    .{ .code = "InvalidCalendarScope", .field = "scope" },
+    .{ .code = "InvalidCalendarResponseStatus", .field = "response" },
+    .{ .code = "CalendarResponseRequired", .field = "response" },
+    .{ .code = "CalendarExpectedEtagRequired", .field = "expectedEtag" },
+    .{ .code = "InvalidCalendarNotificationPolicy", .field = "sendUpdates" },
+    .{ .code = "CalendarNotificationUnavailable", .field = "sendUpdates" },
 };
 fn validationCode(code: []const u8) bool {
     return eq(code, "MissingField") or eq(code, "InvalidRequest") or eq(code, "InvalidField");
@@ -681,7 +690,15 @@ pub fn diagnose(a: A, catalogue: *Catalogue, request: Value, code: []const u8) !
             path = try join(a, "draft", field);
         };
         if (schemas.len == 0) return null;
-        const value = (if (eq(path, field)) j.get(request, field) else j.get(j.get(request, "draft") orelse .null, field)) orelse .null;
+        const present = if (eq(path, field)) j.get(request, field) else j.get(j.get(request, "draft") orelse .null, field);
+        // An absent field is missing, not of the wrong type.
+        if (present == null) {
+            var detail = j.object(a);
+            try detail.object.put(a, "field", .{ .string = path });
+            try detail.object.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "{s} requires '{s}' here", .{ command, path }) });
+            return detail;
+        }
+        const value = present.?;
         if (try inspect(a, catalogue, command, path, value, schemas, 1)) |detail| return detail;
         // Describe the accepted shape even when the executor's rule is narrower.
         var detail = j.object(a);
@@ -722,7 +739,18 @@ const hints = [_]Hint{
     .{ .code = "EventNotFound", .text = "Use an event id returned by calendar.agenda for this calendar" },
     .{ .code = "ReadOnlyFieldChanged", .text = "Read the draft again with draft.read and pass back its read-only fields unchanged, or omit them" },
     .{ .code = "EmptyMutation", .text = "Add at least one change: unread, starred, addLabels or removeLabels" },
-    .{ .code = "DryRunUnsupported", .text = "dryRun is available on mail.send, draft.send, draft.queue, mail.batch, mail.archive, mail.trash, mail.restore and mail.mark" },
+    .{ .code = "DryRunUnsupported", .text = "dryRun is available on mail.send, draft.send, draft.queue, mail.batch, mail.archive, mail.trash, mail.restore, mail.mark, calendar.event-delete-review, calendar.event-respond-review and calendar.event-apply" },
+    .{ .code = "CalendarReviewStale", .text = "Read the event again (calendar.event or a dryRun review), inspect it and pass its current etag as expectedEtag" },
+    .{ .code = "CalendarExpectedEtagRequired", .text = "Read the event with calendar.event, or run this review with dryRun:true, and pass the returned etag" },
+    .{ .code = "CalendarOperationPending", .text = "Find it with calendar.event-pending, then check it with calendar.event-reconcile; never start it again under a new operationId" },
+    .{ .code = "CalendarWritePermissionRequired", .text = "Run omagma terminal-auth authorize with every current capability plus calendar-write-owned (your calendars) or calendar-write-shared; see docs/CALENDAR-PERMISSIONS.md" },
+    .{ .code = "CalendarSeriesScopeRequired", .text = "Pass scope series to change the whole series, or an occurrence id from calendar.agenda with scope event" },
+    .{ .code = "CalendarNotificationUnavailable", .text = "Use sendUpdates none; to tell an organizer you will not attend, use calendar.event-respond-review with response declined" },
+    .{ .code = "CalendarOrganizerCannotRespond", .text = "Organizers change or delete their event instead: calendar.event-review or calendar.event-delete-review" },
+    .{ .code = "NotAnAttendee", .text = "Only an invitation that lists this account (or, in Calendar, this calendar) as a guest can be answered; an event without that guest entry can only be removed from the calendar" },
+    .{ .code = "CalendarRetryUnavailable", .text = "Run calendar.event-reconcile first; an identical retry is allowed only while it reports retryPossible:true" },
+    .{ .code = "CalendarPrivateCopy", .text = "Answer the invitation email with invitation.reply" },
+    .{ .code = "CalendarResponseUnchanged", .text = "Choose a different response, or leave the event as it is" },
 };
 const transient = [_][]const u8{ "CacheBusy", "Timeout", "Canceled", "RateLimited", "TransientFailure", "NetworkFailure", "VaultBusy", "OperationPending", "CacheChanged", "NetworkUnreachable", "ConnectionRefused", "ConnectionTimedOut", "ConnectionResetByPeer" };
 /// Interruptions after which a request may already have reached the provider

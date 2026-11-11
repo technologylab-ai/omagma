@@ -17,6 +17,7 @@ test {
     _ = @import("calendar_embedded_tests.zig");
     _ = @import("calendar_duration_tests.zig");
     _ = @import("calendar_fixture_tests.zig");
+    _ = @import("calendar_actions_tests.zig");
     _ = @import("calendar_store_tests.zig");
     _ = @import("calendar_identity_history_tests.zig");
     _ = @import("calendar_vault_grants_tests.zig");

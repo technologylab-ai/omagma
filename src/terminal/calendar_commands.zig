@@ -8,6 +8,7 @@ const svc = @import("calendar_service.zig");
 const invitation = @import("calendar_invitation.zig");
 const timezone = @import("timezone.zig");
 const ordinary = @import("calendar_event.zig");
+const action = @import("calendar_event_action.zig");
 const embedded_zone = @import("calendar_embedded.zig");
 
 pub const InvitationInput = struct {
@@ -49,7 +50,10 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
         const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
         const pending = try load(host.context, service.a, target, j.text(request, "eventId"));
         if (pending) |value| {
-            if (value.review.ordinary_event == null or value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target) or (j.text(request, "eventId").len != 0 and !std.mem.eql(u8, j.text(request, "eventId"), value.review.intent.event_id))) return error.CalendarReviewMismatch;
+            // Found from the event, its series or one of its occurrences.
+            const wanted = j.text(request, "eventId");
+            const related = action.Reach.saved(value.review.event_action, value.review.intent.event_id).overlaps(action.Reach.lookup(wanted));
+            if (!value.review.journaledEvent() or value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target) or (wanted.len != 0 and !related)) return error.CalendarReviewMismatch;
             return j.value(service.a, .{ .pending = .{ .review = try eventReviewValue(service.a, value.review), .state = "unknown", .attempt = value.operation.attempt, .nextAttempt = value.operation.attempt +| 1, .retryPossible = false, .recoveryReason = "Check Calendar before retrying" } });
         }
         var empty = j.object(service.a);
@@ -84,6 +88,17 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
         const store = service.persistence orelse return error.CalendarPersistenceRequired;
         try store.preserveFn(store.context, review);
         return eventReviewValue(service.a, review);
+    }
+    if (actionCommand(command)) {
+        const dry_run = try j.boolean(request, "dryRun", false);
+        const prepared = try service.prepareEventActionReview(calendar, try actionRequest(request, command), try j.required(request, "operationId"));
+        // A dry run reads only: nothing is saved, so its plan has no hash to apply.
+        if (!dry_run) {
+            const review = prepared.review orelse return error.CalendarResponseRequired;
+            const store = service.persistence orelse return error.CalendarPersistenceRequired;
+            try store.preserveFn(store.context, review);
+        }
+        return actionReviewValue(service.a, prepared, j.text(request, "operationId"), dry_run);
     }
     if (std.mem.eql(u8, command, "calendar.agenda") or std.mem.eql(u8, command, "calendar.freebusy")) {
         const dated = try requestDatedWindow(service.a, request, host, calendar);
@@ -137,8 +152,26 @@ pub fn preflight(request: j.Value) !void {
 }
 
 pub fn supported(command: []const u8) bool {
-    for ([_][]const u8{ "calendar.list", "calendar.agenda", "calendar.event", "calendar.freebusy", "calendar.invitation-plan", "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-review", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry", "calendar.event-abandon", "calendar.event-pending" }) |value| if (std.mem.eql(u8, command, value)) return true;
+    for ([_][]const u8{ "calendar.list", "calendar.agenda", "calendar.event", "calendar.freebusy", "calendar.invitation-plan", "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-review", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry", "calendar.event-abandon", "calendar.event-pending", "calendar.event-delete-review", "calendar.event-respond-review" }) |value| if (std.mem.eql(u8, command, value)) return true;
     return false;
+}
+/// Reviews of a delete or an attendee response on an existing event. Their
+/// saved reviews are applied, checked, retried and archived by the shared
+/// calendar.event-apply/-reconcile/-retry/-abandon commands.
+pub fn actionCommand(command: []const u8) bool {
+    return std.mem.eql(u8, command, "calendar.event-delete-review") or std.mem.eql(u8, command, "calendar.event-respond-review");
+}
+fn actionRequest(request: j.Value, command: []const u8) !svc.ActionRequest {
+    const kind: action.Action = if (std.mem.eql(u8, command, "calendar.event-delete-review")) .delete else .respond;
+    return .{
+        .action = kind,
+        .scope = std.meta.stringToEnum(action.Scope, try j.required(request, "scope")) orelse return error.InvalidCalendarScope,
+        .send_updates = std.meta.stringToEnum(ordinary.UpdatePolicy, try j.required(request, "sendUpdates")) orelse return error.InvalidCalendarNotificationPolicy,
+        .response = if (j.get(request, "response")) |value| std.meta.stringToEnum(action.Response, try j.string(value)) orelse return error.InvalidCalendarResponseStatus else null,
+        .event_id = try j.required(request, "eventId"),
+        .expected_etag = j.text(request, "expectedEtag"),
+        .dry_run = try j.boolean(request, "dryRun", false),
+    };
 }
 pub fn localCommand(command: []const u8) bool {
     return std.mem.eql(u8, command, "calendar.event-pending") or std.mem.eql(u8, command, "calendar.event-abandon");
@@ -195,7 +228,27 @@ fn validateFields(request: j.Value, command: []const u8) !void {
             try t.text(try j.required(request, "expectedEtag"), 1024, false);
         } else if (j.get(request, "expectedEtag")) |value| if (value != .null) return error.InvalidCalendarConfirmation;
     }
-    if (std.mem.eql(u8, command, "calendar.review") or std.mem.eql(u8, command, "calendar.event-review") or executionCommand(command)) {
+    if (actionCommand(command)) {
+        for ([_][]const u8{ "messageId", "review", "request", "event", "reviewHash", "source" }) |field| if (j.get(request, field) != null) return error.InvalidCalendarRequest;
+        try t.text(try j.required(request, "eventId"), 1024, false);
+        // An empty version is no version: the same guidance as a missing one.
+        if (j.get(request, "expectedEtag")) |value| {
+            const etag = try j.string(value);
+            if (etag.len == 0) return error.CalendarExpectedEtagRequired;
+            try t.text(etag, 1024, false);
+        }
+        _ = std.meta.stringToEnum(action.Scope, try j.required(request, "scope")) orelse return error.InvalidCalendarScope;
+        _ = std.meta.stringToEnum(ordinary.UpdatePolicy, try j.required(request, "sendUpdates")) orelse return error.InvalidCalendarNotificationPolicy;
+        _ = try j.boolean(request, "dryRun", false);
+        if (std.mem.eql(u8, command, "calendar.event-respond-review")) {
+            if (j.get(request, "response")) |value| _ = std.meta.stringToEnum(action.Response, try j.string(value)) orelse return error.InvalidCalendarResponseStatus;
+        } else if (j.get(request, "response") != null) return error.InvalidCalendarRequest;
+    } else if (j.get(request, "dryRun")) |value| {
+        // Only the action reviews and event-apply have a dry run.
+        if (!std.mem.eql(u8, command, "calendar.event-apply")) return error.DryRunUnsupported;
+        if (value != .bool) return error.InvalidRequest;
+    }
+    if (std.mem.eql(u8, command, "calendar.review") or std.mem.eql(u8, command, "calendar.event-review") or actionCommand(command) or executionCommand(command)) {
         const id = try j.required(request, "operationId");
         try t.text(id, 128, false);
         for (id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidOperationId;
@@ -210,13 +263,18 @@ fn executeReview(service: svc.Service, request: j.Value, host: HostInputs, targe
     for ([_][]const u8{ "review", "source", "body", "request", "expectedEtag", "etag", "verifiedAliases", "event", "eventId", "sendUpdates" }) |field| if (j.get(request, field) != null) return error.InvalidCalendarConfirmation;
     const operation_id = try j.required(request, "operationId");
     const hash = try parseReviewHash(try j.required(request, "reviewHash"));
+    const dry_run = try j.boolean(request, "dryRun", false);
+    if (dry_run and !std.mem.eql(u8, command, "calendar.event-apply")) return error.DryRunUnsupported;
     if (host.loadReceiptFn) |load_receipt| if (try load_receipt(host.context, service.a, target, operation_id)) |receipt| {
         if (!receipt.operation.intent.identity.target.eql(target) or !std.mem.eql(u8, receipt.operation.intent.operation_id, operation_id) or !std.mem.eql(u8, &receipt.review_hash, &hash) or receipt.operation.state == .unknown) return error.CalendarReviewMismatch;
         const ordinary_command = std.mem.eql(u8, command, "calendar.event-apply") or std.mem.eql(u8, command, "calendar.event-reconcile") or std.mem.eql(u8, command, "calendar.event-retry") or std.mem.eql(u8, command, "calendar.event-abandon");
         if (ordinary_command != receipt.ordinary) return error.CalendarReviewMismatch;
         const required_kind: ?@TypeOf(receipt.operation.intent.kind) = if (std.mem.eql(u8, command, "calendar.import")) .import_event else if (std.mem.eql(u8, command, "calendar.update")) .update_event else if (std.mem.eql(u8, command, "calendar.cancel")) .cancel_event else null;
         if (required_kind) |kind| if (receipt.operation.intent.kind != kind) return error.CalendarReviewMismatch;
-        return appliedValue(service.a, target, .{ .operation = receipt.operation });
+        // Replaying a recorded receipt never writes, dry run or not.
+        var replay = try appliedValue(service.a, target, .{ .operation = receipt.operation });
+        if (dry_run) try replay.object.put(service.a, "dryRun", .{ .bool = true });
+        return replay;
     };
     const load = host.loadReviewFn orelse return error.CalendarPersistenceRequired;
     var review = try load(host.context, service.a, target, operation_id);
@@ -224,10 +282,11 @@ fn executeReview(service: svc.Service, request: j.Value, host: HostInputs, targe
     const expected_kind: ?@TypeOf(review.intent.kind) = if (std.mem.eql(u8, command, "calendar.import")) .import_event else if (std.mem.eql(u8, command, "calendar.update")) .update_event else if (std.mem.eql(u8, command, "calendar.cancel")) .cancel_event else null;
     if (expected_kind) |kind| if (review.intent.kind != kind) return error.CalendarReviewMismatch;
     const ordinary_command = std.mem.eql(u8, command, "calendar.event-apply") or std.mem.eql(u8, command, "calendar.event-reconcile") or std.mem.eql(u8, command, "calendar.event-retry") or std.mem.eql(u8, command, "calendar.event-abandon");
-    if (ordinary_command != (review.ordinary_event != null)) return error.CalendarReviewMismatch;
+    if (ordinary_command != review.journaledEvent()) return error.CalendarReviewMismatch;
     const confirmation: svc.Confirmation = .{ .target = target, .operation_id = operation_id, .review_hash = hash };
     if (std.mem.eql(u8, command, "calendar.event-abandon")) return appliedValue(service.a, target, try service.archive(review, confirmation));
     review.calendar = try selectedCalendar(service, target);
+    if (dry_run) return dryRunValue(service.a, target, review, try service.check(review, confirmation));
     const result = if (std.mem.eql(u8, command, "calendar.reconcile") or std.mem.eql(u8, command, "calendar.event-reconcile")) try service.reconcile(review) else if (std.mem.eql(u8, command, "calendar.event-retry")) try service.retry(review, confirmation, @intCast(try j.integer(request, "nextAttempt", 0))) else try service.apply(review, confirmation);
     return appliedValue(service.a, target, result);
 }
@@ -387,8 +446,74 @@ fn reviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
 
 pub fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
     const hash = std.fmt.bytesToHex(review.review_hash, .lower);
+    if (review.event_action) |prepared| return actionReviewValue(a, .{ .prepared = prepared, .options = null, .calendar = review.calendar, .target_etag = review.intent.expected_etag, .review = review }, review.intent.operation_id, false);
     const prepared = review.ordinary_event orelse return error.CalendarReviewMismatch;
     return j.value(a, .{ .account = review.intent.identity.target.account, .calendarId = review.intent.identity.target.calendar_id, .calendarName = review.calendar.summary, .operationId = review.intent.operation_id, .reviewHash = hash[0..], .action = if (review.intent.kind == .insert_event) @as([]const u8, "create_event") else "update_event", .eventId = review.intent.event_id, .expectedEtag = review.intent.expected_etag, .event = prepared.draft, .resolved = prepared.span, .sendUpdates = @tagName(prepared.send_updates), .previous = review.previous, .conference = @tagName(prepared.draft.conference) });
+}
+
+/// The action review returned to the CLI and TUI. `consequence` is the one
+/// sentence a confirmation dialog shows; `options` lists the other choices.
+pub fn actionReviewValue(a: std.mem.Allocator, value: svc.ActionReview, operation_id: []const u8, dry_run: bool) !j.Value {
+    const prepared = value.prepared;
+    var hex: [64]u8 = undefined;
+    var hash: ?[]const u8 = null;
+    if (value.review) |review| if (!dry_run) {
+        hex = std.fmt.bytesToHex(review.review_hash, .lower);
+        hash = &hex;
+    };
+    return j.value(a, .{
+        .account = value.calendar.target.account,
+        .calendarId = value.calendar.target.calendar_id,
+        .calendarName = value.calendar.summary,
+        .operationId = operation_id,
+        .reviewHash = hash,
+        .action = if (prepared.action == .delete) @as([]const u8, "delete_event") else "respond_event",
+        .scope = @tagName(prepared.scope),
+        .sendUpdates = @tagName(prepared.send_updates),
+        .response = if (prepared.response) |response| @as(?[]const u8, action.wire(response)) else null,
+        .previousResponse = prepared.previous_response,
+        .role = @tagName(prepared.role),
+        .eventId = prepared.selected_event_id,
+        .expectedEtag = prepared.selected_etag,
+        .targetEventId = prepared.target_event_id,
+        .targetEtag = value.target_etag,
+        .summary = prepared.summary,
+        .start = prepared.start,
+        .end = prepared.end,
+        .recurring = prepared.recurring,
+        .guestCount = prepared.guest_count,
+        .guestsOmitted = prepared.guests_omitted,
+        .organizer = prepared.organizer,
+        .attendee = prepared.attendee,
+        .seriesEventId = prepared.series_event_id,
+        .recurrence = prepared.recurrence,
+        .ownCalendar = prepared.own_calendar,
+        .consequence = try action.consequence(a, prepared, value.calendar.summary),
+        .options = value.options,
+        .dryRun = dry_run,
+        .saved = !dry_run and value.review != null,
+    });
+}
+
+/// event-apply with dryRun: the same fresh checks as apply, nothing saved,
+/// claimed or sent. An operation already recorded under this ID is reported.
+fn dryRunValue(a: std.mem.Allocator, target: t.Target, review: svc.Review, existing: ?@import("calendar_plan.zig").Operation) !j.Value {
+    const request = review.request;
+    const query = std.mem.indexOfScalar(u8, request.url, '?');
+    const send_updates = if (query) |at| if (std.mem.indexOf(u8, request.url[at..], "sendUpdates=")) |found| blk: {
+        const rest = request.url[at + found + "sendUpdates=".len ..];
+        break :blk rest[0 .. std.mem.indexOfScalar(u8, rest, '&') orelse rest.len];
+    } else "" else "";
+    const action_name: []const u8 = if (review.event_action) |prepared| (if (prepared.action == .delete) "delete_event" else "respond_event") else if (review.intent.kind == .insert_event) "create_event" else "update_event";
+    return j.value(a, .{
+        .account = target.account,
+        .calendarId = target.calendar_id,
+        .operationId = review.intent.operation_id,
+        .dryRun = true,
+        .state = if (existing) |operation| @tagName(operation.state) else "not_sent",
+        .wouldSend = .{ .action = action_name, .method = @tagName(request.method), .eventId = review.intent.event_id, .ifMatch = request.if_match, .sendUpdates = send_updates },
+        .consequence = if (review.event_action) |prepared| try action.consequence(a, prepared, review.calendar.summary) else "",
+    });
 }
 
 fn appliedValue(a: std.mem.Allocator, target: t.Target, result: svc.Applied) !j.Value {

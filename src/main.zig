@@ -45,6 +45,7 @@ pub fn main(init: std.process.Init.Minimal) void {
                 if (std.mem.eql(u8, suggestion, option)) std.debug.print("Option {s} is not valid here.\n", .{option}) else std.debug.print("Unknown option {s}; did you mean {s}?\n", .{ option, suggestion });
             } else std.debug.print("Unknown option {s}.\n", .{option});
         }
+        if (err == error.DryRunUnsupported) std.debug.print("This command has no --dry-run. In Calendar it is available on event-delete-review, event-respond-review and event-apply.\n", .{});
         if (err == error.SchemaOptionUnsupported) std.debug.print("{s}{s} is not valid with --schema; use omagma cli --schema [COMMAND] [--compact].\n", .{ if (cli.unknown_option_len != 0) "Option " else "This argument", cli.unknown_option[0..cli.unknown_option_len] });
         if (usageError(err)) {
             std.debug.print("Try omagma --help for available commands and options.\n", .{});
@@ -84,10 +85,12 @@ fn usageError(err: anyerror) bool {
         error.SendDelayRequiresSend,
         error.InvalidSendDelay,
         error.InvalidTriageScope,
+        error.InvalidCalendarScope,
         error.ScopeRequiresTriageCommand,
         error.ScopeRequiresSingleMessage,
         error.AttachmentsRequireDraftSource,
         error.DryRunRequiresDraftSource,
+        error.DryRunUnsupported,
         error.DryRunRequiresLocalFiles,
         error.InvalidAttachmentMode,
         error.AttachmentModeRequiresFile,

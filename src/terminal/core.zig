@@ -315,11 +315,20 @@ pub const Session = struct {
     }
     fn reconciliationFailure(req: Value, err: anyerror) anyerror {
         const command = j.text(req, "cmd");
-        if (!std.mem.eql(u8, command, "calendar.meet-event-apply") and (!std.mem.eql(u8, command, "invitation.inspect") or @import("client_contract.zig").readOnlyRequest(req))) return err;
+        if (!std.mem.eql(u8, command, "calendar.meet-event-apply") and !calendarWrite(req) and (!std.mem.eql(u8, command, "invitation.inspect") or @import("client_contract.zig").readOnlyRequest(req))) return err;
         return switch (err) {
             error.Canceled, error.Timeout, error.DeadlineExceeded, error.OutOfMemory, error.VaultOperationCanceled => error.UnknownOutcome,
             else => err,
         };
+    }
+    /// A Calendar command that may dispatch a saved write. The 30-second
+    /// deadline (or cancellation) can end it after the durable claim, while
+    /// the request is on the wire: such an end is an unknown outcome.
+    fn calendarWrite(req: Value) bool {
+        if (j.boolean(req, "dryRun", false) catch false) return false;
+        const command = j.text(req, "cmd");
+        for ([_][]const u8{ "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-apply", "calendar.event-retry" }) |name| if (std.mem.eql(u8, command, name)) return true;
+        return false;
     }
     fn failure(a: std.mem.Allocator, id: Value, account: []const u8, code: []const u8, message: []const u8) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = false, .account = account, .@"error" = .{ .code = code, .message = message } }, .{});
@@ -4448,11 +4457,20 @@ test "post-dispatch allocation failure preserves live mutation ambiguity" {
     const inspecting = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect" });
     const reconciling = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect", .reconcile = true });
     const meet_applying = try j.value(arena.allocator(), .{ .cmd = "calendar.meet-event-apply" });
+    // A delete/RSVP/edit apply or retry can end at its deadline after the
+    // durable claim, with the request on the wire; a dry run sends nothing.
+    const event_applying = try j.value(arena.allocator(), .{ .cmd = "calendar.event-apply" });
+    const event_retrying = try j.value(arena.allocator(), .{ .cmd = "calendar.event-retry" });
+    const event_dry_run = try j.value(arena.allocator(), .{ .cmd = "calendar.event-apply", .dryRun = true });
     for ([_]anyerror{ error.Canceled, error.Timeout, error.OutOfMemory }) |err| {
         try std.testing.expectEqual(err, Session.reconciliationFailure(inspecting, err));
         try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(reconciling, err));
         try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(meet_applying, err));
+        try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(event_applying, err));
+        try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(event_retrying, err));
+        try std.testing.expectEqual(err, Session.reconciliationFailure(event_dry_run, err));
     }
+    try std.testing.expectEqual(error.CalendarReviewStale, Session.reconciliationFailure(event_applying, error.CalendarReviewStale));
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const a = failing.allocator();
     const receipt: Value = .{ .string = "applied-provider-receipt" };

@@ -106,6 +106,38 @@ editing/discarding its source. A countdown/queued intent is local. The TUI owns
 its interactive countdown; CLI `queue.resume` only resets it and needs an
 explicit `queue.process` or `queue.send-now` to execute. It is not Gmail scheduling.
 
+## Delete a Calendar event or answer an invitation in Calendar
+
+Only when the user asked for that exact event, delete it with
+`calendar event-delete-review` or answer it with `calendar event-respond-review`
+(`--response accepted|tentative|declined`), then `calendar event-apply` with the
+returned operation ID and `reviewHash`. First run the review with `--dry-run`
+(JSONL `dryRun:true`): it reads only and saves nothing, and reports `role`,
+`guestCount`, `previousResponse`, `consequence` and `options`. Then:
+
+- Choose `--send-updates` deliberately. For an event this calendar organizes
+  with guests, `all` emails them a cancellation; ask the user unless the request
+  already settles it. An invitation (`role: attendee`) or copy can only be
+  removed from this calendar (`none`); if the user means "I won't attend",
+  decline it instead. For an answer, `all` asks Google to email the organizer.
+- `--scope event` changes one event or occurrence, `series` the whole series.
+  This-and-following is unsupported; say so instead of approximating it. An
+  occurrence can differ from its series: describe a series action with the
+  dry run's `options.series` facts (its own `guestCount`, `response`, title and
+  `recurrence`), not the occurrence's. `ownCalendar:false` means a shared or
+  delegated calendar: say whose calendar loses the event.
+- Pass the `expectedEtag` you just read. `CalendarReviewStale` or a rejected
+  `CalendarVersionConflict` means it changed: read it again and re-confirm.
+- Organizers cannot RSVP (`CalendarOrganizerCannotRespond`); a private
+  invitation copy is answered with `invitations reply`.
+- `state: unknown` or `UnknownOutcome` (exit 6) is never retried under a new
+  operation ID: run `calendar event-reconcile`; only its `retryPossible`
+  permits `event-retry` with `--next-attempt`. `CalendarOperationPending` means
+  an unconfirmed write to this event, its series or one of its occurrences:
+  find it with `calendar event-pending --event-id ID` and settle it first.
+  There is no undo for a delete. After success report what was requested
+  ("Google was asked to email 2 guests"), not that email was delivered.
+
 ## New meeting with Meet AI notes
 
 For a new meeting the user organizes with Google Meet AI notes, use
