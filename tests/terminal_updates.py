@@ -125,9 +125,6 @@ def card_and_guide(binary, directory, capture_dir):
         wait_card(terminal)
         click(terminal, *point(terminal, "[Dismiss]"))
         terminal.until(lambda: terminal.screen.locate("Upgrade available") is None)
-        # Keys right after leaving the unchanged composer are dropped until
-        # the keyboard has been quiet.
-        terminal.gap(.75)
         # Dismissed notices remain discoverable through the searchable palette.
         terminal.send(b"\x10updates\r")
         wait_guide(terminal)

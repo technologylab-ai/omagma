@@ -85,7 +85,7 @@ const Tone = enum { text, subject, sender, muted, border, star, accent, selected
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
 const meet_ui = @import("calendar_meet_ui.zig");
-const JobKind = enum { auth_status, auth_reconnect, clipboard_image, clipboard_import, calendar_action_plan, calendar_action_review, calendar_action_apply, calendar_action_reconcile, calendar_action_retry, calendar_action_abandon, calendar_action_pending, calendar_meet_pending, calendar_meet_review, calendar_meet_apply, calendar_meet_reconcile, calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, discard_check, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const JobKind = enum { auth_status, auth_reconnect, clipboard_image, clipboard_import, calendar_action_plan, calendar_action_review, calendar_action_apply, calendar_action_reconcile, calendar_action_retry, calendar_action_abandon, calendar_action_pending, calendar_meet_pending, calendar_meet_review, calendar_meet_apply, calendar_meet_reconcile, calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_restore, draft_operations, queue_inspect, compose, draft_measure, composer_plan, selection_plan, stop_probe, retry_plan, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -236,6 +236,7 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "GmailDraftImportUnsupported", .label = "This draft cannot be imported completely · continue in Gmail" },
         .{ .code = "DraftPausedInGmail", .label = "Draft is paused in Gmail · :gmail-draft checks or takes it back" },
         .{ .code = "DraftSendQueued", .label = queued_send_refusal },
+        .{ .code = "DiscardedDraftUnavailable", .label = "Nothing to restore · the discarded draft is no longer kept" },
         .{ .code = "GmailDraftOutcomeUnknown", .label = "Upload unconfirmed · Check status; do not upload again" },
         .{ .code = "GmailDraftChanged", .label = "Draft handoff changed · reopen :gmail-draft" },
         .{ .code = "GmailDraftConflict", .label = "Gmail draft changed · Check status before choosing a local copy" },
@@ -506,14 +507,18 @@ fn readerViewKey(key: Key) bool {
 fn plural(count: usize, one: []const u8, many: []const u8) []const u8 {
     return if (count == 1) one else many;
 }
-/// The discard review accepts y only after it has been on screen this long,
-/// and not again until the keyboard was quiet this long after a refusal.
-const discard_settle_ms: i64 = 600;
-const discard_quiet_ms: i64 = 2000;
+/// The discard review is confirmed by a gesture typing never produces: Ctrl+X
+/// again, Enter on its focused [Ctrl+X Discard] or a click on it. A second
+/// Ctrl+X counts only this long after the previous one, so a held key's
+/// repeats (whose first delay reaches about 660 ms) never confirm.
+const discard_repeat_ms: i64 = 1000;
+/// The second press of the double click that opened the review lands on it
+/// this soon; it never confirms.
+const discard_click_ms: i64 = 500;
 const paused_in_gmail_refusal = "Draft kept · it is paused in Gmail · g takes it back before it can be discarded";
 const queued_send_refusal = "Draft kept · a send is queued for it · :cancel-send in the draft first, then discard";
 const untouched_notice = "Nothing written · no draft kept";
-const discard_hints = " y Discard · Esc Keep draft · Tab Buttons · Enter Activate";
+const discard_again_hint = "Ctrl+X again discards · Esc keeps the draft";
 /// Addresses in one composer recipient field (frame allocator). Unfinished
 /// text still counts its comma-separated entries, so the review never says
 /// "no recipients" for a draft that has some.
@@ -943,7 +948,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":receipt", .action = "Inspect the current draft's operation receipts" },
     .{ .keys = "p in a protected draft", .action = "Open the saved draft's HTML preview; no edit, upload or resend", .requires = .open_urls },
     .{ .keys = "q in normal mode", .action = "Save the draft and go back; Esc only leaves insertion" },
-    .{ .keys = "Ctrl+X · d in normal compose", .action = "Review discarding this draft, also while typing and in send review; y or [y Discard] removes the local draft, Esc keeps it. Nothing in Gmail is deleted" },
+    .{ .keys = "Ctrl+X · d in normal compose", .action = "Review discarding this draft, also while typing and in send review; Ctrl+X again or [Ctrl+X Discard] discards it (Ctrl+Z restores it until you quit), Esc keeps it. Nothing in Gmail is deleted" },
     .{ .keys = "Ctrl+C", .action = "Cancel work; idle drafts save/back, native mailbox quits" },
     .{ .action = "Leaving a new message, reply or forward you have not changed keeps no draft. A draft reopened from Drafts is kept." },
     .{ .action = "Draft changes autosave locally after a short pause.", .requires = .durable_drafts },
@@ -1375,9 +1380,12 @@ const Compose = struct {
     /// Leaving at exactly this revision keeps no draft. Null for a reopened
     /// or recovered draft, which is never removed without confirmation.
     pristine_revision: ?u64 = null,
-    /// Content identity of the draft as this session's opening stored it,
-    /// before generated text: what the store holds until the first save.
-    loaded_digest: ?[64]u8 = null,
+    /// The store's content digest of this draft as this window last saw it
+    /// saved (opened, or acknowledged by its own save); null when unknown.
+    saved_digest: ?[64]u8 = null,
+    /// The sender was empty in the stored draft and this composer filled in
+    /// the account default; the store gets it with the next save.
+    default_sender_unsaved: bool = false,
     completion_selected: usize = 0,
     signature: Field = .{},
     signature_custom: bool = false,
@@ -1621,6 +1629,8 @@ const Job = struct {
     discard_untouched: bool = false,
     /// This Back saves an untouched draft whose removal was refused.
     discard_fallback: bool = false,
+    /// This Back saves the text of a draft removed elsewhere as a new draft.
+    recreate_removed: bool = false,
     reload_conflict: bool = false,
     reload_revision: u64 = 0,
     /// A selected native draft/send command: its job_arena is OS-backed and
@@ -2253,20 +2263,19 @@ const App = struct {
     compose: Compose = .{},
     compose_active: bool = false,
     compose_intent: PendingCompose = .none,
-    /// The discard review confirms only on a still keyboard (discardReady):
-    /// when it was first fully drawn, the last key while it was open (the
-    /// opening Ctrl+X counts), the last refused confirm, and whether it was
-    /// opened while typing, where letters other than y only explain.
-    discard_drawn_ms: ?i64 = null,
-    discard_last_key_ms: i64 = 0,
-    discard_refused_ms: ?i64 = null,
+    /// The discard review was drawn whole, with nothing over it, in the frame
+    /// now on screen; no confirm acts otherwise (see draw).
+    discard_visible: bool = false,
+    /// The last Ctrl+X the open review saw, the opening one included.
+    discard_ctrl_x_ms: i64 = 0,
+    /// When a click opened the review: that double click's second press.
+    discard_click_open_ms: ?i64 = null,
+    /// Opened while typing: q is text there and only explains.
     discard_from_insert: bool = false,
-    /// What the store must still hold for an untouched Back to remove it.
-    discard_expected_digest: [64]u8 = @splat(0),
-    /// After a discard or an untouched Back starts, every key is swallowed
-    /// until the keyboard has been quiet: typed-ahead text never reaches the
-    /// mailbox (archive, unread, Trash) or a reopened composer.
-    input_gate_ms: ?i64 = null,
+    /// The draft the last Discard kept for Ctrl+Z (with undo_account), and
+    /// per account what this window keeps, dropped for good when it exits.
+    undo_draft: @import("../bounded.zig").Text(128) = .{},
+    kept_discards: [3]@import("../bounded.zig").Text(128) = .{ .{}, .{}, .{} },
     /// Said again once the Drafts list reloads after a discard.
     after_list_notice: ?[]const u8 = null,
     file_browser: file_dialog.State = .{},
@@ -2868,6 +2877,8 @@ const App = struct {
         self.label_picker = false;
     }
     fn undoMail(self: *App) !void {
+        // A Discard is the latest undoable action: restore that draft.
+        if (!browser_target and self.undo_draft.slice().len != 0 and same(self.undo_account.value(), self.account())) return self.restoreDiscardedDraft();
         if (!self.capabilities.mail_changes) return error.MailChangesUnavailable;
         if (self.undo_token.value().len == 0 or !same(self.undo_account.value(), self.account())) {
             self.say(false, "No completed action to undo for this account", .{});
@@ -4879,7 +4890,7 @@ const App = struct {
         if (self.uxInput()) {
             try self.editLine(inner, 0, prompt, &self.ux_query, self.ux_focus == 0, if (self.ux_focus == 0) .selected else .text);
             self.mouseRows(inner, 0, 1, .dialog_action, 10);
-        } else try self.line(inner, 0, if (self.ux_overlay == .draft_conflict) "Keep local text or load the saved version" else if (self.ux_overlay == .scope) "Choose what mail actions affect" else if (self.ux_overlay == .discard) "Discard this draft? It can't be restored." else "Review the pinned target before confirming", .subject);
+        } else try self.line(inner, 0, if (self.ux_overlay == .draft_conflict) "Keep local text or load the saved version" else if (self.ux_overlay == .scope) "Choose what mail actions affect" else if (self.ux_overlay == .discard) "Discard this draft?" else "Review the pinned target before confirming", .subject);
         try self.line(inner, 1, try self.fitLine(inner, self.ux_account.value(), inner.width), .muted);
         self.ux_height = inner.height -| 5;
         const count = self.uxCount();
@@ -4892,7 +4903,7 @@ const App = struct {
             try self.line(inner, position - first_position + 2, try self.fitLine(inner, label, inner.width), if (position == self.ux_selected) (if (self.ux_focus == 1) .selected else .subject) else .text);
             self.mouseRows(inner, position - first_position + 2, 1, .dialog_action, position + 100);
         }
-        const primary = if (self.ux_overlay == .draft_conflict) "[Use choice]" else if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[y Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
+        const primary = if (self.ux_overlay == .draft_conflict) "[Use choice]" else if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[Ctrl+X Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
         if (inner.height >= 6) if (self.uxAt(self.ux_selected)) |selected_row| {
             try self.line(inner, inner.height - 3, try self.fitLine(inner, selected_row.detail, inner.width), .muted);
         };
@@ -4900,62 +4911,85 @@ const App = struct {
         _ = try self.actionButton(inner, inner.height - 2, x, if (self.ux_overlay == .discard) "[Esc Cancel]" else if (self.ux_overlay == .triage_review) "[Cancel]" else "[Back]", self.ux_focus == 3, true, .dialog_action, 13);
         try self.line(inner, inner.height - 1, try self.fitLine(inner, if (self.uxFilter()) "Type filter · Ctrl+N/P Choose · Tab Controls · Enter · Esc Back" else "Tab Controls · Enter Activate · Esc Back", inner.width), .muted);
     }
-    /// The discard review wraps every sentence to its width, shows both
-    /// buttons and records when it was first complete on screen; a terminal
-    /// too small for all of it gets a sized request and confirms nothing.
-    fn drawDiscardReview(self: *App, win: vaxis.Window) !void {
-        self.mouse_hits.clear();
+    const DiscardPlan = struct {
+        width: u16,
+        height: usize,
+        y_off: usize,
+        heading: []const u8,
+        label: []const u8,
+        detail: []const u8,
+        confirm: []const u8,
+        buttons_inline: bool,
+        gap: usize,
+        show_hint: bool,
+    };
+    /// The discard review's layout in `win`, or null when the terminal is too
+    /// small to show every sentence and both buttons. The footer (the same
+    /// keys) and the status row always stay visible below it; short of rows,
+    /// the in-box hint and then the blank row above the buttons go first.
+    fn discardPlan(self: *App, win: vaxis.Window) !?DiscardPlan {
         const a = self.frame.allocator();
-        const row = self.uxAt(0) orelse return;
+        const row = self.uxAt(0) orelse return null;
         const width: u16 = @min(win.width -| 2, 72);
         const text_width = width -| 4;
+        if (text_width < 20) return null;
         const measure = win.child(.{ .width = text_width, .height = 0 });
-        const heading = "Discard this draft? It can't be restored.";
         const rows_of = struct {
             fn count(m: vaxis.Window, value: []const u8) usize {
                 return positionAfter(m, value).row + 1;
             }
         }.count;
-        const clean_label = try safe(a, try std.fmt.allocPrint(a, "› {s}", .{row.label}), false);
-        const clean_detail = try safe(a, row.detail, false);
-        const hint = "y Discard · Esc Keep draft";
-        const buttons_inline = text_width >= "[y Discard]".len + 2 + "[Esc Cancel]".len;
-        const essential = rows_of(measure, heading) + 1 + rows_of(measure, clean_label) + rows_of(measure, clean_detail) + @as(usize, if (buttons_inline) 1 else 2);
-        // The footer (the same keys) and the status row stay visible below
-        // the review. Short of rows, the in-box hint and then the blank row
-        // above the buttons go first; every sentence and both buttons stay.
+        const heading: []const u8 = if (browser_target) "Discard this draft? It can't be restored." else "Discard this draft?";
+        const label = try safe(a, try std.fmt.allocPrint(a, "› {s}", .{row.label}), false);
+        const detail = try safe(a, row.detail, false);
+        const confirm: []const u8 = if (text_width >= "[Ctrl+X Discard]".len + 2 + "[Esc Cancel]".len) "[Ctrl+X Discard]" else "[^X Discard]";
+        const buttons_inline = text_width >= confirm.len + 2 + "[Esc Cancel]".len;
+        const essential = rows_of(measure, heading) + 1 + rows_of(measure, label) + rows_of(measure, detail) + @as(usize, if (buttons_inline) 1 else 2);
         const available = win.height -| 2;
-        const hint_rows = rows_of(measure, hint);
+        const hint_rows = rows_of(measure, discard_again_hint);
         const show_hint = essential + 1 + hint_rows + 2 <= available;
         const gap: usize = if (show_hint or essential + 1 + 2 <= available) 1 else 0;
         const height = essential + gap + (if (show_hint) hint_rows else 0) + 2;
-        if (text_width < 20 or height > available) {
-            self.discard_drawn_ms = null;
+        if (height > available) return null;
+        return .{ .width = width, .height = height, .y_off = (available - height) / 2, .heading = heading, .label = label, .detail = detail, .confirm = confirm, .buttons_inline = buttons_inline, .gap = gap, .show_hint = show_hint };
+    }
+    /// The discard review wraps every sentence to its width over full-width
+    /// rows (nothing behind shows through) and marks itself visible for this
+    /// frame; a terminal too small for all of it says so and confirms nothing.
+    fn drawDiscardReview(self: *App, win: vaxis.Window) !void {
+        self.mouse_hits.clear();
+        const plan = try self.discardPlan(win) orelse {
             const note = "Too small to review discarding · Esc keeps the draft";
-            const box_width = @min(win.width, 40);
-            const box_height: u16 = @intCast(@min(win.height, positionAfter(win.child(.{ .width = box_width, .height = 0 }), note).row + 1));
-            const box = win.child(.{ .x_off = (win.width - box_width) / 2, .y_off = (win.height - box_height) / 2, .width = box_width, .height = box_height });
-            box.fill(.{ .style = self.style(.text) });
-            _ = try self.flowTone(box, note, 0, 0, .warning);
+            const rows: u16 = @intCast(@min(win.height, positionAfter(win.child(.{ .width = win.width, .height = 0 }), note).row + 1));
+            const band = win.child(.{ .y_off = (win.height -| rows) / 2, .height = rows });
+            band.fill(.{ .style = self.style(.text) });
+            _ = try self.flowTone(band, note, 0, 0, .warning);
             return;
-        }
-        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((available - height) / 2), .width = width, .height = @intCast(height) });
-        area.fill(.{ .style = self.style(.text) });
-        const inner = self.panel(area, 0, width, self.ux_title, true);
-        var at = try self.flowTone(inner, heading, 0, 0, .subject);
+        };
+        const band = win.child(.{ .y_off = @intCast(plan.y_off), .height = @intCast(plan.height) });
+        band.fill(.{ .style = self.style(.text) });
+        const area = band.child(.{ .x_off = @intCast((win.width - plan.width) / 2), .width = plan.width, .height = @intCast(plan.height) });
+        const inner = self.panel(area, 0, plan.width, self.ux_title, true);
+        var at = try self.flowTone(inner, plan.heading, 0, 0, .subject);
         at = try self.flowTone(inner, try self.fitLine(inner, self.ux_account.value(), inner.width), 0, at, .muted);
-        at = try self.flowTone(inner, clean_label, 0, at, .subject);
-        at = try self.flowTone(inner, clean_detail, 0, at, .muted);
-        at += @intCast(gap);
-        const x = try self.actionButton(inner, at, 0, "[y Discard]", self.ux_focus == 2, true, .dialog_action, 12);
-        if (buttons_inline) {
+        at = try self.flowTone(inner, plan.label, 0, at, .subject);
+        at = try self.flowTone(inner, plan.detail, 0, at, .muted);
+        at += @intCast(plan.gap);
+        const x = try self.actionButton(inner, at, 0, plan.confirm, self.ux_focus == 2, true, .dialog_action, 12);
+        if (plan.buttons_inline) {
             _ = try self.actionButton(inner, at, x, "[Esc Cancel]", self.ux_focus == 3, true, .dialog_action, 13);
         } else {
             at += 1;
             _ = try self.actionButton(inner, at, 0, "[Esc Cancel]", self.ux_focus == 3, true, .dialog_action, 13);
         }
-        if (show_hint) _ = try self.flowTone(inner, hint, 0, at + 1, .muted);
-        if (self.discard_drawn_ms == null) self.discard_drawn_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        if (plan.show_hint) _ = try self.flowTone(inner, discard_again_hint, 0, at + 1, .muted);
+        self.discard_visible = true;
+    }
+    /// The footer while the review is open names only what works now.
+    fn discardHints(self: *App, width: u16) []const u8 {
+        const fits = (self.discardPlan(self.vx.window()) catch null) != null;
+        if (!fits) return " Esc Keep draft · enlarge the terminal to review";
+        return if (width < 50) " ^X Discard · Esc Keep draft · Tab Buttons" else " Ctrl+X Discard · Esc Keep draft · Tab Buttons · Enter Activate";
     }
     fn runExtendedAction(self: *App, action: action_palette.Id) !void {
         switch (action) {
@@ -4996,7 +5030,7 @@ const App = struct {
                     return;
                 };
                 self.preemptReadOnly();
-                _ = try self.startDraftDiscard(draft, false);
+                _ = try self.startDraftDiscard(draft, false, null);
             },
             .triage_review => {
                 const request = try std.json.parseFromSliceLeaky(Value, self.frame.allocator(), self.pending_triage.value(), .{});
@@ -5046,8 +5080,9 @@ const App = struct {
             return .{ .recipients = Count.of(get(row, "toCount")) + Count.of(get(row, "ccCount")) + Count.of(get(row, "bccCount")), .files = Count.of(get(row, "attachmentCount")) };
         return .{ .recipients = items(get(row, "to")).len + items(get(row, "cc")).len + items(get(row, "bcc")).len, .files = items(get(row, "attachments")).len };
     }
-    /// One confirmation names the draft and says exactly what goes. Focus
-    /// starts on Cancel; a confirm needs a still keyboard (discardReady).
+    /// One review names the draft and says exactly what happens. Focus
+    /// starts on Cancel; only Ctrl+X again, Enter on [Ctrl+X Discard] or a
+    /// click on it confirms (see onDiscardKey).
     fn openDiscardDraft(self: *App) !void {
         const composing = self.compose_active;
         const draft = if (composing) self.compose.id.value() else if (self.drafts_list) self.messageId() else return error.DraftRequired;
@@ -5091,52 +5126,56 @@ const App = struct {
                 gmail_copy = !same(text(get(link, "phase")), "rejected");
             }
         }
-        const label = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (subject.len > 0) subject else "(no subject)", if (recipient_count == 0) @as([]const u8, "no recipients") else try std.fmt.allocPrint(a, "{d} {s}", .{ recipient_count, plural(recipient_count, "recipient", "recipients") }) });
-        const file_text: []const u8 = if (file_count > 0) try std.fmt.allocPrint(a, " and its {d} attached file {s}", .{ file_count, plural(file_count, "copy", "copies") }) else "";
-        const detail = if (gmail_copy) try std.fmt.allocPrint(a, "Removes only the local draft{s} · its Gmail copy stays in Gmail Drafts", .{file_text}) else try std.fmt.allocPrint(a, "Removes this local draft{s} · nothing is sent or changed in Gmail", .{file_text});
+        const file_text: []const u8 = if (file_count > 0) try std.fmt.allocPrint(a, " · {d} {s}", .{ file_count, plural(file_count, "file", "files") }) else "";
+        const label = try std.fmt.allocPrint(a, "{s} · {s}{s}", .{ if (subject.len > 0) subject else "(no subject)", if (recipient_count == 0) @as([]const u8, "no recipients") else try std.fmt.allocPrint(a, "{d} {s}", .{ recipient_count, plural(recipient_count, "recipient", "recipients") }), file_text });
+        // A saved version changed elsewhere goes too; the same undo brings it back.
+        const changed: []const u8 = if (composing and self.compose.saved_changed) "Its saved version, changed elsewhere, goes too · " else "";
+        const what: []const u8 = if (gmail_copy) "Removed from Drafts · its Gmail copy stays in Gmail Drafts" else "Removed from Drafts · nothing is sent or changed in Gmail";
+        const after: []const u8 = if (browser_target) "" else " · Ctrl+Z restores it until you quit";
+        const detail = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ changed, what, after });
         try self.beginUx(.discard, " Discard local draft ");
         try self.ux_target.set(self.allocator, draft);
         try self.uxRow(.{ .label = label, .detail = detail });
-        self.discard_drawn_ms = null;
-        self.discard_last_key_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
-        self.discard_refused_ms = null;
+        self.discard_visible = false;
+        // The opening Ctrl+X counts: holding it never confirms.
+        self.discard_ctrl_x_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        self.discard_click_open_ms = null;
         self.discard_from_insert = composing and self.compose.insert_mode;
-    }
-    /// A confirm (y, Enter on [y Discard] or a click on it) acts only when
-    /// the whole review has been on screen for a moment, no key arrived in
-    /// that moment (every key restarts it, the opening Ctrl+X included) and
-    /// no refused confirm came within the longer quiet time. Typing on, a
-    /// held or repeating key, nano's Ctrl+X y or a double click never discards.
-    fn discardReady(self: *const App, now: i64) bool {
-        const drawn = self.discard_drawn_ms orelse return false;
-        if (now -| drawn < discard_settle_ms or now -| self.discard_last_key_ms < discard_settle_ms) return false;
-        if (self.discard_refused_ms) |at| if (now -| at < discard_quiet_ms) return false;
-        return true;
     }
     fn closeDiscardReview(self: *App) void {
         self.closeUx();
-        self.discard_drawn_ms = null;
-        self.discard_refused_ms = null;
+        self.discard_visible = false;
     }
-    /// Only Tab/Shift+Tab move between the two buttons; arrows, j/k and
-    /// Ctrl+N/P do nothing. Opened while typing, letters other than y only
-    /// explain, so a sentence typed on cannot close, move or confirm it.
+    /// Typing never confirms: only Ctrl+X again, or Enter while Tab has put
+    /// focus on [Ctrl+X Discard]. Tab/Shift+Tab move between the two
+    /// buttons; any other key returns focus to Cancel and only explains, so
+    /// "Tab, text, pause, Enter" keeps the draft. Printable keys never close
+    /// the review or reach the composer or mailbox (q closes it only when it
+    /// was opened outside INSERT).
     fn onDiscardKey(self: *App, key: Key) !void {
-        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
-        const ready = self.discardReady(now);
-        self.discard_last_key_ms = now;
         if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) return self.closeDiscardReview();
+        if (key.matches('x', .{ .ctrl = true })) {
+            const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+            // A held or repeating Ctrl+X restarts the wait and never confirms.
+            const settled = now -| self.discard_ctrl_x_ms >= discard_repeat_ms;
+            self.discard_ctrl_x_ms = now;
+            if (!settled) {
+                self.say(false, "{s}", .{discard_again_hint});
+                return;
+            }
+            return self.confirmDiscard();
+        }
         if (tabDirection(key) != null) {
             self.ux_focus = if (self.ux_focus == 2) 3 else 2;
             return;
         }
         if (key.matches(Key.enter, .{})) {
-            if (self.ux_focus != 2) return self.closeDiscardReview();
-            return self.confirmDiscard(ready, now);
+            if (self.ux_focus == 2) return self.confirmDiscard();
+            return self.closeDiscardReview();
         }
-        if (key.matches('y', .{})) return self.confirmDiscard(ready, now);
+        self.ux_focus = 3;
         if (!self.discard_from_insert and key.matches('q', .{})) return self.closeDiscardReview();
-        self.say(false, "Esc keeps the draft · y discards it", .{});
+        self.say(false, "{s}", .{discard_again_hint});
     }
     fn onDiscardMouse(self: *App, mouse: vaxis.Mouse, wheel: ?bool) !void {
         if (wheel != null) return;
@@ -5144,16 +5183,15 @@ const App = struct {
         if (hit.kind != .dialog_action) return;
         if (hit.index == 13) return self.closeDiscardReview();
         if (hit.index != 12) return;
+        // The second press of the double click that opened the review.
+        if (self.discard_click_open_ms) |opened| if (Io.Timestamp.now(self.io, .awake).toMilliseconds() -| opened < discard_click_ms) return;
         self.ux_focus = 2;
-        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
-        return self.confirmDiscard(self.discardReady(now), now);
+        return self.confirmDiscard();
     }
-    fn confirmDiscard(self: *App, ready: bool, now: i64) !void {
-        if (!ready) {
-            // A refusal starts the longer quiet time: one later, deliberate
-            // press confirms; a held or repeating key never does.
-            self.discard_refused_ms = now;
-            self.say(true, "{s}", .{if (self.discard_drawn_ms == null) @as([]const u8, "Not discarded · make the terminal larger to see the whole review") else "Not discarded yet · let go of the keys, look, then press y once more"});
+    /// Every confirm needs the review whole on screen in the current frame.
+    fn confirmDiscard(self: *App) !void {
+        if (!self.discard_visible) {
+            self.say(true, "Not discarded · make the terminal larger to see the whole review", .{});
             return;
         }
         self.ux_focus = 2;
@@ -5161,21 +5199,24 @@ const App = struct {
     }
     /// The one draft.discard write, shared by Discard and an untouched Back.
     /// A queued or paused send is never cancelled by it: the store refuses.
-    fn startDraftDiscard(self: *App, draft: []const u8, untouched: bool) !bool {
+    /// An explicit Discard keeps the draft for one Ctrl+Z (natively); an
+    /// untouched Back removes it only while the store still holds exactly
+    /// what this composer created (`expected`).
+    fn startDraftDiscard(self: *App, draft: []const u8, untouched: bool, expected: ?[64]u8) !bool {
         if (self.job.future != null) {
             self.say(true, "{s}", .{if (untouched) @as([]const u8, "Draft operation pending · wait for its result, then go back") else "Draft kept · wait for the current operation, then discard"});
             return false;
         }
-        try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = draft, .keepQueuedSend = true });
+        if (expected) |digest| {
+            try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = draft, .keepQueuedSend = true, .expectedContentDigest = @as([]const u8, &digest) });
+        } else if (browser_target) {
+            try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = draft, .keepQueuedSend = true });
+        } else {
+            try self.start(.draft_discard, .{ .cmd = "draft.discard", .account = self.account(), .draftId = draft, .keepQueuedSend = true, .keepForUndo = !untouched });
+        }
         try self.job.draft_target.set(draft);
         self.job.discard_untouched = untouched;
-        self.armInputGate();
         return true;
-    }
-    /// Keys typed after a discard or an untouched Back starts are swallowed
-    /// until the keyboard has been quiet (see onKey).
-    fn armInputGate(self: *App) void {
-        self.input_gate_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
     }
     /// This session generated the draft (new, reply or forward) and nothing
     /// changed since: no typed text, recipient, file, sender, format or quote
@@ -5188,40 +5229,35 @@ const App = struct {
             self.compose.gmail_link == null and !self.compose.saved_changed and self.compose.operation_id.value().len == 0 and
             !self.grace_active and !self.grace_recovery and self.pending_imports.items.len == 0 and !self.clipboard_paste.active;
     }
-    /// Content identity of a composer's fields, computed the same way for
-    /// this composer and for a probe loaded from the stored draft.
-    fn composeDigest(self: *App, compose: *Compose) ?[64]u8 {
+    /// The store's content digest of a draft value it returned (a created or
+    /// read draft): draft.read names it, a created draft is digested exactly
+    /// as the store digests what it holds.
+    fn storedDraftDigest(self: *App, value: Value) ?[64]u8 {
+        const named = text(get(value, "contentDigest"));
+        if (named.len == 64) {
+            var digest: [64]u8 = undefined;
+            @memcpy(&digest, named);
+            return digest;
+        }
         var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
         defer scratch.deinit();
-        var value = compose.draft(scratch.allocator()) catch return null;
-        // The composer fills an empty sender with the account and its
-        // configured name; that default is not content.
-        if (value.from) |sender| if (std.ascii.eqlIgnoreCase(sender.address, self.account())) {
-            value.from = null;
-        };
-        return @import("draft_link.zig").contentDigest(scratch.allocator(), value, self.account()) catch null;
+        const parsed = std.json.parseFromValueLeaky(types.Draft, scratch.allocator(), value, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return null;
+        return @import("draft_link.zig").contentDigest(scratch.allocator(), parsed, self.account()) catch null;
     }
-    /// What the store holds for an untouched composer: its opening content
-    /// until the generated text is saved, then exactly this composer.
-    fn untouchedStoredDigest(self: *App) ?[64]u8 {
-        if (self.compose.saved_revision == self.compose.revision) return self.composeDigest(&self.compose);
-        return self.compose.loaded_digest;
-    }
-    /// Whether the stored draft (a draft.read value) is still what this
-    /// untouched composer created: an agent or another process may have
-    /// filled it in meanwhile, and that content is never removed here.
-    fn storedDraftUnchanged(self: *App, stored: Value) bool {
-        var probe: Compose = .{};
-        defer probe.deinit(self.allocator);
-        probe.load(self.allocator, stored) catch return false;
-        const actual = self.composeDigest(&probe) orelse return false;
-        return std.mem.eql(u8, &actual, &self.discard_expected_digest);
+    /// The digest a save acknowledgement reports (returnContentDigest).
+    fn acknowledgedDigest(result: Value) ?[64]u8 {
+        const named = text(get(result, "contentDigest"));
+        if (named.len != 64) return null;
+        var digest: [64]u8 = undefined;
+        @memcpy(&digest, named);
+        return digest;
     }
     /// Back (q, Ctrl+C) from an untouched composer removes the draft its
-    /// opening created, after checking the store still holds just that, and
-    /// returns to the mailbox like a saved Back.
+    /// opening created, in one store transaction that refuses when the
+    /// draft changed since this window saw it saved (an agent or another
+    /// process filled it in), and returns to the mailbox like a saved Back.
     fn abandonUntouchedDraft(self: *App) anyerror!void {
-        // A landing autosave is part of what the check compares.
+        // A landing autosave is part of what the store compares.
         if (self.job.future != null and self.job.kind == .autosave) {
             self.job.future.?.await(self.io);
             try self.finish();
@@ -5233,29 +5269,25 @@ const App = struct {
             self.say(true, "Draft operation pending · wait for its result, then go back", .{});
             return;
         }
+        const draft = try self.frame.allocator().dupe(u8, self.compose.id.value());
+        // A browser tab's drafts have no other writer.
+        if (browser_target) {
+            _ = try self.startDraftDiscard(draft, true, null);
+            return;
+        }
         // Unknown stored content cannot be proved untouched: keep it, as Back
         // always did.
-        const expected = self.untouchedStoredDigest() orelse {
+        const expected = self.compose.saved_digest orelse {
             self.compose.pristine_revision = null;
             return self.saveDraft(.save_back);
         };
-        self.discard_expected_digest = expected;
-        try self.start(.discard_check, .{ .cmd = "draft.read", .account = self.account(), .draftId = self.compose.id.value() });
-        try self.job.draft_target.set(self.compose.id.value());
-        self.job.discard_untouched = true;
-        self.armInputGate();
+        _ = try self.startDraftDiscard(draft, true, expected);
     }
-    /// The checked untouched draft is still exactly what this session made.
-    fn finishDiscardCheck(self: *App, stored: Value) !void {
-        const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
-        if (!self.compose_active or !same(self.compose.id.value(), target) or !self.composeUntouched()) return;
-        if (self.storedDraftUnchanged(stored)) {
-            _ = try self.startDraftDiscard(target, true);
-            return;
-        }
-        // Changed elsewhere: nothing of the user's is in this composer, and
-        // the stored content is not ours to remove. Keep it and let the
-        // existing conflict review choose.
+    /// Changed elsewhere since this untouched composer saw it: nothing of the
+    /// user's is here and the stored content is not ours to remove. Keep it
+    /// and let the existing conflict review choose.
+    fn untouchedDraftChanged(self: *App, draft: []const u8) !void {
+        if (!self.compose_active or !same(self.compose.id.value(), draft)) return;
         self.compose.pristine_revision = null;
         self.savedDraftChanged();
         try self.openDraftConflict();
@@ -5284,26 +5316,76 @@ const App = struct {
         try self.saveDraft(.save_back);
         if (self.job.future != null and self.job.kind == .save_back) self.job.discard_fallback = true;
     }
+    /// A typed draft removed elsewhere (another window, an agent): Back keeps
+    /// the text as a new draft instead of failing to save the missing one.
+    fn saveRemovedDraftAsNew(self: *App) !void {
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer arena.deinit();
+        var fields: [5][]const u8 = undefined;
+        var copy = self.compose.recovery(&fields);
+        copy.id = "";
+        var snapshot = try @import("mail_response_value.zig").borrowed(arena.allocator(), copy);
+        if (copy.original == null) try snapshot.object.put(arena.allocator(), "original", .null);
+        self.autosave_revision = self.compose.revision;
+        try self.start(.save_back, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = "", .draft = snapshot, .acknowledgementOnly = true });
+        self.job.recreate_removed = true;
+    }
+    /// Ctrl+Z after a Discard: the draft returns to Drafts exactly as it was
+    /// and reopens in the composer.
+    fn restoreDiscardedDraft(self: *App) !void {
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        const draft = try self.frame.allocator().dupe(u8, self.undo_draft.slice());
+        try self.start(.draft_restore, .{ .cmd = "draft.restore", .account = self.account(), .draftId = draft });
+        try self.job.draft_target.set(draft);
+    }
+    /// A kept draft is gone (restored, or replaced elsewhere): no Ctrl+Z offers it.
+    fn forgetUndoDraft(self: *App, account_index: usize) void {
+        self.undo_draft = .{};
+        if (account_index < self.kept_discards.len) self.kept_discards[account_index] = .{};
+    }
     const AtExit = enum { removed, kept_elsewhere, save };
     /// Exit (signal or end of input) with an untouched composer keeps no
-    /// draft either. Changed elsewhere, the stored content stays untouched;
-    /// anything unexpected falls back to the usual save.
+    /// draft either: one guarded removal. Changed elsewhere, the stored
+    /// content stays untouched; anything unexpected falls back to the usual save.
     fn discardUntouchedAtExit(self: *App) AtExit {
         if (browser_target or !self.composeUntouched()) return .save;
-        const expected = self.untouchedStoredDigest() orelse return .save;
-        self.discard_expected_digest = expected;
+        const expected = self.compose.saved_digest orelse return .save;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const read = self.exitCall(a, .{ .account = self.account(), .cmd = "draft.read", .draftId = self.compose.id.value() }) orelse return .save;
-        if (!truth(get(read, "ok"))) return if (same(text(get(get(read, "error"), "code")), "DraftNotFound")) .removed else .save;
-        if (!self.storedDraftUnchanged(get(read, "data"))) return .kept_elsewhere;
-        const removed = self.exitCall(a, .{ .account = self.account(), .cmd = "draft.discard", .draftId = self.compose.id.value(), .keepQueuedSend = true }) orelse return .save;
-        if (!truth(get(removed, "ok")) and !same(text(get(get(removed, "error"), "code")), "DraftNotFound")) return .save;
-        return .removed;
+        const removed = self.syncCall(a, .{ .account = self.account(), .cmd = "draft.discard", .draftId = self.compose.id.value(), .keepQueuedSend = true, .expectedContentDigest = @as([]const u8, &expected) }) orelse return .save;
+        if (truth(get(removed, "ok"))) return .removed;
+        const code = text(get(get(removed, "error"), "code"));
+        if (same(code, "DraftNotFound")) return .removed;
+        if (same(code, "ReviewedDraftChanged")) return .kept_elsewhere;
+        return .save;
     }
-    /// One synchronous request at exit, after every worker has stopped.
-    fn exitCall(self: *App, a: Allocator, request_value: anytype) ?Value {
+    /// The drafts this window kept for undo go for good when it quits.
+    fn forgetKeptDiscardsAtExit(self: *App) void {
+        if (browser_target) return;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        for (&self.kept_discards, 0..) |*kept, index| {
+            if (kept.slice().len == 0 or index >= self.accounts.len) continue;
+            _ = self.syncCall(arena.allocator(), .{ .account = text(get(self.accounts[index], "address")), .cmd = "draft.restore", .draftId = kept.slice(), .forget = true });
+            kept.* = .{};
+        }
+    }
+    /// A draft an earlier window kept for undo and never dropped (it ended
+    /// without a clean exit) goes for good when the next one starts.
+    fn forgetStaleDiscards(self: *App) void {
+        if (browser_target) return;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        for (self.accounts) |account_value| {
+            const address = text(get(account_value, "address"));
+            if (address.len == 0) continue;
+            _ = self.syncCall(arena.allocator(), .{ .account = address, .cmd = "draft.restore", .forget = true });
+        }
+    }
+    /// One synchronous request outside the event loop (startup and exit).
+    fn syncCall(self: *App, a: Allocator, request_value: anytype) ?Value {
         const request = encodeJobRequest(a, request_value, false) catch return null;
         const response = self.client.call(a, request) catch return null;
         if (response.len > response_limit) return null;
@@ -7406,10 +7488,17 @@ const App = struct {
             if (self.job.kind == .triage_scope) self.triage_waiting = false;
         } else if (self.job.failure) |err| {
             if (self.job.kind == .list or self.job.kind == .drafts) self.after_list_notice = null;
-            if ((self.job.kind == .draft_discard or self.job.kind == .discard_check) and self.job.discard_untouched and err != error.Canceled) {
+            if (self.job.kind == .draft_discard and self.job.discard_untouched and err != error.Canceled) {
                 const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
+                if (err == error.DraftNotFound) {
+                    if (self.compose_active and same(self.compose.id.value(), target)) return self.untouchedDraftGone();
+                    return;
+                }
+                if (err == error.ReviewedDraftChanged) return self.untouchedDraftChanged(target);
                 return self.keepUntouchedDraft(target);
             }
+            if (self.job.kind == .draft_restore and err == error.DiscardedDraftUnavailable) self.forgetUndoDraft(self.job.account_index);
+            if (self.job.kind == .save_back and err == error.DraftNotFound and !self.job.discard_fallback and !self.job.recreate_removed and self.compose_active and self.job.account_index == self.account_index) return self.saveRemovedDraftAsNew();
             if (err == error.ArchivedDraftReadOnly and try self.recoverSettledDraft(self.job.kind)) return;
             if (err == error.ReviewedDraftChanged and self.job.kind == .grace_stage and self.compose_active and self.job.account_index == self.account_index and self.job.generation == self.generation and same(self.job.draft_target.slice(), self.compose.id.value())) {
                 self.savedDraftChanged();
@@ -7675,14 +7764,19 @@ const App = struct {
                     return;
                 }
                 if (same(self.status_error_code[0..self.status_error_len], "ArchivedDraftReadOnly") and try self.recoverSettledDraft(kind)) return;
-                if ((kind == .draft_discard or kind == .discard_check) and self.job.discard_untouched) {
+                if (kind == .draft_discard and self.job.discard_untouched) {
                     const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
-                    if (same(self.status_error_code[0..self.status_error_len], "DraftNotFound")) {
+                    const code = self.status_error_code[0..self.status_error_len];
+                    if (same(code, "DraftNotFound")) {
                         if (self.compose_active and same(self.compose.id.value(), target)) return self.untouchedDraftGone();
                         return;
                     }
+                    if (same(code, "ReviewedDraftChanged")) return self.untouchedDraftChanged(target);
                     return self.keepUntouchedDraft(target);
                 }
+                if (kind == .draft_restore and same(self.status_error_code[0..self.status_error_len], "DiscardedDraftUnavailable")) self.forgetUndoDraft(self.job.account_index);
+                // A typed draft removed elsewhere: keep its text as a new draft.
+                if (kind == .save_back and same(self.status_error_code[0..self.status_error_len], "DraftNotFound") and !self.job.discard_fallback and !self.job.recreate_removed and self.compose_active and self.job.account_index == self.account_index) return self.saveRemovedDraftAsNew();
                 if (kind == .follow_up_write and same(self.status_error_code[0..self.status_error_len], "FollowUpChanged")) {
                     self.loadFollowUps() catch {};
                     self.sayError("FollowUpChanged");
@@ -7793,12 +7887,29 @@ const App = struct {
                 if (!try self.loadCachedListImpl(target, true)) return error.AnchorNotCached;
                 try self.revealUnreadTarget(target);
             },
-            .discard_check => try self.finishDiscardCheck(try self.data(self.job_arena.allocator(), response)),
+            .draft_restore => {
+                const result = try self.data(self.job_arena.allocator(), response);
+                const restored = try self.frame.allocator().dupe(u8, text(get(result, "draftId")));
+                self.forgetUndoDraft(self.job.account_index);
+                if (restored.len == 0) return error.InvalidProviderResponse;
+                if (self.folder == 2) self.pending_list = true;
+                self.say(false, "Draft restored", .{});
+                // Back in the composer exactly as it was.
+                try self.start(.draft_read, .{ .account = self.account(), .cmd = "draft.read", .draftId = restored });
+            },
             .draft_discard => {
                 // A refused removal was handled with the envelope above.
                 const untouched = self.job.discard_untouched;
                 const target = try self.frame.allocator().dupe(u8, self.job.draft_target.slice());
-                _ = try self.data(self.job_arena.allocator(), response);
+                const result = try self.data(self.job_arena.allocator(), response);
+                // Kept for one undo: Ctrl+Z restores it (the latest undo).
+                const kept = truth(get(result, "keptForUndo"));
+                if (kept) {
+                    try self.undo_draft.set(target);
+                    try self.undo_account.set(self.allocator, self.account());
+                    try self.undo_token.set(self.allocator, "");
+                    if (self.job.account_index < self.kept_discards.len) try self.kept_discards[self.job.account_index].set(target);
+                }
                 if (self.compose_active and same(self.compose.id.value(), target)) {
                     // Leave exactly like a saved Back: the mailbox, reader or
                     // Drafts view the composer was opened from.
@@ -7810,7 +7921,7 @@ const App = struct {
                     self.closeComposer();
                     self.compose.deinit(self.allocator);
                     self.compose = .{};
-                    const notice: []const u8 = if (untouched) untouched_notice else if (gmail_copy) "Draft discarded · its Gmail copy stays in Gmail Drafts" else "Draft discarded";
+                    const notice: []const u8 = if (untouched) untouched_notice else if (gmail_copy) (if (kept) @as([]const u8, "Draft discarded · its Gmail copy stays in Gmail Drafts · Ctrl+Z Undo") else "Draft discarded · its Gmail copy stays in Gmail Drafts") else if (kept) "Draft discarded · Ctrl+Z Undo" else "Draft discarded";
                     if (self.folder == 2) {
                         self.pending_list = true;
                         self.after_list_notice = notice;
@@ -7822,7 +7933,7 @@ const App = struct {
                 self.mode = .browse;
                 self.generation +%= 1;
                 _ = try self.loadCachedList("");
-                self.say(false, "Draft discarded", .{});
+                self.say(false, "{s}", .{if (kept) @as([]const u8, "Draft discarded · Ctrl+Z Undo") else "Draft discarded"});
             },
             .attachment_import => {
                 if (self.clipboard_paste.active and (!self.clipboardContextCurrent() or self.mode != .compose)) return;
@@ -7962,6 +8073,9 @@ const App = struct {
                 if (undoable) {
                     try self.undo_token.set(self.allocator, text(get(result_value, "undoToken")));
                     try self.undo_account.set(self.allocator, self.account());
+                    // The latest action is what Ctrl+Z undoes; a kept
+                    // discarded draft stays kept until this window quits.
+                    self.undo_draft = .{};
                     self.undo_label = batchUndoLabel(request);
                 }
                 self.mail_selection.clear();
@@ -8059,11 +8173,15 @@ const App = struct {
                 self.compose_snapshot_scroll = 0;
                 self.compose.new_draft = kind == .compose;
                 if (kind == .compose) self.positionReplyBody();
+                // What the store holds now, as it digests it: an untouched
+                // Back removes the draft only while it still holds this.
+                self.compose.saved_digest = self.storedDraftDigest(result);
                 if (self.compose.from.value().len == 0) {
                     try self.compose.from.set(self.allocator, self.account());
                     try self.compose.from_name.set(self.allocator, text(get(self.accounts[self.account_index], "senderName")));
+                    // Not content the store holds yet (see startComposeMeasure).
+                    self.compose.default_sender_unsaved = true;
                 }
-                if (kind == .compose) self.compose.loaded_digest = self.composeDigest(&self.compose);
                 self.compose_active = true;
                 self.completion_open = false;
                 self.completion_dismissed = false;
@@ -8182,6 +8300,8 @@ const App = struct {
                 const result = try self.data(self.job_arena.allocator(), response);
                 try self.compose.id.set(self.allocator, text(get(result, "id")));
                 self.compose.saved_revision = self.autosave_revision;
+                self.compose.saved_digest = acknowledgedDigest(result);
+                self.compose.default_sender_unsaved = false;
                 self.requestComposeMeasure();
                 self.say(false, "{s}", .{if (self.compose.revision == self.compose.saved_revision) (if (self.capabilities.durable_drafts) "Draft saved locally · no mail sent" else "Draft saved in this tab · reload/disconnect discards it") else "Earlier changes saved · newer edits pending"});
             },
@@ -8235,6 +8355,8 @@ const App = struct {
                 };
                 try self.compose.id.set(self.allocator, text(get(result, "id")));
                 self.compose.saved_revision = self.autosave_revision;
+                self.compose.saved_digest = acknowledgedDigest(result);
+                self.compose.default_sender_unsaved = false;
                 self.requestComposeMeasure();
                 self.mode = if (kind == .save_review) .review else if (kind == .save_back) .browse else .compose;
                 if (kind == .save_review) {
@@ -8252,10 +8374,14 @@ const App = struct {
                     self.sayEditorResult(exit_code);
                 } else if (kind == .save_back and self.job.discard_fallback) {
                     self.say(true, "Draft kept in Drafts · the unused draft could not be removed", .{});
+                } else if (kind == .save_back and self.job.recreate_removed) {
+                    self.say(true, "The saved draft was removed elsewhere · your text is kept as a new draft", .{});
                 } else self.say(false, "{s}", .{if (kind == .save_review) (if (self.deliveryBlocksSend()) "Review send · Esc Return to draft" else "Review send · y Send · Esc Return to draft") else if (self.capabilities.durable_drafts) "Draft saved locally" else "Draft saved in this tab · reload/disconnect discards it"});
                 if (kind == .save_review) self.compose_preview_scroll = 0;
                 if (kind == .save_back and self.folder == 2) self.pending_list = true;
                 if (kind == .save_back) try self.resumeMailboxReader();
+                // Said after the reader resumes, so it stays on screen.
+                if (kind == .save_back and self.job.recreate_removed) self.say(true, "The saved draft was removed elsewhere · your text is kept as a new draft", .{});
                 if (kind == .save_browser) try self.start(.open, .{ .cmd = "draft.open-preview", .account = self.account(), .draftId = self.compose.id.value() });
                 if (kind == .save_gmail) try self.requestGmailDraftInfo();
             },
@@ -9457,7 +9583,7 @@ const App = struct {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         self.autosave_revision = self.compose.revision;
-        try self.start(.autosave, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true });
+        try self.start(.autosave, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true, .returnContentDigest = !browser_target });
         self.say(false, "{s}", .{if (self.capabilities.durable_drafts) "Saving draft locally… · typing remains available" else "Saving draft in this tab…"});
     }
     fn composeCompletions(self: *const App) completion.Matches {
@@ -9667,7 +9793,10 @@ const App = struct {
         self.compose_measure = .{};
         var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
         defer scratch.deinit();
-        const local = try self.compose.draft(scratch.allocator());
+        var local = try self.compose.draft(scratch.allocator());
+        // A sender this composer only filled in by default is not in the
+        // stored draft until the next save; it is not a change made elsewhere.
+        if (self.compose.default_sender_unsaved) local.from = null;
         const digest = try @import("draft_link.zig").contentDigest(scratch.allocator(), local, self.account());
         try self.compose_measure.content_digest.set(&digest);
         const id = try self.operationId(self.frame.allocator());
@@ -9982,10 +10111,10 @@ const App = struct {
         const draft_value = self.compose.draft(arena.allocator()) catch |err| {
             if (kind == .save_review) return err;
             var fields: [5][]const u8 = undefined;
-            try self.start(kind, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true });
+            try self.start(kind, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true, .returnContentDigest = !browser_target });
             return;
         };
-        try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), draft_value), .acknowledgementOnly = true });
+        try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), draft_value), .acknowledgementOnly = true, .returnContentDigest = !browser_target });
     }
     /// Renders the saved protected draft into the private HTML preview. The
     /// composer is never saved first, so the draft stays exactly as submitted;
@@ -12856,6 +12985,8 @@ const App = struct {
                 if (self.mode != .compose or wheel != null or self.compose_action_mask & 4 == 0) return;
                 if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = 7 else self.focusComposeAttachments(self.compose.attachments.len + 8);
                 try self.openDiscardDraft();
+                // Its double click's second press must not confirm.
+                if (self.ux_overlay == .discard) self.discard_click_open_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
             },
             .compose_original_policy, .compose_original_fold => {
                 if ((self.mode != .compose and self.mode != .review) or wheel != null) return;
@@ -13380,16 +13511,6 @@ const App = struct {
         self.paste_cr = false;
     }
     fn onKey(self: *App, original_key: Key) !void {
-        // After a discard or an untouched Back starts, typed-ahead keys
-        // (each extends the wait) are dropped until the keyboard is quiet.
-        if (self.input_gate_ms) |last| {
-            const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
-            if (now -| last < discard_settle_ms) {
-                self.input_gate_ms = now;
-                return;
-            }
-            self.input_gate_ms = null;
-        }
         // The g prefix is visible in the footer and lasts for exactly one key.
         const g_was_pending = self.g_pending;
         self.g_pending = false;
@@ -13436,7 +13557,11 @@ const App = struct {
         }
         if (self.ux_overlay != .none) {
             if (!self.paste) return self.onUxKey(key);
-            if (self.ux_overlay == .discard) self.discard_last_key_ms = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+            // Pasted text never reaches or confirms the discard review.
+            if (self.ux_overlay == .discard) {
+                self.ux_focus = 3;
+                return;
+            }
             if (self.ux_focus == 0 and self.uxInput()) {
                 try self.pasteInto(&self.ux_query, key, false, 4096);
                 self.ux_selected = 0;
@@ -16247,7 +16372,7 @@ const App = struct {
     fn contextHints(self: *const App) []const u8 {
         if (self.ux_overlay == .gmail_draft) return " Tab / j/k Choose · Enter Activate · Ctrl+D/U Details · Esc Back";
         if (self.ux_overlay == .follow_up) return " Tab Controls · j/k Presets · Enter Choose · Ctrl+S Save date · Esc Cancel";
-        if (self.ux_overlay == .discard) return discard_hints;
+        if (self.ux_overlay == .discard) return " Ctrl+X Discard · Esc Keep draft · Tab Buttons · Enter Activate";
         if (self.follow_ups_list and self.mode == .browse and self.ux_overlay == .none and self.focus != .reader) return " j/k Choose · Enter Open mail · b Change date · d Done · Ctrl+R Reload · q Back · ? Help";
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.mode == .label_manager) return if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text";
@@ -16385,7 +16510,7 @@ const App = struct {
     }
     fn rawHints(self: *App, width: u16) []const u8 {
         if (self.reconnect.active()) return self.reconnect.hints();
-        if (self.ux_overlay == .discard) return discard_hints;
+        if (self.ux_overlay == .discard) return self.discardHints(width);
         // A pending g prefix replaces the footer with its choices until the next key.
         if (self.g_pending and self.mode == .browse) return if (width < 44) "GOTO · i/s/d/a/t Mailbox · g Top · Esc" else if (width < 78) "GOTO · i Inbox · s Sent · d Drafts · a All · t Trash" else "GOTO · i Inbox · s Sent · d Drafts · a All Mail · t Trash · g Top · Esc Cancel";
         if (self.ux_overlay == .gmail_draft) return if (width < 66) "Tab Choose · Enter · Ctrl+D/U · Esc Back" else self.contextHints();
@@ -23677,6 +23802,9 @@ const App = struct {
         self.update_rect = null;
         self.invitation_confirm_ready = false;
         self.review_ready = false;
+        // A discard confirm needs this frame to show the whole review too,
+        // including a terminal now too small for any of it.
+        self.discard_visible = false;
         // A Delete/RSVP confirm needs this new frame to show the dialog, and
         // is settled only after every layer of the frame has been drawn.
         self.calendar_action.frame +%= 1;
@@ -23747,6 +23875,8 @@ const App = struct {
         try self.drawMeetings(win);
         if (self.calendarBookingModal()) try self.drawCalendarBooking(win);
         try self.drawReconnect(win);
+        // Anything drawn over the review hides it: nothing confirms then.
+        if (self.meeting_card_shown or self.reconnect.active() or self.update_open or self.grace_active) self.discard_visible = false;
     }
 };
 
@@ -23802,6 +23932,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         else => .{ .unavailable = true },
     };
     try app.boot();
+    // A draft an earlier window kept for undo, left by an unclean exit.
+    app.forgetStaleDiscards();
     app.loadPreferences();
     try app.initMeetings();
     app.theme_watch.configure(environ) catch {};
@@ -23906,10 +24038,10 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
             .terminate => break,
         }
     }
-    // A discard (or its check) is local and short: let it land and apply,
-    // so exit never re-saves or re-removes a draft that is already gone.
+    // A discard (or restore) is local and short: let it land and apply, so
+    // exit never re-saves or re-removes a draft that is already gone.
     for (0..2) |_| {
-        if (app.job.future == null or (app.job.kind != .draft_discard and app.job.kind != .discard_check)) break;
+        if (app.job.future == null or (app.job.kind != .draft_discard and app.job.kind != .draft_restore)) break;
         app.job.future.?.await(app.io);
         app.exit_persistence = true;
         app.finish() catch {};
@@ -23918,6 +24050,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     app.cancelJob();
     app.cancelGraceAtExit();
     try app.persistDraftAtExit();
+    // What this window kept for Ctrl+Z goes for good with it.
+    app.forgetKeptDiscardsAtExit();
     app.rememberWorkingContext();
     app.saveUiPreferences();
     try app.flushRemotePreferences();
@@ -31604,7 +31738,7 @@ test "local UI: overlay paste inserts literal text and cannot confirm draft disc
     try app.onKey(.{ .codepoint = Key.enter });
     try app.onKey(.{ .codepoint = Key.tab });
     try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
-    try std.testing.expectEqual(@as(usize, 2), app.ux_focus);
+    try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
     try std.testing.expect(app.job.future == null);
     app.pasteEnd();
     try app.beginUx(.find, "Find");
@@ -31618,40 +31752,73 @@ test "local UI: overlay paste inserts literal text and cannot confirm draft disc
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
-/// Synthetic draft store for the discard tests: it records reads, removals
-/// and saves; operation and queue lookups are empty; anything else is refused.
+/// Synthetic draft store for the discard tests: it records removals, kept
+/// discards, restores and saves, names the digest of what it holds the way
+/// the store does, refuses a guarded removal of changed content, and keeps
+/// operation and queue lookups empty; anything else is refused.
 const DiscardTestTransport = struct {
     discards: usize = 0,
+    kept: usize = 0,
     saves: usize = 0,
-    reads: usize = 0,
+    restores: usize = 0,
+    forgets: usize = 0,
     reject_discard: bool = false,
-    /// What draft.read finds: as created, filled in by an agent, or gone.
+    /// draft.restore finds nothing kept (another window replaced it).
+    slot_gone: bool = false,
+    /// What a guarded removal finds: as created, filled in by an agent, or gone.
     stored: enum { created, agent_changed, gone } = .created,
     created: []const u8 = DiscardTestRig.fresh_draft,
+    digest: ?[64]u8 = null,
+    fn digestOf(a: Allocator, value: Value) ![64]u8 {
+        const parsed = try std.json.parseFromValueLeaky(types.Draft, a, value, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        return @import("draft_link.zig").contentDigest(a, parsed, "personal@example.test");
+    }
+    fn storedDigest(self: *@This(), a: Allocator) ![64]u8 {
+        if (self.digest) |value| return value;
+        const created = try std.json.parseFromSliceLeaky(Value, a, self.created, .{ .allocate = .alloc_always });
+        return digestOf(a, created);
+    }
     fn call(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(ctx));
-        const request = try std.json.parseFromSlice(Value, a, raw, .{});
-        defer request.deinit();
-        const cmd = text(get(request.value, "cmd"));
-        if (same(cmd, "draft.read")) {
-            self.reads += 1;
-            return switch (self.stored) {
-                .created => std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{s}}}", .{self.created}),
-                .agent_changed => a.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"fresh-draft\",\"to\":[{\"address\":\"boss@example.test\"}],\"subject\":\"Agent-written reply\",\"bodyText\":\"Long text an agent drafted.\",\"bodyFormat\":\"markdown\"}}"),
-                .gone => a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"DraftNotFound\"}}"),
-            };
-        }
+        var arena: std.heap.ArenaAllocator = .init(a);
+        defer arena.deinit();
+        const request = try std.json.parseFromSliceLeaky(Value, arena.allocator(), raw, .{ .allocate = .alloc_always });
+        const cmd = text(get(request, "cmd"));
         if (same(cmd, "draft.discard")) {
-            try std.testing.expectEqualStrings("fresh-draft", text(get(request.value, "draftId")));
+            try std.testing.expectEqualStrings("fresh-draft", text(get(request, "draftId")));
             // A discard from the TUI never cancels a queued send.
-            try std.testing.expect(truth(get(request.value, "keepQueuedSend")));
+            try std.testing.expect(truth(get(request, "keepQueuedSend")));
             self.discards += 1;
             if (self.reject_discard) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"StorageUnavailable\"}}");
+            const expected = text(get(request, "expectedContentDigest"));
+            if (expected.len != 0) {
+                if (self.stored == .gone) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"DraftNotFound\"}}");
+                const actual = try self.storedDigest(arena.allocator());
+                if (self.stored == .agent_changed or !same(expected, &actual)) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"ReviewedDraftChanged\"}}");
+            }
+            if (truth(get(request, "keepForUndo"))) {
+                self.kept += 1;
+                return a.dupe(u8, "{\"ok\":true,\"data\":{\"discarded\":true,\"keptForUndo\":true}}");
+            }
             return a.dupe(u8, "{\"ok\":true,\"data\":{\"discarded\":true}}");
         }
+        if (same(cmd, "draft.restore")) {
+            if (truth(get(request, "forget"))) {
+                self.forgets += 1;
+                return a.dupe(u8, "{\"ok\":true,\"data\":{\"forgotten\":true}}");
+            }
+            self.restores += 1;
+            if (self.slot_gone) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"DiscardedDraftUnavailable\"}}");
+            try std.testing.expectEqualStrings("fresh-draft", text(get(request, "draftId")));
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"restored\":true,\"draftId\":\"fresh-draft\"}}");
+        }
+        if (same(cmd, "draft.read")) return std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{s}}}", .{self.created});
         if (same(cmd, "draft.update") or same(cmd, "draft.recovery-save")) {
             self.saves += 1;
-            return std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{{\"id\":\"{s}\"}}}}", .{text(get(request.value, "draftId"))});
+            const saved = try digestOf(arena.allocator(), get(request, "draft"));
+            self.digest = saved;
+            if (truth(get(request, "returnContentDigest"))) return std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{{\"id\":\"{s}\",\"contentDigest\":\"{s}\"}}}}", .{ text(get(request, "draftId")), &saved });
+            return std.fmt.allocPrint(a, "{{\"ok\":true,\"data\":{{\"id\":\"{s}\"}}}}", .{text(get(request, "draftId"))});
         }
         if (same(cmd, "operation.list")) return a.dupe(u8, "{\"ok\":true,\"data\":{\"operations\":[]}}");
         if (same(cmd, "queue.list")) return a.dupe(u8, "{\"ok\":true,\"data\":{\"queue\":[]}}");
@@ -31701,16 +31868,24 @@ const DiscardTestRig = struct {
     fn status(rig: *DiscardTestRig) []const u8 {
         return rig.app.status[0..rig.app.status_len];
     }
-    /// One frame of the open review, as the terminal would show it.
+    /// One frame of the open review, as draw() makes it.
     fn drawReview(rig: *DiscardTestRig) !void {
         rig.vx.screen.clear();
+        rig.app.discard_visible = false;
         try rig.app.drawUx(rig.vx.window());
+    }
+    fn resize(rig: *DiscardTestRig, a: Allocator, cols: u16, rows: u16) !void {
+        rig.vx.screen.deinit(a);
+        rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = cols, .rows = rows, .x_pixel = 0, .y_pixel = 0 });
     }
     fn wait(rig: *DiscardTestRig, milliseconds: i64) !void {
         try rig.app.io.sleep(.fromMilliseconds(milliseconds), .awake);
     }
     fn key(rig: *DiscardTestRig, codepoint: u21) !void {
         try rig.app.onKey(.{ .codepoint = codepoint, .text = if (codepoint < 0x80) &[_]u8{@intCast(codepoint)} else null });
+    }
+    fn ctrlX(rig: *DiscardTestRig) !void {
+        try rig.app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
     }
 };
 
@@ -31737,6 +31912,11 @@ test "draft discard: Back from an untouched composer keeps no draft while edited
                 try app.apply(.identities, "{\"ok\":true,\"data\":{\"identities\":[{\"address\":\"personal@example.test\",\"signature\":\"Late fixture signature\"}]}}");
                 try std.testing.expect(std.mem.indexOf(u8, app.compose.fields[4].value(), "Late fixture signature") != null);
                 try std.testing.expectEqual(@as(?u64, 1), app.compose.pristine_revision);
+                // Its autosave lands; the guarded removal compares what that saved.
+                try app.autosaveDraft();
+                try rig.drain();
+                try std.testing.expectEqual(@as(usize, 1), rig.transport.saves);
+                rig.transport.saves = 0;
             },
             .typed_body, .typed_recipient => {
                 app.compose.selected = if (case == .typed_body) 4 else 0;
@@ -31761,21 +31941,22 @@ test "draft discard: Back from an untouched composer keeps no draft while edited
         switch (case) {
             .new_untouched, .reply_untouched, .late_signature => {
                 try std.testing.expect(!app.compose_active and app.mode == .browse);
-                try std.testing.expectEqual(@as(usize, 1), rig.transport.reads);
                 try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
-                try std.testing.expectEqual(@as(usize, 0), rig.transport.saves);
+                // No undo for an untouched removal, and no save.
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.kept + rig.transport.saves);
                 try std.testing.expectEqualStrings("Nothing written · no draft kept", rig.status());
+                try std.testing.expectEqual(@as(usize, 0), app.undo_draft.slice().len);
             },
             .already_gone => {
                 try std.testing.expect(!app.compose_active and app.mode == .browse);
-                try std.testing.expectEqual(@as(usize, 0), rig.transport.discards + rig.transport.saves);
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.saves);
                 try std.testing.expectEqualStrings("Nothing written · no draft kept", rig.status());
             },
             // Content this composer did not create is never removed: the
-            // draft stays and the existing conflict review decides.
+            // store refuses the guarded removal and the conflict review decides.
             .agent_changed => {
                 try std.testing.expect(app.compose_active and app.compose.saved_changed and app.ux_overlay == .draft_conflict);
-                try std.testing.expectEqual(@as(usize, 0), rig.transport.discards + rig.transport.saves);
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.saves + rig.transport.kept);
                 try std.testing.expect(!app.composeUntouched());
             },
             .removal_refused => {
@@ -31787,7 +31968,7 @@ test "draft discard: Back from an untouched composer keeps no draft while edited
             },
             else => {
                 try std.testing.expect(!app.compose_active and app.mode == .browse);
-                try std.testing.expectEqual(@as(usize, 0), rig.transport.discards + rig.transport.reads);
+                try std.testing.expectEqual(@as(usize, 0), rig.transport.discards);
                 try std.testing.expectEqual(@as(usize, 1), rig.transport.saves);
                 try std.testing.expectEqualStrings("Draft saved locally", rig.status());
             },
@@ -31795,7 +31976,7 @@ test "draft discard: Back from an untouched composer keeps no draft while edited
     }
 }
 
-test "draft discard: keys typed after an untouched Back or a discard are swallowed until the keyboard is quiet" {
+test "draft discard: keys after an untouched Back act at once; nothing is dropped" {
     if (browser_target) return error.SkipZigTest;
     const a = std.testing.allocator;
     const rig = try DiscardTestRig.create(a, true);
@@ -31805,23 +31986,15 @@ test "draft discard: keys typed after an untouched Back or a discard are swallow
     try app.apply(.compose, DiscardTestRig.fresh);
     try rig.drain();
     try rig.key('q');
-    // Typed ahead while the check and the removal run, then after they land.
-    try rig.key('?');
     try rig.drain();
     try std.testing.expect(!app.compose_active and app.mode == .browse);
-    for ("x?u") |byte| {
-        try rig.wait(150);
-        try rig.key(byte);
-        try std.testing.expect(app.mode == .browse);
-    }
     try std.testing.expectEqualStrings("Nothing written · no draft kept", rig.status());
-    // A quiet keyboard releases the gate; the next key acts normally.
-    try rig.wait(700);
+    // The very next key is the user's: ? opens Help, no pause needed.
     try rig.key('?');
     try std.testing.expectEqual(Mode.help, app.mode);
 }
 
-test "draft discard: the review confirms only on a still keyboard, whatever is typed, held or clicked first" {
+test "draft discard: typing never confirms; Ctrl+X again, Enter on the focused button or a click does, and Ctrl+Z restores" {
     if (browser_target) return error.SkipZigTest;
     const a = std.testing.allocator;
     const rig = try DiscardTestRig.create(a, true);
@@ -31839,72 +32012,113 @@ test "draft discard: the review confirms only on a still keyboard, whatever is t
     const before = try a.dupe(u8, app.compose.fields[0].value());
     defer a.free(before);
     // Ctrl+X is never text: INSERT keeps its fields and opens the review.
-    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try rig.ctrlX();
     try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
     try std.testing.expect(app.discard_from_insert);
     try std.testing.expectEqualStrings(before, app.compose.fields[0].value());
     try std.testing.expectEqualStrings("Plan · 2 recipients", app.ux_rows.items[0].label);
-    try std.testing.expectEqualStrings("Removes this local draft · nothing is sent or changed in Gmail", app.ux_rows.items[0].detail);
+    try std.testing.expectEqualStrings("Removed from Drafts · nothing is sent or changed in Gmail · Ctrl+Z restores it until you quit", app.ux_rows.items[0].detail);
     try std.testing.expectEqual(@as(usize, 3), app.ux_focus); // Cancel
     try rig.drawReview();
     {
         const shown = try helpTestScreenText(a, &rig.vx.screen);
         defer a.free(shown);
-        for ([_][]const u8{ "Discard local draft", "Discard this draft? It can't be restored.", "Plan · 2 recipients", "[y Discard]", "[Esc Cancel]", "y Discard · Esc Keep draft" }) |expected| {
+        for ([_][]const u8{ "Discard local draft", "Discard this draft?", "Plan · 2 recipients", "[Ctrl+X Discard]", "[Esc Cancel]", discard_again_hint, "restores it until you quit" }) |expected| {
             if (std.mem.indexOf(u8, shown, expected) == null) {
                 std.debug.print("\nMissing discard review text '{s}':\n{s}\n", .{ expected, shown });
                 return error.MissingDiscardReviewText;
             }
         }
+        try std.testing.expect(std.mem.indexOf(u8, shown, "y Discard") == null);
     }
-    // Typing on at 20–200 ms per key: sentences with y, y-spam, a held y
-    // after several repeat delays, nano's Ctrl+X y, arrows and j/k, and a
-    // quick Tab+Enter. Nothing discards; nothing moves focus to the row.
-    const streams = [_]struct { keys: []const u21, pause: i64 }{
-        .{ .keys = &.{ 'H', 'e', 'l', 'l', 'o', ',', ' ', 'y', 'o', 'u' }, .pause = 120 },
-        .{ .keys = &.{ 'T', 'h', 'a', 'n', 'k', ' ', 'y', 'o', 'u' }, .pause = 200 },
-        .{ .keys = &.{ 'y', 'y', 'y', 'y' }, .pause = 20 },
-        .{ .keys = &.{ Key.down, Key.up, 'j', 'k', 'q' }, .pause = 60 },
-        // Held y: the first press, then the repeat after 250/600/1000 ms.
-        .{ .keys = &.{'y'}, .pause = 250 },
-        .{ .keys = &.{'y'}, .pause = 600 },
-        .{ .keys = &.{'y'}, .pause = 1000 },
-    };
-    for (streams) |stream| {
-        for (stream.keys) |codepoint| {
-            try rig.wait(stream.pause);
-            try rig.key(codepoint);
-            try rig.drawReview();
-            try std.testing.expect(app.ux_overlay == .discard and app.job.future == null and app.ux_focus == 3);
-        }
+    // Typing on, at any pace: letters (y included), arrows, j/k, q, Ctrl+N and
+    // paste only explain; focus stays on Cancel and nothing is discarded.
+    for ([_]u21{ 'H', 'e', 'l', 'l', 'o', ',', ' ', 'y', 'e', 's', ' ', 'y', 'y', Key.down, Key.up, 'j', 'k', 'q' }) |codepoint| {
+        try rig.key(codepoint);
+        try std.testing.expect(app.ux_overlay == .discard and app.job.future == null and app.ux_focus == 3);
     }
-    try std.testing.expect(std.mem.indexOf(u8, rig.status(), "press y once more") != null or std.mem.indexOf(u8, rig.status(), "y discards it") != null);
+    try std.testing.expectEqualStrings(discard_again_hint, rig.status());
     try app.onKey(.{ .codepoint = 'n', .mods = .{ .ctrl = true } });
     try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
+    // Tab reaches [Ctrl+X Discard]; any other key returns focus to Cancel, so
+    // "Tab, text, pause, Enter" keeps the draft.
     try rig.key(Key.tab);
     try std.testing.expectEqual(@as(usize, 2), app.ux_focus);
-    try rig.wait(100);
-    try rig.key(Key.enter);
-    try std.testing.expect(app.ux_overlay == .discard and app.job.future == null);
-    try std.testing.expectEqualStrings(before, app.compose.fields[0].value());
-    try std.testing.expectEqual(@as(usize, 0), rig.transport.discards);
-    // Enter spam on the default [Esc Cancel] keeps the draft: the first
-    // Enter closes the review, the rest are body text again.
+    for ("Hi Bob,") |byte| try rig.key(byte);
+    try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
     try rig.key(Key.tab);
+    app.pasteStart();
+    try rig.key('x');
+    app.pasteEnd();
     try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
     try rig.key(Key.enter);
     try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
     try std.testing.expect(app.compose_active and app.compose.insert_mode);
-    // After a deliberate pause one y discards, then the composer closes.
-    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqualStrings(before, app.compose.fields[0].value());
+    try std.testing.expectEqual(@as(usize, 0), rig.transport.discards);
+    // A held Ctrl+X (its repeats come right after the opening press) never
+    // confirms; one deliberate Ctrl+X after a pause does.
+    try rig.ctrlX();
     try rig.drawReview();
-    try rig.wait(700);
-    try rig.key('y');
+    for (0..5) |_| try rig.ctrlX();
+    try std.testing.expect(app.ux_overlay == .discard and app.job.future == null);
+    try rig.wait(discard_repeat_ms + 100);
+    try rig.ctrlX();
     try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
     try rig.drain();
-    try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+    try std.testing.expectEqual(@as(usize, 1), rig.transport.kept);
     try std.testing.expect(!app.compose_active and app.mode == .browse);
-    try std.testing.expectEqualStrings("Draft discarded", rig.status());
+    try std.testing.expectEqualStrings("Draft discarded · Ctrl+Z Undo", rig.status());
+    try std.testing.expectEqualStrings("fresh-draft", app.undo_draft.slice());
+    try std.testing.expectEqualStrings("fresh-draft", app.kept_discards[0].slice());
+    // Ctrl+Z restores it and reopens it in the composer.
+    try app.onKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(JobKind.draft_restore, app.job.kind);
+    try rig.drain();
+    try std.testing.expectEqual(@as(usize, 1), rig.transport.restores);
+    try std.testing.expect(app.compose_active and same(app.compose.id.value(), "fresh-draft"));
+    try std.testing.expectEqual(@as(usize, 0), app.undo_draft.slice().len + app.kept_discards[0].slice().len);
+}
+
+test "draft discard: a review not fully on screen never confirms, and the footer stops offering Discard" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const rig = try DiscardTestRig.create(a, true);
+    defer rig.destroy(a);
+    const app = &rig.app;
+    app.compose_intent = .new;
+    try app.apply(.compose, DiscardTestRig.fresh);
+    try rig.drain();
+    try rig.ctrlX();
+    try rig.drawReview();
+    try std.testing.expect(app.discard_visible);
+    // Resized below what draw() renders at all: the frame shows only the
+    // resize request, so the earlier review no longer counts.
+    try rig.resize(a, 25, 8);
+    try app.draw();
+    try std.testing.expect(!app.discard_visible);
+    try rig.wait(discard_repeat_ms + 100);
+    try rig.ctrlX();
+    try std.testing.expect(app.job.future == null and app.ux_overlay == .discard);
+    try std.testing.expect(std.mem.indexOf(u8, rig.status(), "make the terminal larger") != null);
+    // Too small for the review itself: the same, and the footer only keeps it.
+    try rig.resize(a, 40, 9);
+    try rig.drawReview();
+    try std.testing.expect(!app.discard_visible);
+    try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(40), "Discard") == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(40), "Esc Keep draft") != null);
+    app.ux_focus = 2;
+    try rig.key(Key.enter);
+    try std.testing.expect(app.job.future == null and app.ux_overlay == .discard);
+    // Large enough again: one deliberate confirm works.
+    try rig.resize(a, 120, 40);
+    try rig.drawReview();
+    try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(120), "Ctrl+X Discard") != null);
+    try rig.wait(discard_repeat_ms + 100);
+    try rig.ctrlX();
+    try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
+    try rig.drain();
+    try std.testing.expectEqual(@as(usize, 1), rig.transport.kept);
 }
 
 test "draft discard: protected drafts explain why they stay; review from send review and normal mode" {
@@ -31923,7 +32137,7 @@ test "draft discard: protected drafts explain why they stay; review from send re
             .paused => app.compose.gmail_guard_unknown = true,
             .queued => app.grace_recovery = true,
         }
-        try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+        try rig.ctrlX();
         try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
         try std.testing.expect(std.mem.startsWith(u8, rig.status(), "Draft kept · "));
         try std.testing.expect(std.mem.indexOf(u8, rig.status(), switch (protected) {
@@ -31940,26 +32154,24 @@ test "draft discard: protected drafts explain why they stay; review from send re
     try std.testing.expect(app.ux_overlay == .discard and !app.discard_from_insert);
     try rig.key('q');
     try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
-    // From send review: a settled y discards and returns to the mailbox.
+    // A saved version changed elsewhere is named, and goes with the same undo.
+    app.compose.saved_changed = true;
+    try rig.key('d');
+    try std.testing.expect(std.mem.startsWith(u8, app.ux_rows.items[0].detail, "Its saved version, changed elsewhere, goes too"));
+    try std.testing.expect(std.mem.endsWith(u8, app.ux_rows.items[0].detail, "Ctrl+Z restores it until you quit"));
+    try rig.key(Key.escape);
+    app.compose.saved_changed = false;
+    // From send review: Tab to [Ctrl+X Discard] and Enter discards at once.
     app.mode = .review;
-    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+    try rig.ctrlX();
     try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
-    // Not drawn (too small): never confirms, and says why.
-    rig.vx.screen.deinit(a);
-    rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = 30, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
     try rig.drawReview();
-    try rig.wait(700);
-    try rig.key('y');
-    try std.testing.expect(app.job.future == null and std.mem.indexOf(u8, rig.status(), "make the terminal larger") != null);
-    rig.vx.screen.deinit(a);
-    rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = 120, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
-    try rig.drawReview();
-    try rig.wait(2100);
-    try rig.key('y');
+    try rig.key(Key.tab);
+    try rig.key(Key.enter);
     try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
     try rig.drain();
     try std.testing.expect(!app.compose_active and app.mode == .browse and app.ux_overlay == .none);
-    try std.testing.expectEqualStrings("Draft discarded", rig.status());
+    try std.testing.expectEqualStrings("Draft discarded · Ctrl+Z Undo", rig.status());
 }
 
 test "draft discard: composer Discard button is last in Tab order and a double click never confirms" {
@@ -31997,31 +32209,37 @@ test "draft discard: composer Discard button is last in Tab order and a double c
         }
         try std.testing.expectEqual(UxOverlay.discard, app.ux_overlay);
         try std.testing.expectEqualStrings("(no subject) · no recipients", app.ux_rows.items[0].label);
+        // Enter again (Enter spam) lands on Cancel: the draft stays.
+        if (!mouse) {
+            try rig.key(Key.enter);
+            try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+            try std.testing.expect(app.compose_active);
+            try rig.key(Key.enter);
+        }
         try rig.drawReview();
         const confirm = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
             if (hit.kind == .dialog_action and hit.index == 12) break hit;
         } else return error.MissingDiscardConfirm;
-        // The second click of a double click lands on a review just drawn.
-        try app.onMouse(.{ .col = @intCast(confirm.rect.x), .row = @intCast(confirm.rect.y), .type = .press, .button = .left, .mods = .{} });
-        try std.testing.expect(app.job.future == null and app.ux_overlay == .discard and app.ux_focus == 2);
         if (mouse) {
-            try rig.wait(2100);
+            // The second press of the opening double click never confirms.
+            try app.onMouse(.{ .col = @intCast(confirm.rect.x), .row = @intCast(confirm.rect.y), .type = .press, .button = .left, .mods = .{} });
+            try std.testing.expect(app.job.future == null and app.ux_overlay == .discard);
+            try rig.wait(discard_click_ms + 100);
             try app.onMouse(.{ .col = @intCast(confirm.rect.x), .row = @intCast(confirm.rect.y), .type = .press, .button = .left, .mods = .{} });
         } else {
             // Tab and Shift+Tab move between the two buttons only.
             try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
-            try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
-            try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
             try std.testing.expectEqual(@as(usize, 2), app.ux_focus);
-            // After a pause, Enter on [y Discard] discards.
-            try rig.wait(2100);
+            try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(@as(usize, 3), app.ux_focus);
+            try rig.key(Key.tab);
             try rig.key(Key.enter);
         }
         try std.testing.expectEqual(JobKind.draft_discard, app.job.kind);
         try rig.drain();
-        try std.testing.expectEqual(@as(usize, 1), rig.transport.discards);
+        try std.testing.expectEqual(@as(usize, 1), rig.transport.kept);
         try std.testing.expect(!app.compose_active and app.mode == .browse);
-        try std.testing.expectEqualStrings("Draft discarded", rig.status());
+        try std.testing.expectEqualStrings("Draft discarded · Ctrl+Z Undo", rig.status());
     }
 }
 
@@ -32039,8 +32257,7 @@ test "draft discard: Discard and its key stay visible at every composer width an
         for ([_]u16{ 16, 30 }) |rows| {
             var width: u16 = 38;
             while (width <= 160) : (width += 1) {
-                rig.vx.screen.deinit(a);
-                rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = rows, .x_pixel = 0, .y_pixel = 0 });
+                try rig.resize(a, width, rows);
                 app.mouse_hits.clear();
                 try app.composeDraw(rig.vx.window().child(.{ .y_off = 2, .height = rows - 4 }));
                 const hints = app.fittedHints(width);
@@ -32054,31 +32271,37 @@ test "draft discard: Discard and its key stay visible at every composer width an
         }
     }
     app.compose.insert_mode = true;
-    try app.onKey(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
-    // The review itself fits small terminals whole, both buttons included,
-    // and leaves the footer (its keys) and the status row visible.
+    try rig.ctrlX();
+    // The review fits small terminals whole, both buttons included, over
+    // full-width rows (nothing behind shows through), and leaves the footer
+    // (its keys) and the status row visible.
     for ([_][2]u16{ .{ 38, 12 }, .{ 40, 12 }, .{ 38, 14 }, .{ 50, 16 }, .{ 80, 24 } }) |size| {
-        rig.vx.screen.deinit(a);
-        rig.vx.screen = try vaxis.Screen.init(a, .{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
-        app.discard_drawn_ms = null;
-        try rig.drawReview();
+        try rig.resize(a, size[0], size[1]);
+        for (0..size[1]) |row| for (0..size[0]) |col| rig.vx.screen.writeCell(@intCast(col), @intCast(row), .{ .char = .{ .grapheme = "k", .width = 1 } });
+        app.discard_visible = false;
+        try app.drawUx(rig.vx.window());
         const shown = try helpTestScreenText(a, &rig.vx.screen);
         defer a.free(shown);
         var lines = std.mem.splitScalar(u8, shown, '\n');
         var index: usize = 0;
-        var free_rows: usize = 0;
+        var untouched_rows: usize = 0;
+        var stray = false;
         while (lines.next()) |line| : (index += 1) {
-            if (index + 2 >= size[1] and index < size[1] and std.mem.trim(u8, line, " ").len == 0) free_rows += 1;
+            if (index >= size[1]) break;
+            const full = std.mem.count(u8, line, "k") == size[0];
+            if (full) untouched_rows += 1 else if (std.mem.indexOfScalar(u8, line, 'k') != null and std.mem.indexOf(u8, line, "keeps") == null) stray = true;
         }
-        if (app.discard_drawn_ms == null or free_rows != 2 or std.mem.indexOf(u8, shown, "[y Discard]") == null or std.mem.indexOf(u8, shown, "[Esc Cancel]") == null or std.mem.indexOf(u8, shown, "Discard this draft?") == null) {
+        const button = std.mem.indexOf(u8, shown, "[Ctrl+X Discard]") != null or std.mem.indexOf(u8, shown, "[^X Discard]") != null;
+        if (!app.discard_visible or stray or untouched_rows < 2 or !button or std.mem.indexOf(u8, shown, "[Esc Cancel]") == null or std.mem.indexOf(u8, shown, "Discard this draft?") == null) {
             std.debug.print("\nDiscard review incomplete at {d}x{d}:\n{s}\n", .{ size[0], size[1], shown });
             return error.DiscardReviewIncomplete;
         }
     }
+    try rig.resize(a, 120, 40);
     for ([_]u16{ 30, 44, 60, 80, 90, 120, 160 }) |width| {
         const hints = app.fittedHints(width);
-        try std.testing.expect(std.mem.indexOf(u8, hints, "y Discard") != null and std.mem.indexOf(u8, hints, "Esc Keep draft") != null);
-        try std.testing.expect(std.mem.indexOf(u8, hints, "Ctrl+S") == null and std.mem.indexOf(u8, hints, "INSERT") == null);
+        try std.testing.expect(std.mem.indexOf(u8, hints, "X Discard") != null and std.mem.indexOf(u8, hints, "Esc Keep draft") != null);
+        try std.testing.expect(std.mem.indexOf(u8, hints, "Ctrl+S") == null and std.mem.indexOf(u8, hints, "INSERT") == null and std.mem.indexOf(u8, hints, "y Discard") == null);
     }
 }
 
@@ -32093,8 +32316,8 @@ test "draft discard: the Drafts list review counts the real draft.list row and n
     app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"fresh-draft\",\"subject\":\"Quarterly plan\",\"bodyFormat\":\"markdown\",\"includeOriginal\":true,\"toCount\":2,\"ccCount\":1,\"bccCount\":0,\"attachmentCount\":2,\"omittedAttachments\":0,\"summaryOnly\":true},{\"id\":\"paused\",\"subject\":\"In Gmail\",\"toCount\":1,\"ccCount\":0,\"bccCount\":0,\"attachmentCount\":0,\"gmailLink\":{\"phase\":\"linked\",\"paused\":true}},{\"id\":\"queued\",\"subject\":\"Queued\",\"toCount\":1,\"ccCount\":0,\"bccCount\":0,\"attachmentCount\":0,\"sendQueued\":true}]", .{}));
     app.selected = 0;
     try app.openDiscardDraft();
-    try std.testing.expectEqualStrings("Quarterly plan · 3 recipients", app.ux_rows.items[0].label);
-    try std.testing.expectEqualStrings("Removes this local draft and its 2 attached file copies · nothing is sent or changed in Gmail", app.ux_rows.items[0].detail);
+    try std.testing.expectEqualStrings("Quarterly plan · 3 recipients · 2 files", app.ux_rows.items[0].label);
+    try std.testing.expectEqualStrings("Removed from Drafts · nothing is sent or changed in Gmail · Ctrl+Z restores it until you quit", app.ux_rows.items[0].detail);
     app.closeDiscardReview();
     app.selected = 1;
     try app.openDiscardDraft();
@@ -32109,6 +32332,37 @@ test "draft discard: the Drafts list review counts the real draft.list row and n
     // A send queued after the list loaded: the store refuses, nothing is cancelled.
     try app.apply(.draft_discard, "{\"ok\":false,\"error\":{\"code\":\"DraftSendQueued\"}}");
     try std.testing.expect(std.mem.startsWith(u8, rig.status(), queued_send_refusal));
+}
+
+test "draft discard: Ctrl+Z restores only what is still kept, and quitting drops what the window keeps" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const rig = try DiscardTestRig.create(a, false);
+    defer rig.destroy(a);
+    const app = &rig.app;
+    app.compose_intent = .new;
+    try app.apply(.compose, DiscardTestRig.fresh);
+    try rig.drain();
+    try rig.key('d');
+    try rig.drawReview();
+    try rig.key(Key.tab);
+    try rig.key(Key.enter);
+    try rig.drain();
+    try std.testing.expectEqualStrings("Draft discarded · Ctrl+Z Undo", rig.status());
+    // Another window replaced the kept draft: Ctrl+Z says so and stops offering it.
+    rig.transport.slot_gone = true;
+    try app.onKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try rig.drain();
+    try std.testing.expect(!app.compose_active);
+    try std.testing.expect(std.mem.indexOf(u8, rig.status(), "no longer kept") != null);
+    try std.testing.expectEqual(@as(usize, 0), app.undo_draft.slice().len + app.kept_discards[0].slice().len);
+    // The window drops what it still keeps when it quits.
+    try app.undo_draft.set("fresh-draft");
+    try app.undo_account.set(a, "personal@example.test");
+    try app.kept_discards[0].set("fresh-draft");
+    app.forgetKeptDiscardsAtExit();
+    try std.testing.expectEqual(@as(usize, 1), rig.transport.forgets);
+    try std.testing.expectEqual(@as(usize, 0), app.kept_discards[0].slice().len);
 }
 
 test "draft discard: recipient counts include unfinished entries" {

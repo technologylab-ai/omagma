@@ -266,6 +266,12 @@
           "default": false,
           "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
         },
+        "returnContentDigest": {
+          "type": "boolean",
+          "default": false,
+          "x-internal": true,
+          "description": "Terminal UI only: also return contentDigest, the digest of what the store now holds."
+        },
         "replace": {
           "type": "boolean",
           "default": false,
@@ -361,6 +367,12 @@
           "type": "boolean",
           "default": false,
           "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
+        },
+        "returnContentDigest": {
+          "type": "boolean",
+          "default": false,
+          "x-internal": true,
+          "description": "Terminal UI only: also return contentDigest, the digest of what the store now holds."
         },
         "forkIfSettled": {
           "type": "boolean",
@@ -492,6 +504,19 @@
           "type": "boolean",
           "default": false,
           "description": "Refuse with DraftSendQueued instead of cancelling a queued or paused send for this draft."
+        },
+        "expectedContentDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Optional canonical saved-content digest (draft.read contentDigest or draft.measure). A draft changed since then is refused with ReviewedDraftChanged and kept."
+        },
+        "keepForUndo": {
+          "type": "boolean",
+          "default": false,
+          "x-internal": true,
+          "description": "Terminal UI only: keep the draft for one draft.restore instead of removing it."
         }
       },
       "required": [
@@ -501,11 +526,42 @@
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
         "Cancels any still-queued send for that draft and removes its private draft file and the account preview artifact. Discard is refused while an associated operation/queue state is unknown or submitting.",
+        "From the CLI and JSONL a discard is final; only the terminal UI keeps its last discarded draft for draft.restore.",
         "Does not revoke or delete already sent mail. Referenced attachment handles become eligible for attachment.discard only when no protected content uses them."
       ],
       "examples": [
         {
           "cmd": "draft.discard",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.restore",
+      "summary": "Restore the draft the terminal UI discarded last for this account.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Optional draft identity the restore must match; another kept draft is refused."
+        },
+        "forget": {
+          "type": "boolean",
+          "default": false,
+          "x-internal": true,
+          "description": "Terminal UI only: drop the kept draft for good instead of restoring it."
+        }
+      },
+      "required": [],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "The terminal UI keeps exactly one discarded draft per account until it exits (or discards another); the draft returns to Drafts with the same ID, content, recipients, threading, sender, files and Gmail link.",
+        "Refused with DiscardedDraftUnavailable when no draft is kept or draftId names another one."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.restore",
           "account": "personal@example.com",
           "draftId": "draft-RETURNED_ID"
         }
