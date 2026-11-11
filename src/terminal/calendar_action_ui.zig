@@ -47,6 +47,14 @@ pub const Dialog = struct {
     /// A pending lookup that found nothing re-plans at most once; a second
     /// refusal stops with an honest message instead of reading again.
     replanned_after_pending: bool = false,
+    /// Resolving an invitation's own unconfirmed Calendar update that blocks
+    /// this event: `operation` and `hash` then name that write, checked
+    /// (event-reconcile) or no longer tracked (event-abandon) from here.
+    invitation: bool = false,
+    invitation_name: b.Text(512) = .{},
+    /// The screen row of the unknown step's Retry/Archive buttons, which
+    /// open the separate confirmations; their confirm never lands there.
+    opener_row: ?u16 = null,
     /// Increases with every new plan or restored review.
     generation: u32 = 0,
     /// Shown while the plan loads; replaced by the plan's own summary.
@@ -89,6 +97,8 @@ pub const Dialog = struct {
     /// confirms what was not on screen for that moment.
     drawn: ?Shown = null,
     armed_at_ms: i64 = std.math.maxInt(i64),
+    /// The last confirm key that was refused (too early, or not shown).
+    refused_at_ms: ?i64 = null,
     /// The frame's candidate verdict, recorded by the dialog's own drawing
     /// and settled once every later layer of that frame is drawn: the
     /// dialog's screen rectangle and a hash of its cells then.
@@ -99,6 +109,9 @@ pub const Dialog = struct {
 
     pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16 = 0, height: u16 = 0 };
     /// Every displayed fact that changes the write.
+    /// After a refused confirm key, no confirm until this long without one
+    /// (longer than any common keyboard repeat delay).
+    pub const quiet_ms: i64 = 2000;
     pub const Shown = struct { phase: Phase, generation: u32, series: bool, response: ?action.Response, notify: ?bool };
     /// The settle interval after a step becomes visible.
     pub const settle_ms: i64 = 600;
@@ -133,13 +146,17 @@ pub const Dialog = struct {
         const drawn = self.drawn orelse return .hidden;
         if (self.visible_frame != self.frame or !std.meta.eql(drawn, self.shownNow())) return .hidden;
         if (now_ms < self.armed_at_ms) return .settling;
+        // After a refused confirm key, a clear silence: a key held down
+        // (auto-repeat after any common delay) never confirms.
+        if (self.refused_at_ms) |at| if (now_ms -| at < quiet_ms) return .settling;
         return .ready;
     }
-    /// A confirm key during the settle time restarts it: a held key (or a
-    /// burst typed ahead) never confirms; one deliberate press after the
-    /// screen has been still for a moment does.
-    pub fn restartSettle(self: *Dialog, now_ms: i64) void {
-        self.armed_at_ms = now_ms +| settle_ms;
+    /// A refused confirm key restarts the settle time and starts the quiet
+    /// time: only one deliberate press after the screen and the keyboard
+    /// have both been still confirms; a held or repeating key never does.
+    pub fn refuse(self: *Dialog, now_ms: i64) void {
+        self.armed_at_ms = @max(self.armed_at_ms, now_ms +| settle_ms);
+        self.refused_at_ms = now_ms;
     }
     pub fn begin(self: *Dialog, kind: Kind, account: []const u8, calendar_id: []const u8, event_id: []const u8, title: []const u8, when: []const u8) !void {
         self.close();
@@ -308,6 +325,23 @@ pub const Dialog = struct {
         };
     }
 
+    /// The identical-retry button names what it sends again, from the saved
+    /// write itself: the action, the scope and the email choice.
+    pub fn retryLabel(self: *const Dialog, a: std.mem.Allocator, narrow: bool) ![]const u8 {
+        const series: []const u8 = if (self.series) " series" else "";
+        const email = self.notify orelse false;
+        return switch (self.kind) {
+            .respond => if (self.response) |response| std.fmt.allocPrint(a, "[y Send {s}{s} again{s}]", .{ responseVerb(response), series, if (email) (if (narrow) @as([]const u8, " · email") else " · email organizer") else " · no email" }) else "[y Send the answer again]",
+            .delete => if (!std.mem.eql(u8, self.role(), "organizer"))
+                std.fmt.allocPrint(a, "[y Remove{s} again]", .{series})
+            else if (!email)
+                std.fmt.allocPrint(a, "[y Delete{s} again{s}]", .{ series, if (self.needsNotifyChoice()) @as([]const u8, " · no email") else "" })
+            else if (narrow or self.guestsOmitted())
+                std.fmt.allocPrint(a, "[y Delete{s} again · email]", .{series})
+            else
+                std.fmt.allocPrint(a, "[y Delete{s} again · email {d} guest{s}]", .{ series, self.guestCount(), if (self.guestCount() == 1) @as([]const u8, "") else "s" }),
+        };
+    }
     /// Focusable controls in drawing order for the current phase.
     pub fn controls(self: *const Dialog, buffer: *[14]Control) []const Control {
         var count: usize = 0;
@@ -625,4 +659,49 @@ test "calendar action UI: an answer is chosen, never sent by a letter, and the c
     try std.testing.expectEqualStrings("Declines this event as self@example.test. No email is sent; an organizer using Google Calendar sees your answer there.", try dialog.consequence(a));
     try std.testing.expectEqualStrings("Not answered", currentAnswer("needsAction"));
     try std.testing.expect(std.mem.indexOf(u8, reasonText(.respond, "CalendarPrivateCopy").?, "invitation email") != null);
+}
+
+test "calendar action UI: one long press of y never confirms, whatever the keyboard's repeat delay" {
+    // Pressed as the step appears (typed ahead), then held: the terminal
+    // repeats y after its repeat delay, every 25-40 ms, until released.
+    for ([_]i64{ 250, 500, 600, 660, 1000 }) |delay| for ([_]i64{ 25, 40 }) |interval| {
+        var dialog: Dialog = .{ .open = true, .phase = .choose };
+        dialog.frame = 1;
+        const shown: i64 = 100_000;
+        dialog.markDrawn(shown, true);
+        var now = shown + 20;
+        try std.testing.expect(dialog.readiness(now) != .ready);
+        dialog.refuse(now);
+        now += delay;
+        const released = now + 3000;
+        var last = now;
+        while (now < released) : (now += interval) {
+            try std.testing.expect(dialog.readiness(now) != .ready);
+            dialog.refuse(now);
+            last = now;
+        }
+        // Let go: one later press after a still moment confirms, not before.
+        try std.testing.expect(dialog.readiness(last + Dialog.quiet_ms - 1) != .ready);
+        try std.testing.expectEqual(Dialog.Readiness.ready, dialog.readiness(last + Dialog.quiet_ms));
+    };
+}
+
+test "calendar action UI: the identical retry's button names the saved write it sends again" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dialog: Dialog = .{};
+    defer dialog.close();
+    try dialog.begin(.respond, "self@example.test", "self@example.test", "standup_1", "Standup", "");
+    // A saved series Decline that emails the organizer, as the journal keeps it.
+    try dialog.restore(std.testing.allocator, try j.value(a, .{ .action = "respond_event", .scope = "series", .sendUpdates = "all", .response = "declined", .role = "attendee", .previousResponse = "needsAction", .attendee = "self@example.test", .organizer = "host@example.test", .summary = "Standup", .calendarName = "Personal", .eventId = "standup_1", .targetEventId = "standup", .recurring = true, .operationId = "op-1", .reviewHash = "abababababababababababababababababababababababababababababababab" }));
+    try std.testing.expectEqualStrings("[y Send Decline series again · email organizer]", try dialog.retryLabel(a, false));
+    try std.testing.expectEqualStrings("[y Send Decline series again · email]", try dialog.retryLabel(a, true));
+    try std.testing.expectEqualStrings("Declines every event in this series as self@example.test. Google emails your answer to the organizer host@example.test. Occurrences you answered separately may keep their own answer.", try dialog.consequence(a));
+    dialog.close();
+    try dialog.begin(.delete, "self@example.test", "self@example.test", "hosted", "Roadmap review", "");
+    try dialog.restore(std.testing.allocator, try j.value(a, .{ .action = "delete_event", .scope = "event", .sendUpdates = "all", .role = "organizer", .guestCount = 2, .summary = "Roadmap review", .calendarName = "Personal", .eventId = "hosted", .targetEventId = "hosted", .operationId = "op-2", .reviewHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd" }));
+    try std.testing.expectEqualStrings("[y Delete again · email 2 guests]", try dialog.retryLabel(a, false));
+    dialog.notify = false;
+    try std.testing.expectEqualStrings("[y Delete again · no email]", try dialog.retryLabel(a, false));
 }

@@ -137,6 +137,9 @@ returned operation ID and `reviewHash`. First run the review with `--dry-run`
   or one of its occurrences: open exactly that one with `calendar event-pending
   --operation-id` set to the refusal's `blockingOperationId` (or `--event-id ID
   --series-event-id` with the event's `recurring_event_id`) and settle it first.
+  An invitation's own update comes back as `blockedBy` with its `operationId`
+  and `reviewHash`: check it with `calendar event-reconcile`; only with the
+  user's explicit consent stop tracking it with `calendar event-abandon`.
   There is no undo for a delete. After success report what was requested
   ("Google was asked to email 2 guests"), not that email was delivered.
 

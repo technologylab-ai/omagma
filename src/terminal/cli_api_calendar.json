@@ -990,7 +990,7 @@
         },
         "seriesEventId": {
           "type": "string",
-          "description": "The event's recurring_event_id from calendar.agenda or calendar.event (\"\" when it does not repeat). Without it the event is read once to learn its series."
+          "description": "The event's recurring_event_id from calendar.agenda or calendar.event (\"\" when it does not repeat). Without it the event is read once to learn its series. Alone (without eventId) it finds the writes on that series; \"\" alone is invalid."
         },
         "operationId": {
           "$ref": "#/$defs/CalendarOperationId",
@@ -1001,7 +1001,7 @@
         "calendarId"
       ],
       "notes": [
-        "Returns {pending:null|{review,relation,state,attempt,nextAttempt,retryPossible,recoveryReason},seriesChecked}. Review is the complete review result; relation is operation, creation, event (a write to this event or its whole series) or series (a write to another occurrence, which blocks a series action here). An invitation's own unknown update is reported as blockedBy {kind:invitation,operationId} and is checked with calendar.reconcile.",
+        "Returns {pending:null|{review,relation,state,attempt,nextAttempt,retryPossible,recoveryReason},seriesChecked}. Review is the complete review result; relation is operation, creation, event (a write to this event or its whole series) or series (a write to another occurrence, which blocks a series action here). An invitation's own unknown update is reported as blockedBy {kind:invitation,operationId,reviewHash,uid,eventId,summary,previous,check,stopTracking}: calendar.event-reconcile with that operationId and reviewHash checks it with reads only; calendar.event-abandon stops tracking it after explicit confirmation.",
         "Series membership is the provider's recurringEventId (seriesEventId or one events.get), never guessed from ID text; seriesChecked:false with readError means the event could not be read, so only writes to the exact event were checked. With operationId, seriesEventId, or no eventId it reads only local state, without provider traffic or credentials. Exact selected account/calendar binding is checked.",
         "The current local grant must retain mail-read and one of the Calendar capability alternatives; this check reads grant metadata without opening credentials."
       ],

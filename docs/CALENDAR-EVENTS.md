@@ -120,10 +120,13 @@ choices and one sentence stating exactly what will happen, for example
 the event's title, time and calendar, that sentence and the button must all be
 visible together in the finished frame (nothing drawn over them afterwards),
 and only after that exact step (phase, scope, answer and email choice) has
-been shown unchanged for a moment (0.6 s). A key typed ahead, a held key (each
-early press restarts the wait), a changed choice, the second click of a double
-click or a dialog the terminal is too small to draw never confirms; the status
-says what to do instead (**press y again**, or enlarge the terminal). When the
+been shown unchanged for a moment (0.6 s). A key typed ahead, a held key, a
+changed choice, the second click of a double click or a dialog the terminal is
+too small to draw never confirms; the status says what to do instead (**Let go,
+look, then press y once more**, or enlarge the terminal). After a refused
+confirm key, `y` acts only after 2 s without one, longer than any common
+keyboard repeat delay, so holding `y` down never confirms however late the
+terminal starts repeating it. When the
 dialog does not fit, the event's title, time and calendar stay at the top and
 the consequence just above the button while only the choices between them
 scroll (on a short terminal the dialog may also use the key-hint row). An
@@ -132,12 +135,21 @@ consequence still do not fit (a long series answer, say) cannot be confirmed
 there, and the status says **Enlarge the terminal**. A terminal too small for
 the Calendar view does not open the dialog at all. The mouse wheel
 only scrolls the dialog; it never moves the focus onto a button. The
-confirmations for an identical retry and for archiving put their confirm button
-on its own row, so a double click on **Retry** or **Archive** lands on
-**Back**. A due meeting card is not drawn over an open dialog: the status shows
-**Meeting due · M shows it** and the card returns when the dialog closes; if
-`M` brings it up, keys go to the card and the dialog cannot be confirmed until
-the card is gone and the dialog has been seen again.
+confirmations for an identical retry and for archiving show the saved write's
+own sentence (answer, scope and email, from the journal, also after a restart)
+under the same rules, and their button names it (**[y Send Decline series again
+· email organizer]**, **[y Delete again · email 2 guests]**). Their confirm
+button sits on its own row, never on the cells of the **Retry** or **Archive**
+button that opened them, so the second click of a double click lands on
+**Back**. A due meeting card is not drawn over an open dialog: on the agenda the
+status shows **Meeting due · M shows it** (after any **Enlarge the terminal**
+note) and the card returns when the dialog closes; on an event card meetings
+are not shown, so nothing is promised there. If `M` brings the card up, keys go
+to the card and the dialog cannot be confirmed until the card is gone and the
+dialog has been seen again. A card that returns (after a dialog, Help, another
+page or a too-small terminal) waits 0.6 s before its keys and buttons act, so
+the second click of a double click on the dialog's button never joins or
+dismisses a meeting.
 
 | Situation | Delete | RSVP |
 | --- | --- | --- |
@@ -190,8 +202,17 @@ unconfirmed, never "nothing was changed". An unconfirmed change blocks other
 changes that it could overlap (see below) and survives a restart: one to an
 occurrence (an edit too) blocks a series change; one to the whole series blocks
 every occurrence and is resumed by `D` or `r` on any of them. The dialog opens
-exactly the write that refused it; if that write cannot be found it checks the
-event once more, then stops and says so instead of reading again.
+exactly the write that refused it and names its event: an unconfirmed edit of
+another occurrence reads **An unconfirmed edit of “Standup” · Thu 12 Nov … is
+saved · open that event and press e to check it**. If that write cannot be
+found it checks the event once more, then stops and says so instead of reading
+again. When an invitation's own Calendar update (from Mail) is the unconfirmed
+write, the dialog names it and resolves it in place: `r` checks Calendar with
+reads only, and `Ctrl+D`, after its own confirmation, stops tracking it once
+you have checked Google Calendar (nothing is sent either way); then the event
+is checked again. The event editor names such a write too (**Esc, then D or r
+on the event checks it**) and stays silent about writes to other occurrences,
+which never overlap an edit of this one.
 
 ### From the CLI
 
@@ -252,9 +273,18 @@ its whole series (for a series ID, one to any of its occurrences), and then, as
 `relation: series`, one to another occurrence, which blocks a series action
 there. Pass the event's `recurring_event_id` as `--series-event-id` (`""` when
 it does not repeat); without it the event is read once to learn its series, and
-`seriesChecked:false` with `readError` says when that read failed. An
-invitation's own unknown update is reported as `blockedBy` and is checked with
-`calendar reconcile`.
+`seriesChecked:false` with `readError` says when that read failed.
+`--series-event-id ID` alone finds the writes on that series: the series
+itself, a whole-series write or one to any of its occurrences (reads nothing);
+`--series-event-id ""` needs `--event-id`. Without any of these the lookup
+finds an unconfirmed creation. An invitation's own unknown update is reported
+as `blockedBy` (`operationId`, `reviewHash`, `uid`, `eventId`, `summary`,
+`previous`): `calendar event-reconcile` with that operation ID and hash checks
+it with reads only, and `calendar event-abandon` stops tracking it when a check
+cannot settle it (both also accept it from `calendar reconcile`'s review).
+Invitation updates are checked for overlapping unconfirmed writes when they are
+reviewed, too; an identical `event-retry` waits for any other overlapping
+unconfirmed write as well.
 
 Downgrading is not supported once 0.2.19 has saved a Calendar review: 0.2.18
 reads the Calendar journal strictly and refuses it as a whole (`UnknownField`)
