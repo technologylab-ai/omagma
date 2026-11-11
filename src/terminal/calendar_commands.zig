@@ -46,20 +46,7 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
     const target: t.Target = .{ .account = account, .calendar_id = try j.required(request, "calendarId") };
     try target.validate();
 
-    if (std.mem.eql(u8, command, "calendar.event-pending")) {
-        const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
-        const pending = try load(host.context, service.a, target, j.text(request, "eventId"));
-        if (pending) |value| {
-            // Found from the event, its series or one of its occurrences.
-            const wanted = j.text(request, "eventId");
-            const related = action.Reach.saved(value.review.event_action, value.review.intent.event_id).overlaps(action.Reach.lookup(wanted));
-            if (!value.review.journaledEvent() or value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target) or (wanted.len != 0 and !related)) return error.CalendarReviewMismatch;
-            return j.value(service.a, .{ .pending = .{ .review = try eventReviewValue(service.a, value.review), .state = "unknown", .attempt = value.operation.attempt, .nextAttempt = value.operation.attempt +| 1, .retryPossible = false, .recoveryReason = "Check Calendar before retrying" } });
-        }
-        var empty = j.object(service.a);
-        try empty.object.put(service.a, "pending", .null);
-        return empty;
-    }
+    if (std.mem.eql(u8, command, "calendar.event-pending")) return pendingValue(service, request, host, target);
     if (executionCommand(command)) return executeReview(service, request, host, target, command);
     const calendar = try selectedCalendar(service, target);
     if (std.mem.eql(u8, command, "calendar.event")) {
@@ -121,6 +108,77 @@ pub fn dispatch(instance: svc.Service, request: j.Value, host: HostInputs) !j.Va
     return reviewValue(service.a, review);
 }
 
+/// An unconfirmed Calendar write to resume. `operationId` names it exactly
+/// (as a CalendarOperationPending refusal reports it). Otherwise `eventId`
+/// finds a write to that event, its whole series, or (for a series) one of
+/// its occurrences; then, for a series action chosen on it, a write to
+/// another occurrence. Series membership is the provider's: the caller's
+/// `seriesEventId` (the event's recurring_event_id, "" when it does not
+/// repeat), else one read of the event. Without `eventId` it finds an
+/// unconfirmed creation. Nothing is written or sent.
+fn pendingValue(service: svc.Service, request: j.Value, host: HostInputs, target: t.Target) !j.Value {
+    const operation_id = j.text(request, "operationId");
+    if (operation_id.len != 0) return foundValue(service, target, try exactPending(service, host, target, operation_id), "operation", true);
+    const wanted = j.text(request, "eventId");
+    if (wanted.len == 0) {
+        const load = host.loadPendingFn orelse return error.CalendarPersistenceRequired;
+        return foundValue(service, target, try load(host.context, service.a, target, ""), "creation", true);
+    }
+    const store = service.persistence orelse return error.CalendarPersistenceRequired;
+    const find = store.pendingFn orelse return error.CalendarPersistenceRequired;
+    var series: ?[]const u8 = if (j.get(request, "seriesEventId")) |value| try j.string(value) else null;
+    if (try find(store.context, service.a, target, action.Reach.lookup(wanted, series orelse ""), "")) |found| return foundValue(service, target, found, "event", true);
+    var read_error: []const u8 = "";
+    if (series == null) {
+        // The provider says which series the event belongs to. Without
+        // that read the series stays unchecked, and the reply says so.
+        series = learned: {
+            const calendar = selectedCalendar(service, target) catch |err| {
+                read_error = @errorName(err);
+                break :learned null;
+            };
+            const document = service.documentForRead(calendar, wanted) catch |err| {
+                read_error = @errorName(err);
+                break :learned null;
+            };
+            break :learned document.event.recurring_event_id;
+        };
+        if (series) |known| if (known.len != 0) if (try find(store.context, service.a, target, action.Reach.lookup(wanted, known), "")) |found| return foundValue(service, target, found, "event", true);
+    }
+    if (series) |known| if (try find(store.context, service.a, target, action.Reach.seriesWide(wanted, known), "")) |found| return foundValue(service, target, found, "series", true);
+    var empty = try foundValue(service, target, null, "", series != null);
+    if (read_error.len != 0) try empty.object.put(service.a, "readError", .{ .string = read_error });
+    return empty;
+}
+/// The one unknown write saved under `operation_id`, if any.
+fn exactPending(service: svc.Service, host: HostInputs, target: t.Target, operation_id: []const u8) !?svc.Pending {
+    const load = host.loadReviewFn orelse return error.CalendarPersistenceRequired;
+    const store = service.persistence orelse return error.CalendarPersistenceRequired;
+    const review = load(host.context, service.a, target, operation_id) catch |err| {
+        if (err == error.CalendarReviewNotFound) return null;
+        return err;
+    };
+    const state = try store.load(service.a, review.intent.identity);
+    const operation = state.operation orelse return null;
+    if (operation.state != .unknown or !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return null;
+    return .{ .review = review, .operation = operation };
+}
+fn foundValue(service: svc.Service, target: t.Target, found: ?svc.Pending, relation: []const u8, series_checked: bool) !j.Value {
+    const a = service.a;
+    var result = j.object(a);
+    try result.object.put(a, "pending", .null);
+    try result.object.put(a, "seriesChecked", .{ .bool = series_checked });
+    const value = found orelse return result;
+    if (value.operation.state != .unknown or !value.operation.intent.eql(value.review.intent) or !value.review.intent.identity.target.eql(target)) return error.CalendarReviewMismatch;
+    if (!value.review.journaledEvent()) {
+        // An invitation's own update: resolved from that invitation, not here.
+        try result.object.put(a, "blockedBy", try j.value(a, .{ .kind = "invitation", .operationId = value.operation.intent.operation_id, .uid = value.operation.intent.identity.uid, .eventId = value.operation.intent.event_id, .recovery = "calendar.reconcile" }));
+        return result;
+    }
+    try result.object.put(a, "pending", try j.value(a, .{ .review = try eventReviewValue(a, value.review), .relation = relation, .state = "unknown", .attempt = value.operation.attempt, .nextAttempt = value.operation.attempt +| 1, .retryPossible = false, .recoveryReason = "Check Calendar before retrying" }));
+    return result;
+}
+
 /// Shared preparation keeps the legacy byte contract exact. Compound Meet
 /// consent retains this returned value directly rather than racing a later
 /// lookup of an unclaimed Calendar review that another editor could replace.
@@ -176,6 +234,14 @@ fn actionRequest(request: j.Value, command: []const u8) !svc.ActionRequest {
 pub fn localCommand(command: []const u8) bool {
     return std.mem.eql(u8, command, "calendar.event-pending") or std.mem.eql(u8, command, "calendar.event-abandon");
 }
+/// Served from the local journal alone. An event-pending lookup by event ID
+/// without its seriesEventId first reads the event to learn its series.
+pub fn localRequest(request: j.Value) bool {
+    const command = j.text(request, "cmd");
+    if (!localCommand(command)) return false;
+    if (!std.mem.eql(u8, command, "calendar.event-pending")) return true;
+    return j.text(request, "eventId").len == 0 or j.text(request, "operationId").len != 0 or j.get(request, "seriesEventId") != null;
+}
 
 fn executionCommand(command: []const u8) bool {
     for ([_][]const u8{ "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry", "calendar.event-abandon" }) |value| if (std.mem.eql(u8, command, value)) return true;
@@ -187,9 +253,16 @@ fn validateFields(request: j.Value, command: []const u8) !void {
         _ = try j.boolean(request, "persistCache", true);
     }
     if (std.mem.eql(u8, command, "calendar.event")) try t.text(try j.required(request, "eventId"), 1024, false);
-    if (std.mem.eql(u8, command, "calendar.event-pending")) if (j.get(request, "eventId")) |value| if (value != .null) {
-        try t.text(try j.string(value), 1024, false);
-    };
+    if (std.mem.eql(u8, command, "calendar.event-pending")) {
+        if (j.get(request, "eventId")) |value| if (value != .null) try t.text(try j.string(value), 1024, false);
+        // "" says the event does not repeat; any other value is its series.
+        if (j.get(request, "seriesEventId")) |value| try t.text(try j.string(value), 1024, true);
+        if (j.get(request, "operationId")) |value| {
+            const id = try j.string(value);
+            try t.text(id, 128, false);
+            for (id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidOperationId;
+        }
+    }
     if (std.mem.eql(u8, command, "calendar.event-retry")) {
         const attempt = try j.integer(request, "nextAttempt", 0);
         if (attempt <= 0 or attempt > 1000000) return error.InvalidCalendarRetry;

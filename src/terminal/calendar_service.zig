@@ -145,6 +145,43 @@ pub const ActionReview = struct {
     target_etag: []const u8,
     review: ?Review = null,
 };
+/// Which unconfirmed write refused a request with CalendarOperationPending,
+/// so a client can open exactly that one (`blockingOperationId`).
+pub const Blocked = struct {
+    bytes: [128]u8 = undefined,
+    len: u8 = 0,
+    /// An event write (event-pending shows it) rather than an invitation's.
+    journaled: bool = false,
+    pub fn set(self: *Blocked, operation_id: []const u8, journaled: bool) void {
+        const n = @min(operation_id.len, self.bytes.len);
+        @memcpy(self.bytes[0..n], operation_id[0..n]);
+        self.len = @intCast(n);
+        self.journaled = journaled;
+    }
+    pub fn slice(self: *const Blocked) []const u8 {
+        return self.bytes[0..self.len];
+    }
+    pub fn clear(self: *Blocked) void {
+        self.len = 0;
+    }
+};
+
+/// What a saved Calendar write (of any kind) can change, from the provider's
+/// own facts recorded with it: the event written, the occurrence a series
+/// action was chosen on, and its series (`recurringEventId`). A repeating
+/// invitation changes its whole imported series.
+pub fn reach(review: Review) action.Reach {
+    const id = review.intent.event_id;
+    const previous_series = if (review.previous) |previous| previous.recurring_event_id else "";
+    if (review.event_action) |prepared| {
+        const whole = prepared.scope == .series;
+        const series = if (prepared.series_event_id.len != 0) prepared.series_event_id else if (whole) id else previous_series;
+        return .{ .events = .{ id, prepared.selected_event_id }, .series = series, .whole_series = if (whole) id else "" };
+    }
+    const repeating = !review.journaledEvent() and review.source.recurrence.len != 0;
+    return .{ .events = .{ id, "" }, .series = previous_series, .whole_series = if (repeating) id else "" };
+}
+
 pub const Receipt = struct { operation: planner.Operation, review_hash: [32]u8, ordinary: bool = true };
 pub const Pending = struct { review: Review, operation: planner.Operation };
 pub const Confirmation = struct { target: t.Target, operation_id: []const u8, review_hash: [32]u8 };
@@ -176,6 +213,8 @@ pub const Service = struct {
     /// saved calendars or agenda windows with polling snapshots.
     persist_cache: bool = true,
     now_ms: i64,
+    /// Receives the operation behind a CalendarOperationPending refusal.
+    blocked: ?*Blocked = null,
 
     pub fn list(self: Service) !CalendarList {
         if (!self.grants.calendar_list) return error.CalendarPermissionRequired;
@@ -323,6 +362,8 @@ pub const Service = struct {
         try self.requireRead(calendar);
         try self.requireWrite(calendar);
         const current = if (event_id.len != 0) try self.document(calendar, event_id) else null;
+        // An unconfirmed write to this event or its whole series comes first.
+        if (current) |document_value| try self.requireNoPending(calendar.target, .{ .events = .{ document_value.event.id, "" }, .series = document_value.event.recurring_event_id }, operation_id);
         var prepared = initial;
         if (current) |document_value| {
             if (!fields.description_present) prepared.draft.description = document_value.event.description;
@@ -372,9 +413,9 @@ pub const Service = struct {
         if (request.action == .respond and request.response == null and !request.dry_run) return error.CalendarResponseRequired;
         // An uncertain earlier write to this event, its series or (for a
         // series) any of its occurrences is resolved first (reads only, then
-        // an explicit decision), never overtaken by a new one.
-        const series_hint = action.seriesOf(request.event_id);
-        try self.requireNoPending(calendar.target, .{ .events = .{ request.event_id, "" }, .series = series_hint, .whole_series = if (request.scope == .series) series_hint else "" }, operation_id);
+        // an explicit decision), never overtaken by a new one. Before the
+        // read only the exact event is known; its provider series follows.
+        try self.requireNoPending(calendar.target, action.Reach.lookup(request.event_id, ""), operation_id);
         const selected = try self.document(calendar, request.event_id);
         if (request.expected_etag.len != 0 and !std.mem.eql(u8, selected.event.etag, request.expected_etag)) return error.CalendarReviewStale;
         const master_selected = action.isSeries(selected);
@@ -396,8 +437,7 @@ pub const Service = struct {
                 options.series = .{ .available = true, .eventId = value.event.id, .etag = value.event.etag, .summary = value.event.summary, .role = @tagName(found.role), .guestCount = found.guest_count, .guestsOmitted = found.guests_omitted, .response = found.response, .attendee = found.attendee, .organizer = found.organizer, .start = value.event.start, .end = value.event.end, .recurrence = action.recurrenceLabel(value) };
                 // A series write would overtake an unconfirmed write to any
                 // of its occurrences; offer it once that is resolved.
-                if (request.scope == .event) self.requireNoPending(calendar.target, .{ .events = .{ selected.event.id, value.event.id }, .series = series_id, .whole_series = value.event.id }, operation_id) catch |err| {
-                    if (err != error.CalendarOperationPending) return err;
+                if (request.scope == .event) if (try self.findPending(calendar.target, .{ .events = .{ selected.event.id, value.event.id }, .series = series_id, .whole_series = value.event.id }, operation_id)) |_| {
                     options.series.available = false;
                     options.series.reason = "CalendarOperationPending";
                 };
@@ -461,20 +501,32 @@ pub const Service = struct {
         result.review = review;
         return result;
     }
-    /// Refuse while another unconfirmed event write could have changed what
-    /// `reach` covers (the event, its series, or a series' occurrences).
-    fn requireNoPending(self: Service, target: t.Target, reach: action.Reach, operation_id: []const u8) !void {
-        const store = self.persistence orelse return;
+    /// Refuse while another unconfirmed Calendar write could have changed
+    /// what `reach` covers (the event, its series, or a series'
+    /// occurrences). The blocking operation is reported to `blocked`.
+    fn requireNoPending(self: Service, target: t.Target, covered: action.Reach, operation_id: []const u8) !void {
+        const found = try self.findPending(target, covered, operation_id) orelse return;
+        if (self.blocked) |slot| slot.set(found.intent.operation_id, found.journaled);
+        return error.CalendarOperationPending;
+    }
+    pub const Blocking = struct { intent: planner.Intent, journaled: bool };
+    fn findPending(self: Service, target: t.Target, covered: action.Reach, operation_id: []const u8) !?Blocking {
+        const store = self.persistence orelse return null;
         if (store.pendingFn) |find| {
-            if (try find(store.context, self.a, target, reach, operation_id) != null) return error.CalendarOperationPending;
-            return;
+            const found = try find(store.context, self.a, target, covered, operation_id) orelse return null;
+            return .{ .intent = found.operation.intent, .journaled = found.review.journaledEvent() };
         }
         // Hosts without an index of unknown writes check each exact event.
-        for ([_][]const u8{ reach.events[0], reach.events[1], reach.whole_series }) |event_id| {
+        for ([_][]const u8{ covered.events[0], covered.events[1], covered.whole_series }) |event_id| {
             if (event_id.len == 0) continue;
-            const state = try store.load(self.a, .{ .target = target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{event_id}) });
-            if (state.operation) |operation| if (operation.state == .unknown and !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return error.CalendarOperationPending;
+            // A minimal host may keep one identity only; another is absent.
+            const state = store.load(self.a, .{ .target = target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{event_id}) }) catch |err| switch (err) {
+                error.CalendarIdentityMismatch, error.OperationConflict => continue,
+                else => return err,
+            };
+            if (state.operation) |operation| if (operation.state == .unknown and !std.mem.eql(u8, operation.intent.operation_id, operation_id)) return .{ .intent = operation.intent, .journaled = true };
         }
+        return null;
     }
 
     pub fn invitationPlan(self: Service, calendar: t.Calendar, raw: []const u8, verified_aliases: []const []const u8, bindings: Bindings) !InvitationPlan {
@@ -574,8 +626,15 @@ pub const Service = struct {
                 if (!operation.intent.eql(review.intent)) return error.OperationConflict;
                 return operation;
             }
-            if (operation.state == .unknown) return error.CalendarOperationPending;
+            if (operation.state == .unknown) {
+                if (self.blocked) |slot| slot.set(operation.intent.operation_id, review.journaledEvent());
+                return error.CalendarOperationPending;
+            }
         }
+        // Every kind of Calendar write (edit, delete, answer, invitation
+        // update) waits for an unconfirmed write to the same event, its
+        // series or, for a series write, any of its occurrences.
+        try self.requireNoPending(review.intent.identity.target, reach(review), review.intent.operation_id);
         if (!review.journaledEvent() and review.source.method != .cancel and review.source.attendee.len == 0) {
             if (!review.calendar.primary or review.intent.kind != .import_event or !std.ascii.eqlIgnoreCase(try p.importedOrganizer(self.a, review.request), self.grants.account)) return error.CalendarReviewStale;
         }
@@ -593,9 +652,6 @@ pub const Service = struct {
                 if (!sameEventIdentity(current, review.source) or current.cancelled or current.locked or !std.mem.eql(u8, current.etag, review.intent.expected_etag) or current.sequence > review.intent.version.sequence) return error.CalendarReviewStale;
             }
         } else if (review.event_action) |prepared| {
-            // An unconfirmed write to its series or occurrences, saved since
-            // the review, still comes first.
-            try self.requireNoPending(review.intent.identity.target, action.Reach.saved(prepared, review.intent.event_id), review.intent.operation_id);
             // The exact reviewed version must still be current and eligible.
             const current = try self.document(review.calendar, review.intent.event_id);
             if (!std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;

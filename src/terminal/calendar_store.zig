@@ -309,7 +309,7 @@ pub const Host = struct {
         defer store.close();
         const state = try self.readState(&store, a);
         if (event_id.len != 0) {
-            const entry = related(state, target, action.Reach.lookup(event_id), "") orelse return null;
+            const entry = related(state, target, action.Reach.lookup(event_id, ""), "") orelse return null;
             return try clone(svc.Pending, out, .{ .review = entry.review.?, .operation = entry.state.operation.? });
         }
         for (state.entries) |entry| {
@@ -333,17 +333,17 @@ pub const Host = struct {
         const entry = related(state, target, reach, skip) orelse return null;
         return try clone(svc.Pending, out, .{ .review = entry.review.?, .operation = entry.state.operation.? });
     }
-    /// The first unknown event write (other than operation `skip`) that
-    /// could have changed what `reach` covers. Unknown operations always
-    /// stay in the active table, so this search is complete.
+    /// The first unknown Calendar write of any kind (other than operation
+    /// `skip`) that could have changed what `reach` covers, judged from the
+    /// provider series recorded with it. Unknown operations always stay in
+    /// the active table, so this search is complete.
     fn related(state: StateFile, target: t.Target, reach: action.Reach, skip: []const u8) ?Entry {
         for (state.entries) |entry| {
             const operation = entry.state.operation orelse continue;
             if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
             if (std.mem.eql(u8, operation.intent.operation_id, skip)) continue;
             const review = entry.review orelse continue;
-            if (!review.journaledEvent()) continue;
-            if (action.Reach.saved(review.event_action, operation.intent.event_id).overlaps(reach)) return entry;
+            if (svc.reach(review).overlaps(reach)) return entry;
         }
         return null;
     }
@@ -418,9 +418,10 @@ pub const Host = struct {
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
-        // Another process may have left an unconfirmed write to this event's
-        // series or occurrences since the review; it is resolved first.
-        if (review.event_action) |prepared| if (related(state, intent.identity.target, action.Reach.saved(prepared, intent.event_id), intent.operation_id) != null) return error.CalendarOperationPending;
+        // Another process may have left an unconfirmed write to this event,
+        // its series or its occurrences since the review (an edit, delete,
+        // answer or invitation update alike); it is resolved first.
+        if (related(state, intent.identity.target, svc.reach(review), intent.operation_id) != null) return error.CalendarOperationPending;
         // Another process may have completed an action after Service.apply's
         // read/lookup but before this locked claim. Recheck the durable target
         // and version here; only this transaction can grant fresh dispatch.

@@ -117,13 +117,18 @@ pub fn recurrenceLabel(document: p.EventDocument) []const u8 {
     return "Repeats";
 }
 
-/// Which events a write can change. An unconfirmed write blocks any other
-/// write that overlaps it: the same event, its series, or (for a series
-/// write) every occurrence of that series, in both directions.
+/// Which events a Calendar write can change. Series membership always comes
+/// from the provider (an occurrence's recurringEventId, recorded with the
+/// write), never from the text of an event ID.
+///
+/// Two writes overlap when they name the same event, or when one changes a
+/// whole series (`whole_series`) that the other's event belongs to
+/// (`series`) or is. An unconfirmed write blocks every overlapping write,
+/// in both directions; occurrences of one series do not block each other.
 pub const Reach = struct {
     /// The selected event and the event written (equal unless series scope).
     events: [2][]const u8 = .{ "", "" },
-    /// The series master the selected event belongs to, if any.
+    /// The provider series (master) ID the selected event belongs to, if any.
     series: []const u8 = "",
     /// Series scope: every occurrence of this series is changed.
     whole_series: []const u8 = "",
@@ -139,29 +144,18 @@ pub const Reach = struct {
         if (other.whole_series.len != 0 and (self.has(other.whole_series) or std.mem.eql(u8, self.series, other.whole_series))) return true;
         return false;
     }
-    /// A lookup by one event ID: the event, its series (by Google's
-    /// occurrence ID form) and, if it is a series, its occurrences.
-    pub fn lookup(event_id: []const u8) Reach {
-        return .{ .events = .{ event_id, "" }, .series = seriesOf(event_id), .whole_series = event_id };
+    /// The writes that block some action on `event_id`, whose series (from
+    /// the provider) is `series`: those on the event itself, on its whole
+    /// series, or (when `event_id` is a series) on one of its occurrences.
+    pub fn lookup(event_id: []const u8, series: []const u8) Reach {
+        return .{ .events = .{ event_id, "" }, .series = series, .whole_series = event_id };
     }
-    /// What a saved delete/RSVP (or an edit, `prepared` null) can change.
-    pub fn saved(prepared: ?Prepared, event_id: []const u8) Reach {
-        const value = prepared orelse return .{ .events = .{ event_id, "" }, .series = seriesOf(event_id) };
-        return .{
-            .events = .{ event_id, value.selected_event_id },
-            .series = if (value.series_event_id.len != 0) value.series_event_id else seriesOf(value.selected_event_id),
-            .whole_series = if (value.scope == .series) event_id else "",
-        };
+    /// Also the writes to other occurrences of the same series, which block
+    /// a series action chosen on this event.
+    pub fn seriesWide(event_id: []const u8, series: []const u8) Reach {
+        return .{ .events = .{ event_id, "" }, .series = series, .whole_series = if (series.len != 0) series else event_id };
     }
 };
-
-/// Google names an occurrence `<series ID>_<original start>`; series and
-/// ordinary event IDs use base32hex only. This finds related writes; it
-/// never authorizes one.
-pub fn seriesOf(event_id: []const u8) []const u8 {
-    const at = std.mem.indexOfScalar(u8, event_id, '_') orelse return "";
-    return event_id[0..at];
-}
 
 /// Same organizer evidence as the editor: Google's organizer.self marker,
 /// else the organizer address equals this calendar (or its primary owner).
