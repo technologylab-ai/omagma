@@ -24260,7 +24260,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     app.cancelGraceAtExit();
     try app.persistDraftAtExit();
     // What this window kept for Ctrl+Z goes for good with it.
-    app.forgetKeptDiscardsAtExit();
+    if (!stuck) app.forgetKeptDiscardsAtExit(); // a stuck authorization leaves it to the next start
     app.rememberWorkingContext();
     app.saveUiPreferences();
     if (stuck) {
