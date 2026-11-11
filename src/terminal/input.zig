@@ -107,7 +107,8 @@ pub fn Loop(comptime Event: type) type {
         const Self = @This();
         // Queue entries own text. The upstream 8KiB rotating cache is not a
         // lifetime guarantee for many long graphemes waiting in a full queue.
-        const Item = struct { event: Event, text: ?[]const u8 = null };
+        // `read_ms` is when the input thread read the event (awake clock).
+        const Item = struct { event: Event, text: ?[]const u8 = null, read_ms: i64 = 0 };
 
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -117,6 +118,10 @@ pub fn Loop(comptime Event: type) type {
         thread: ?std.Io.Future(void) = null,
         cache: vaxis.GraphemeCache = .{},
         consumer_text: ?[]const u8 = null,
+        /// When the event nextEvent returned last was read from the terminal
+        /// (or posted): a busy consumer does not stretch the time between
+        /// two keys typed together.
+        last_read_ms: i64 = 0,
         resize_installed: bool = false,
         resize_size: std.atomic.Value(u64) = .init(0),
         resize_pending: std.atomic.Value(bool) = .init(false),
@@ -139,13 +144,14 @@ pub fn Loop(comptime Event: type) type {
             self.thread = null;
             self.cache = .{};
             self.consumer_text = null;
+            self.last_read_ms = 0;
             self.resize_installed = false;
             self.resize_size = .init(0);
             self.resize_pending = .init(false);
             self.resize_wake_pending = .init(false);
         }
         fn owned(self: *Self, event: Event) !Item {
-            var item: Item = .{ .event = event };
+            var item: Item = .{ .event = event, .read_ms = std.Io.Timestamp.now(self.io, .awake).toMilliseconds() };
             switch (event) {
                 .key_press => |key| if (key.text) |bytes| {
                     if (bytes.len > capacity) return error.InputSequenceTooLong;
@@ -174,6 +180,7 @@ pub fn Loop(comptime Event: type) type {
         pub fn nextEvent(self: *Self) !Event {
             self.releaseConsumer();
             const item = try self.queue.pop();
+            self.last_read_ms = item.read_ms;
             var event = item.event;
             if (item.text) |text| {
                 self.consumer_text = text;

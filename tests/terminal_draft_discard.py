@@ -5,15 +5,18 @@ A new message, reply or forward left without a change keeps no draft;
 typed, reopened and agent-filled drafts stay; Ctrl+X reviews discarding
 from INSERT and the composer's Tab-reachable [Ctrl+X Discard] button. The
 review is confirmed only by a gesture typing never produces (Ctrl+X again,
-Enter on its focused [Ctrl+X Discard] or a click on it), and Ctrl+Z restores
-a discarded draft exactly. Keys after any of it reach the user's next view
-unchanged. No mail is sent, no mailbox mail changes, nothing is written to
-Gmail.
+Enter on its focused [Ctrl+X Discard] or a click on it, each once the
+review has shown a second). A discard keeps exactly what the composer shows:
+Ctrl+Z right after, or :restore-draft from any window and after a restart,
+brings it back until the account's next discard. Keys after any of it reach
+the user's next view unchanged. No mail is sent, no mailbox mail changes,
+nothing is written to Gmail.
 """
 from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 from pathlib import Path
 import signal
 import struct
@@ -22,7 +25,7 @@ import termios
 import time
 
 from terminal_composer_workflow import composer, open_retained, setup
-from terminal_integration import Client, require
+from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point
 from terminal_ux_batch_support import ENTER, ESC, TAB, diagnose, focus_button, focused, start
 
@@ -33,6 +36,7 @@ UP = b"\x1b[A"
 NOTHING_KEPT = "Nothing written · no draft kept"
 DISCARDED = "Draft discarded · Ctrl+Z Undo"
 HINT = "Ctrl+X again discards"
+RESTORE_NOTICE = "1 discarded draft kept · :restore-draft"
 # A second Ctrl+X confirms only once the previous one has settled (1 s).
 SETTLE = 1.2
 
@@ -102,6 +106,24 @@ def chars(text, pace):
     return [(bytes([c]), pace) for c in text.encode()]
 
 
+def restore(binary, directory, extra, **fields):
+    """draft.restore through the CLI: its data, or {} when it is refused."""
+    with Client(binary, directory, extra=extra) as client:
+        client.next_id += 1
+        request = {"id": f"restore-{client.next_id}", "cmd": "draft.restore", "account": ACCOUNTS[0], **fields}
+        client.raw(json.dumps(request).encode() + b"\n")
+        return client.receive().get("data") or {}
+
+
+def read(binary, directory, extra, draft_id):
+    with Client(binary, directory, extra=extra) as client:
+        return client.request("draft.read", draftId=draft_id)
+
+
+def command(terminal, name):
+    terminal.send(b":" + name.encode() + b"\r")
+
+
 def untouched_twenty(binary, directory):
     def body(terminal, extra):
         before = len(drafts(binary, directory, extra))
@@ -138,7 +160,7 @@ def insert_ctrl_x(binary, directory):
         terminal.until(lambda: "Discard from insert" in terminal.text()
                        and "Ctrl+X Discard" in terminal.screen.lines()[-2])
         terminal.send(CTRL_X)
-        review(terminal, "Discard from insert · 1 recipient", "nothing is sent or changed in Gmail", "restores it until you quit")
+        review(terminal, "Discard from insert · 1 recipient", "nothing is sent or changed in Gmail", ":restore-draft")
         footer = terminal.screen.lines()[-2]
         require("Ctrl+X Discard" in footer and "Esc Keep draft" in footer and "Ctrl+S" not in footer,
                 "the footer did not show the review's keys")
@@ -239,9 +261,18 @@ def discard_button(binary, directory):
         require(len(drafts(binary, directory, extra)) == before + 1, "Enter on Cancel discarded the draft")
         terminal.send(ENTER)
         review(terminal)
-        # Tab reaches [Ctrl+X Discard]; Enter on it discards at once.
+        # Tab reaches [Ctrl+X Discard]; Enter on it within the review's first
+        # second is typed ahead and keeps the draft, focus back on Cancel.
         terminal.send(TAB)
         terminal.until(lambda: focused(terminal, "[Ctrl+X Discard]") and "Discard local draft" in terminal.text())
+        terminal.send(ENTER)
+        terminal.until(lambda: focused(terminal, "[Esc Cancel]"))
+        require("Discard local draft" in terminal.text() and len(drafts(binary, directory, extra)) == before + 1,
+                "an Enter typed ahead of the review discarded the draft")
+        # A second later, Tab and Enter discard.
+        terminal.gap(1.1)
+        terminal.send(TAB)
+        terminal.until(lambda: focused(terminal, "[Ctrl+X Discard]"))
         terminal.send(ENTER)
         in_mailbox(terminal, DISCARDED)
         require(len(drafts(binary, directory, extra)) == before, "the Discard button kept the draft")
@@ -318,9 +349,10 @@ def search_after_back(binary, directory):
         composer(terminal)
         terminal.gap(1.5)
         terminal.send(b"q")
-        terminal.gap(.3)
+        in_mailbox(terminal, NOTHING_KEPT)
         terminal.send(b"/")
-        terminal.gap(.8)
+        # The search prompt is open (an empty query field) before typing.
+        terminal.until(lambda: "/ ▏" in terminal.screen.lines()[-2])
         for byte in b"xmas":
             terminal.send(bytes([byte]))
             terminal.gap(.15)
@@ -521,16 +553,19 @@ def undo_exact(binary, directory):
 
 
 def undo_after_restart(binary, directory):
-    """What a window keeps for Ctrl+Z goes for good when it quits, and a
-    window that ended without a clean exit leaves nothing for the next."""
+    """A discard outlives its window: after a quit or a kill, a new window's
+    :restore-draft brings the draft back exactly (draft.read and screen)."""
     extra, message = setup(binary, directory)
     first = message["bodyText"].splitlines()[0]
     for ending in ("quit", "killed"):
+        subject = f"Restart {ending}"
         terminal = start(binary, directory, extra, first)
         try:
-            typed_composer(terminal, f"Restart {ending}")
+            typed_composer(terminal, subject)
             terminal.send(ESC)
             terminal.gap(2.0)
+            target = drafts(binary, directory, extra)[0]["id"]
+            before = read(binary, directory, extra, target)
             terminal.send(CTRL_X)
             review(terminal)
             confirm(terminal)
@@ -545,21 +580,228 @@ def undo_after_restart(binary, directory):
             raise
         finally:
             terminal.close()
-        if ending == "killed":
-            # The next window drops the leftover when it starts.
-            terminal = start(binary, directory, extra, first)
+        require(drafts(binary, directory, extra) == [], f"{ending}: the discarded draft stayed in Drafts")
+        terminal = start(binary, directory, extra, first)
+        try:
+            command(terminal, "restore-draft")
+            terminal.until(lambda: f"Subject: {subject}" in terminal.text() and "Paragraph I spent time writing." in terminal.text())
+            require(read(binary, directory, extra, target) == before, f"{ending}: :restore-draft did not restore the draft exactly")
+            # Leave it saved for the next round's discard to replace nothing.
+            terminal.send(b"q")
+            in_mailbox(terminal)
+            with Client(binary, directory, extra=extra) as client:
+                client.request("draft.discard", draftId=target)
+            terminal.finish()
+        except Exception:
+            diagnose(terminal)
+            raise
+        finally:
+            terminal.close()
+    mailbox_untouched(binary, directory, extra, "restart")
+
+
+def second_window(binary, directory):
+    """Another window starting, quitting or staying open never drops what the
+    first window's discard kept: its Ctrl+Z still restores."""
+    extra, message = setup(binary, directory)
+    first = message["bodyText"].splitlines()[0]
+    for other in ("quits", "stays-open"):
+        subject = f"Window one {other}"
+        w1 = start(binary, directory, extra, first)
+        w2 = None
+        try:
+            typed_composer(w1, subject)
+            w1.send(ESC)
+            w1.gap(2.0)
+            w1.send(CTRL_X)
+            review(w1)
+            confirm(w1)
+            in_mailbox(w1, DISCARDED)
+            w2 = start(binary, directory, extra, first)
+            w2.gap(1.0)
+            if other == "quits":
+                w2.finish()
+                w2.close()
+                w2 = None
+            w1.send(CTRL_Z)
+            w1.until(lambda: f"Subject: {subject}" in w1.text())
+            require([row["subject"] for row in drafts(binary, directory, extra)] == [subject],
+                    f"{other}: Ctrl+Z in the first window did not restore its discard")
+            w1.send(b"q")
+            in_mailbox(w1)
+            with Client(binary, directory, extra=extra) as client:
+                client.request("draft.discard", draftId=client.request("draft.list")["drafts"][0]["id"])
+            w1.finish()
+        except Exception:
+            diagnose(w1)
+            raise
+        finally:
+            if w2 is not None:
+                w2.close()
+            w1.close()
+    mailbox_untouched(binary, directory, extra, "second window")
+
+
+def exact_composer(binary, directory):
+    """What Ctrl+Z restores is exactly what the composer showed at the
+    confirm, typed a moment earlier and never autosaved: a tail after an
+    autosave, a fresh composer typed without a pause, and a reply with a
+    file. Compared through draft.read and on screen."""
+    def tail(terminal, extra):
+        typed_composer(terminal, "Tail subject", b"Saved part.")
+        terminal.gap(2.5)
+        terminal.send(b" UNSAVED-TAIL-WORDS")
+        terminal.until(lambda: "UNSAVED-TAIL-WORDS" in terminal.text())
+        return "Tail subject", "Saved part. UNSAVED-TAIL-WORDS"
+
+    def fresh(terminal, extra):
+        composer(terminal)
+        terminal.send(b"irecipient@example.test" + TAB * 3 + b"Fresh subject" + TAB)
+        for word in (b"Fresh ", b"paragraph ", b"typed ", b"without ", b"pause."):
+            terminal.send(word)
+            terminal.gap(.3)
+        terminal.until(lambda: "pause." in terminal.text())
+        return "Fresh subject", "Fresh paragraph typed without pause."
+
+    def reply(terminal, extra):
+        imported = import_file(binary, directory / "reply", extra, "reply-notes.txt", b"Synthetic reply attachment\n")
+        with Client(binary, directory / "reply", extra=extra) as client:
+            client.request("draft.create", draft={"to": [{"address": "peer@example.test", "name": "Peer Fixture"}],
+                                                  "subject": "Re: Exact plan", "bodyText": "Reply start.",
+                                                  "threadId": "thread-exact", "inReplyTo": "<source@example.test>",
+                                                  "references": "<source@example.test>", "attachments": [imported]})
+        open_retained(terminal, "Re: Exact plan")
+        # Ctrl+G: the top of the body; then type there.
+        terminal.send(b"\x07")
+        terminal.gap(.1)
+        terminal.send(b"iREPLY-TAIL ")
+        terminal.until(lambda: "REPLY-TAIL" in terminal.text())
+        return "Re: Exact plan", "REPLY-TAIL Reply start."
+
+    for name, prepare in (("tail", tail), ("fresh", fresh), ("reply", reply)):
+        case = directory / name
+        case.mkdir(mode=0o700)
+
+        def body(terminal, extra, prepare=prepare, case=case, name=name):
+            subject, text = prepare(terminal, extra)
+            terminal.send(CTRL_X)
+            review(terminal)
+            terminal.gap(1.1)
+            terminal.send(CTRL_X)
+            in_mailbox(terminal, DISCARDED)
+            require(drafts(binary, case, extra) == [], f"{name}: the discarded draft stayed in Drafts")
+            terminal.send(CTRL_Z)
+            terminal.until(lambda: f"Subject: {subject}" in terminal.text() and text.split()[-1] in terminal.text())
+            rows = drafts(binary, case, extra)
+            require(len(rows) == 1, f"{name}: Ctrl+Z restored {len(rows)} drafts")
+            restored = read(binary, case, extra, rows[0]["id"])
+            require(text in restored["bodyText"] and restored["subject"] == subject,
+                    f"{name}: Ctrl+Z restored {restored['subject']!r} / {restored['bodyText']!r}, not what was typed")
+            if name == "reply":
+                require(restored["threadId"] == "thread-exact" and len(restored["attachments"]) == 1
+                        and restored["attachments"][0]["filename"] == "reply-notes.txt",
+                        "reply: threading or the file did not come back")
+            terminal.send(ESC)
+            terminal.gap(.1)
+            terminal.send(b"q")
+            in_mailbox(terminal)
+        run(binary, case, body)
+
+
+def mail_action_takeover(binary, directory):
+    """A mail action after a discard takes Ctrl+Z over (its notice says how
+    to get the draft back); :restore-draft still restores it."""
+    def body(terminal, extra):
+        typed_composer(terminal, "Takeover subject")
+        terminal.send(ESC)
+        terminal.gap(2.0)
+        terminal.send(CTRL_X)
+        review(terminal)
+        confirm(terminal)
+        in_mailbox(terminal, DISCARDED)
+        terminal.send(b"s")
+        terminal.until(lambda: "Ctrl+Z Undo" in terminal.text() and ":restore-draft restores the discarded draft" in terminal.text())
+        terminal.send(CTRL_Z)
+        terminal.until(lambda: "Undone:" in terminal.text())
+        require("Subject:" not in terminal.text(), "Ctrl+Z restored the draft instead of undoing the mail action")
+        command(terminal, "restore-draft")
+        terminal.until(lambda: "Subject: Takeover subject" in terminal.text())
+        require([row["subject"] for row in drafts(binary, directory, extra)] == ["Takeover subject"],
+                ":restore-draft did not restore the discarded draft")
+        terminal.send(b"q")
+        in_mailbox(terminal)
+    run(binary, directory, body)
+
+
+def empty_keeps_slot(binary, directory):
+    """An unused or emptied composer discarded with Ctrl+X keeps no copy and
+    never replaces the kept draft; the Drafts list names the kept one."""
+    def body(terminal, extra):
+        typed_composer(terminal, "Valuable subject A")
+        terminal.send(ESC)
+        terminal.gap(2.0)
+        target = drafts(binary, directory, extra)[0]["id"]
+        terminal.send(CTRL_X)
+        review(terminal)
+        confirm(terminal)
+        in_mailbox(terminal, DISCARDED)
+        for variant in ("unused", "emptied"):
+            composer(terminal)
+            if variant == "emptied":
+                terminal.send(b"i" + TAB * 3 + b"Gone")
+                terminal.until(lambda: "Gone" in terminal.text())
+                terminal.send(b"\x7f" * 4)
+                terminal.until(lambda: "Gone" not in terminal.text())
+            terminal.send(CTRL_X)
+            review(terminal, "so no copy is kept")
+            confirm(terminal)
+            in_mailbox(terminal, NOTHING_KEPT if variant == "unused" else "Empty draft discarded")
+        click(terminal, *point(terminal, "Drafts"))
+        terminal.until(lambda: RESTORE_NOTICE in terminal.text())
+        require(drafts(binary, directory, extra) == [], "an unused or emptied composer left a draft")
+        command(terminal, "restore-draft")
+        terminal.until(lambda: "Subject: Valuable subject A" in terminal.text())
+        require([row["id"] for row in drafts(binary, directory, extra)] == [target], "the kept draft was replaced")
+        terminal.send(b"q")
+        in_mailbox(terminal)
+        mailbox_untouched(binary, directory, extra, "empty composers")
+    run(binary, directory, body)
+
+
+def exit_removed(binary, directory):
+    """Edits in a composer whose draft another program removed (plain or
+    kept for restore) survive SIGHUP and SIGTERM as a new draft."""
+    for mode in ("keep", "plain"):
+        for ending in (signal.SIGHUP, signal.SIGTERM):
+            case = directory / f"{mode}-{ending.name}"
+            case.mkdir(mode=0o700)
+            extra, message = setup(binary, case)
+            terminal = start(binary, case, extra, message["bodyText"].splitlines()[0])
             try:
-                terminal.send(CTRL_Z)
-                terminal.gap(.6)
-                require("Subject:" not in terminal.text(), "a new window restored an earlier window's discard")
-                terminal.finish()
+                typed_composer(terminal, "Removed at exit subject", b"Saved paragraph.")
+                terminal.gap(2.5)
+                target = drafts(binary, case, extra)[0]["id"]
+                with Client(binary, case, extra=extra) as client:
+                    client.request("draft.discard", draftId=target, keepQueuedSend=True, **({"keepForUndo": True} if mode == "keep" else {}))
+                terminal.send(b" EDITS-AFTER-OTHER-DISCARD")
+                terminal.until(lambda: "EDITS-AFTER-OTHER-DISCARD" in terminal.text())
+                terminal.gap(.3)
+                terminal.process.send_signal(ending)
+                deadline = time.monotonic() + 8
+                while terminal.process.poll() is None and time.monotonic() < deadline:
+                    terminal.pump()
+                code = terminal.process.poll()
+                tail = bytes(terminal.output[-800:]).decode("utf-8", "replace")
+                require(code == 0 and "DraftPersistenceFailed" not in tail, f"{mode} {ending.name}: exit {code}: {tail[-200:]!r}")
             finally:
                 terminal.close()
-        with Client(binary, directory, extra=extra) as client:
-            require(client.request("draft.restore", ok=False)["code"] == "DiscardedDraftUnavailable",
-                    f"{ending}: a discarded draft outlived its window")
-            require(client.request("draft.list")["drafts"] == [], f"{ending}: the discarded draft came back")
-    mailbox_untouched(binary, directory, extra, "restart")
+            rows = drafts(binary, case, extra)
+            kept = [read(binary, case, extra, row["id"]) for row in rows]
+            # A recovery save keeps the composer's exact fields (recoveryFields).
+            require(any("EDITS-AFTER-OTHER-DISCARD" in draft.get("bodyText", "") + " ".join(draft.get("recoveryFields") or [])
+                        for draft in kept),
+                    f"{mode} {ending.name}: edits made after another program removed the draft were lost")
+            require(all(row["id"] != target for row in rows), f"{mode} {ending.name}: the removed draft came back")
 
 
 def sender_less(binary, directory):
@@ -704,9 +946,21 @@ def exit_race(binary, directory):
         finally:
             terminal.close()
         # An untouched Back keeps no draft whichever side of the signal it
-        # landed on; a typed draft is either discarded or saved, never lost.
+        # landed on; a typed draft is either discarded (and restorable,
+        # with its text) or saved, never lost.
         if key == b"q":
             require(drafts(binary, case, extra) == [], f"a draft survived q + SIGTERM at {delay}s")
+        else:
+            rows = drafts(binary, case, extra)
+            if rows:
+                require(len(rows) == 1 and rows[0]["subject"] == "Raced discard", f"Ctrl+X + SIGTERM at {delay}s left {rows}")
+                kept = read(binary, case, extra, rows[0]["id"])
+            else:
+                restored = restore(binary, case, extra)
+                require(restored.get("restored"), f"Ctrl+X + SIGTERM at {delay}s: the discarded draft is not restorable: {restored}")
+                kept = read(binary, case, extra, restored["draftId"])
+            require(kept["subject"] == "Raced discard" and "Paragraph I spent time writing." in kept["bodyText"],
+                    f"Ctrl+X + SIGTERM at {delay}s lost the typed text: {kept}")
 
 
 def signal_untouched(binary, directory):
@@ -730,6 +984,9 @@ CASES = (("untouched-twenty", untouched_twenty), ("typed-kept", typed_kept),
          ("search-after-back", search_after_back), ("reopened-kept", reopened_kept), ("agent-filled", agent_filled),
          ("reply-forward-untouched", reply_forward_untouched), ("drafts-view", drafts_view),
          ("undo-exact", undo_exact), ("undo-after-restart", undo_after_restart),
+         ("second-window", second_window), ("exact-composer", exact_composer),
+         ("mail-action-takeover", mail_action_takeover), ("empty-keeps-slot", empty_keeps_slot),
+         ("exit-removed", exit_removed),
          ("sender-less", sender_less), ("removed-elsewhere", removed_elsewhere),
          ("paused-queue", paused_queue), ("width-sweep", width_sweep),
          ("exit-race", exit_race), ("signal-untouched", signal_untouched))

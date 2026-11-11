@@ -32,7 +32,7 @@ FAMILIES = {
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
-    "draft": ("list", "read", "create", "update", "patch", "preview", "open-preview", "recovery-save", "send", "queue", "discard"),
+    "draft": ("list", "read", "create", "update", "patch", "preview", "open-preview", "recovery-save", "send", "queue", "discard", "restore"),
     "queue": ("list", "read", "cancel", "resume", "process", "send-now"),
     "attachment": ("import", "discard", "open"),
     "labels": ("list", "create", "rename", "delete", "color", "palette"),
@@ -312,7 +312,7 @@ contacts.list contacts.search contacts.upsert
 cache.stats cache.clear cache.activity cache.refresh-status
 browser.open auth.status auth.authorize auth.revoke
 draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
-draft.discard draft.send draft.queue draft.patch
+draft.discard draft.restore draft.send draft.queue draft.patch
 draft.clone draft.measure draft.delivery-plan draft.selection-plan history.delete-source history.drafts history.operations history.queues
 draft.gmail-info draft.gmail-save draft.gmail-status draft.gmail-take-back draft.gmail-import
 queue.list queue.read queue.cancel queue.resume queue.process queue.send-now

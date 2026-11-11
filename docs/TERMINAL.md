@@ -262,9 +262,18 @@ The button and its footer key stay visible at every terminal width: shortened
 to **^X Discard** where space is short, and the button moves to a row of its
 own when needed. The review names the draft (subject or "(no subject)", the
 number of recipients and files) and says what happens: the draft leaves Drafts,
-nothing is sent or changed in Gmail, and Ctrl+Z restores it until you quit
-Omagma. If the saved draft was changed elsewhere since you opened it, the review
-says so; that saved version is what goes, and Ctrl+Z brings it back too.
+nothing is sent or changed in Gmail, and Ctrl+Z (later `:restore-draft`)
+restores it until this account's next discard, at most 7 days. A discard keeps
+exactly what the composer shows: text typed a moment before the confirm is
+saved first, and the removal then names that saved content, so a change made
+elsewhere in between refuses the discard instead of keeping another version. If
+the saved draft was changed elsewhere since you opened it, Ctrl+X says so and
+removes nothing: `:resolve-draft` chooses which version to keep first. A new
+message, reply or forward you have not changed, and a composer you emptied, keep
+no copy when discarded ("Nothing written · no draft kept", "Empty draft
+discarded · nothing kept"), so they never replace the draft an earlier discard
+kept. Keys pressed while the discard is being stored are not taken into the
+composer, as during any save.
 
 The review is confirmed only by a gesture typing never produces: **Ctrl+X
 again**, Enter on **[Ctrl+X Discard]** after Tab has moved focus to it, or a
@@ -275,19 +284,31 @@ other key (letters, `y` included, arrows, `j`/`k`, Ctrl+N/P, pasted text) puts
 focus back on Cancel and only shows "Ctrl+X again discards · Esc keeps the
 draft", so text typed on after a stray Ctrl+X, nano's Ctrl+X `y` Enter, vim's
 `dd` … `yy` or "Tab, text, pause, Enter" never discards. A second Ctrl+X counts
-only a second after the previous one, so holding Ctrl+X never discards, and the
-second click of the double click that opened the review never confirms it. Any
-confirm needs the whole review on screen in the current frame: in a terminal
-too small to show it, the footer offers only Esc.
+only a second after the previous one, so holding Ctrl+X never discards. Every
+confirm (Ctrl+X, Enter on the button, a click) also needs the whole review on
+screen in the current frame, and on screen for at least a second when the key
+or click was read from the terminal: keys typed ahead of the review, and the
+second click of the double click that opened it, never confirm it. Omagma reads
+keys on their own thread and times them when they arrive there, so a busy
+screen does not make two quick presses look a second apart; a terminal or
+connection that stalls before delivering a key cannot be told apart from a
+pause. In a terminal too small to show the review, the footer offers only Esc.
 
 After a discard, the status says "Draft discarded · Ctrl+Z Undo". Ctrl+Z (or
 `:undo`) in the mailbox puts the draft back into Drafts exactly as it was (same
-recipients, threading, sender, files and Gmail link) and reopens it in the
-composer, as long as it is the latest thing you did that Ctrl+Z can undo.
-Omagma keeps one discarded draft per account: the next discard replaces it, and
-it is removed for good when you quit (or, after a crash, when Omagma next
-starts). A discard from the CLI or JSONL (`draft.discard`) is final; only the
-terminal UI keeps its last discard for `draft.restore`.
+place, recipients, threading, sender, files and Gmail link) and reopens it in
+the composer, as long as it is the latest thing you did that Ctrl+Z can undo. A
+later mail action takes Ctrl+Z over, and its notice adds ":restore-draft
+restores the discarded draft". **`:restore-draft`** (also in the action
+palette) restores this account's kept draft at any time: in another window,
+after quitting or a crash, or with another account's mail open in between; with
+several accounts the notice names the account whose Drafts it returned to. The
+Drafts list says "1 discarded draft kept · :restore-draft" while one is kept.
+Omagma keeps one discarded draft per account, in its private store: it stays
+when you quit, the account's next discard replaces it (the replaced one is gone
+for good), and one older than 7 days is removed when Omagma starts. Agents get
+the same with `draft.discard` `keepForUndo:true` and `draft.restore`; a
+`draft.discard` without it is final.
 
 Discard never deletes anything in Gmail. A draft taken back from Gmail keeps its
 Gmail copy in Gmail Drafts, and the review says so. A draft paused in Gmail, a
@@ -623,6 +644,8 @@ Contact deletion is not implemented.
 its recovery/preview copies. Cancel is the safe default. It does not delete a
 Gmail draft or message, and pending/unknown submissions remain protected. In the
 composer the same review is **Ctrl+X** (see [Discard a draft](#discard-a-draft)).
+`:restore-draft` brings back this account's last discarded draft, from any
+window, until the account's next discard (at most 7 days).
 
 ## Invitation replies
 
@@ -1060,7 +1083,8 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+Z / Undo during countdown | Cancel before submission and return to editing |
 | Tab/Shift+Tab, then Enter during countdown | Choose Undo or Send now; Undo is focused initially |
 | :resume-send / :cancel-send | Explicitly handle a recovered paused send |
-| Ctrl+X / d in normal compose / :discard-draft | Review discarding this draft (also in INSERT and send review); `y` discards, Esc keeps it |
+| Ctrl+X / d in normal compose / :discard-draft | Review discarding this draft (also in INSERT and send review); once it has shown a second, Ctrl+X again or Enter on [Ctrl+X Discard] discards it, Esc keeps it |
+| Ctrl+Z after a discard / :restore-draft | Restore the discarded draft exactly (`:restore-draft` from any window, until this account's next discard, at most 7 days) |
 | A in normal compose | Add outgoing attachment |
 | Ctrl+V / :paste-image in editable compose | Paste image: inline at cursor (Markdown body), else attach |
 | L / B | Links / received-file picker |

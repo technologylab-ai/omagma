@@ -174,6 +174,7 @@
         "Result data.drafts contains compact summaryOnly rows with recipient/file counts, not editable source bodies or file descriptors. Use draft.read before editing or sending a saved draft.",
         "At most 128 active local drafts; this does not list Gmail server drafts. Each page contains at most limit rows within a 3 MiB encoded browsing budget; copy nonempty nextCursor verbatim to continue.",
         "Result gmailLinks describes each retained draft’s Gmail ownership, paused state and latest import, without provider access.",
+        "Rows with a queued or paused send carry sendQueued:true. Result discarded {draftId, subject, discardedAtMs} names the draft kept by the last discard with keepForUndo, restorable with draft.restore.",
         "Returns active work only. Settled sent sources are retained separately; use history.drafts for bounded pages and draft.read or draft.clone for an exact retained source."
       ],
       "examples": [
@@ -515,8 +516,7 @@
         "keepForUndo": {
           "type": "boolean",
           "default": false,
-          "x-internal": true,
-          "description": "Terminal UI only: keep the draft for one draft.restore instead of removing it."
+          "description": "Keep the discarded draft for draft.restore: one per account, replaced by the next keepForUndo discard and dropped after 7 days. Without it the discard is final."
         }
       },
       "required": [
@@ -526,7 +526,7 @@
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
         "Cancels any still-queued send for that draft and removes its private draft file and the account preview artifact. Discard is refused while an associated operation/queue state is unknown or submitting.",
-        "From the CLI and JSONL a discard is final; only the terminal UI keeps its last discarded draft for draft.restore.",
+        "Without keepForUndo a discard is final. With it, the draft leaves draft.list/read/send/queue but is kept (one per account, replacing the previous kept draft, at most 7 days) for draft.restore; the terminal UI discards this way.",
         "Does not revoke or delete already sent mail. Referenced attachment handles become eligible for attachment.discard only when no protected content uses them."
       ],
       "examples": [
@@ -539,7 +539,7 @@
     },
     {
       "cmd": "draft.restore",
-      "summary": "Restore the draft the terminal UI discarded last for this account.",
+      "summary": "Restore the draft kept by this account's last discard with keepForUndo.",
       "capabilities": [],
       "properties": {
         "draftId": {
@@ -551,13 +551,19 @@
           "default": false,
           "x-internal": true,
           "description": "Terminal UI only: drop the kept draft for good instead of restoring it."
+        },
+        "expiredOnly": {
+          "type": "boolean",
+          "default": false,
+          "x-internal": true,
+          "description": "Terminal UI only: with forget, drop it only when it is older than 7 days."
         }
       },
       "required": [],
       "notes": [
         "Local account cache operation; no provider call and no mail is sent.",
-        "The terminal UI keeps exactly one discarded draft per account until it exits (or discards another); the draft returns to Drafts with the same ID, content, recipients, threading, sender, files and Gmail link.",
-        "Refused with DiscardedDraftUnavailable when no draft is kept or draftId names another one."
+        "One draft per account is kept by draft.discard with keepForUndo (the terminal UI discards this way) until the next such discard or for 7 days; draft.list names it in data.discarded. It returns to Drafts at its place with the same ID, content, recipients, threading, sender, files and Gmail link.",
+        "Refused with DiscardedDraftUnavailable when no draft is kept (or it is older than 7 days) or draftId names another one."
       ],
       "examples": [
         {

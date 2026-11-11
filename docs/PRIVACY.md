@@ -58,7 +58,7 @@ the original plaintext source; explicit attachment saves, exports and external
 editor files also remain plaintext outputs. The vault guide explains activation,
 recovery and these storage boundaries.
 
-The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. See [cache behavior](TUI-CACHE.md). Omagma also saves account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
+The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. A draft discarded in the terminal UI (or with `keepForUndo`) stays in the same private store, out of Drafts, so `:restore-draft` can bring it back: one per account, until that account's next discard removes it; after 7 days it is no longer offered and the next terminal start removes it. See [cache behavior](TUI-CACHE.md). Omagma also saves account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
 
 The CLI returns requested mail and contacts to its caller. Treat its stdout, redirected files and agent logs as private. Local send and invitation receipts contain account/message identities and submission state; they are private too. An uncertain send is retained for review rather than automatically resubmitted.
 

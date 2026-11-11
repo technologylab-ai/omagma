@@ -75,7 +75,8 @@ fn requireReviewedDigest(request: Value, digest: []const u8) !void {
     if (j.get(request, "expectedContentDigest")) |value| {
         const expected = try j.string(value);
         if (expected.len != 64) return error.InvalidContentDigest;
-        for (expected) |byte| if (!std.ascii.isHex(byte)) return error.InvalidContentDigest;
+        // The catalogue pattern is lowercase hex, as every returned digest.
+        for (expected) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidContentDigest;
         if (!std.mem.eql(u8, expected, digest)) return error.ReviewedDraftChanged;
     }
 }
@@ -722,7 +723,13 @@ pub const Session = struct {
             for ((j.get(listed, "drafts") orelse return listed).array.items) |*row| {
                 store.requireNoQueuedSend(j.text(row.*, "id")) catch try row.object.put(a, "sendQueued", .{ .bool = true });
             }
-            return listed;
+            // A draft kept by the last discard with keepForUndo (and still
+            // within its 7 days) is named, so a client can offer draft.restore.
+            var listed_copy = listed;
+            if (store.discardedDraft(a) catch null) |slot| if (!store.discardedDraftExpired(slot)) {
+                try listed_copy.object.put(a, "discarded", try j.value(a, .{ .draftId = slot.summary.id, .subject = slot.summary.subject, .discardedAtMs = slot.discardedAtMs }));
+            };
+            return listed_copy;
         }
         if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.read")) return @import("draft_gmail_commands.zig").readResponse(a, &store, try store.draft(try j.required(req, "draftId")));
@@ -838,7 +845,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "draft.restore")) {
             const expected = j.text(req, "draftId");
             if (expected.len != 0) try @import("../bounded.zig").identifier(expected);
-            if (try j.boolean(req, "forget", false)) return j.value(a, .{ .forgotten = try store.forgetDiscardedDraft(expected) });
+            if (try j.boolean(req, "forget", false)) return j.value(a, .{ .forgotten = try store.forgetDiscardedDraft(expected, try j.boolean(req, "expiredOnly", false)) });
             return j.value(a, .{ .restored = true, .draftId = try store.restoreDiscardedDraft(expected) });
         }
         if (std.mem.eql(u8, cmd, "draft.patch")) return s.patchDraft(a, &store, req);
@@ -7394,6 +7401,74 @@ test "draft discard: keepQueuedSend refuses a queued send instead of cancelling 
     // cancelled and the draft removed.
     _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id }));
     try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "draft discard: the kept draft survives a restart, returns to its place, is named by draft.list and expires after 7 days" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/durable-discard", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const account = "personal@example.com";
+    var ids: [3][]const u8 = undefined;
+    {
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+        defer session.deinit();
+        for (&ids, [_][]const u8{ "First", "Middle", "Last" }) |*id, subject| id.* = try a.dupe(u8, j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = subject, .bodyText = "Synthetic note" } })), "id"));
+        // Lowercase hex only, as every returned digest.
+        const upper: [64]u8 = @splat('A');
+        try std.testing.expectError(error.InvalidContentDigest, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = ids[1], .expectedContentDigest = @as([]const u8, &upper), .keepForUndo = true })));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = ids[1], .keepForUndo = true }));
+        const listed = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account }));
+        try std.testing.expectEqual(@as(usize, 2), j.get(listed, "drafts").?.array.items.len);
+        try std.testing.expectEqualStrings(ids[1], j.text(j.get(listed, "discarded").?, "draftId"));
+        try std.testing.expectEqualStrings("Middle", j.text(j.get(listed, "discarded").?, "subject"));
+        // Not yet 7 days old: an expiry sweep keeps it.
+        try std.testing.expect(!j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .forget = true, .expiredOnly = true })), "forgotten").?.bool);
+    }
+    // Another process (a restart, another window) restores it without naming
+    // it, at its place in Drafts.
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const restored = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account }));
+    try std.testing.expectEqualStrings(ids[1], j.text(restored, "draftId"));
+    const listed = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account }));
+    const rows = j.get(listed, "drafts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows, ids) |row, id| try std.testing.expectEqualStrings(id, j.text(row, "id"));
+    try std.testing.expect(j.get(listed, "discarded") == null);
+    // Older than 7 days: never offered or restored, and an expiry sweep
+    // (each window start) drops it for good.
+    const Age = struct {
+        fn expire(owner: *Session, al: std.mem.Allocator, address: []const u8) !void {
+            var store = try owner.openStore(al, address, false);
+            defer store.close();
+            var slot = (try store.discardedDraft(al)).?;
+            slot.discardedAtMs -= storage.discarded_keep_ms + 60_000;
+            try store.writeDocument(&storage.discardedDocumentName(), try std.json.Stringify.valueAlloc(al, slot, .{}));
+        }
+    };
+    for ([_]bool{ true, false }) |sweep| {
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = ids[1], .keepForUndo = true }));
+        try Age.expire(session, a, account);
+        try std.testing.expect(j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "discarded") == null);
+        if (sweep) {
+            try std.testing.expect(j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .forget = true, .expiredOnly = true })), "forgotten").?.bool);
+        }
+        try std.testing.expectError(error.DiscardedDraftUnavailable, session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account })));
+        try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = ids[1] })));
+        // Recreate the middle draft for the second round.
+        if (sweep) ids[1] = try a.dupe(u8, j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Middle again", .bodyText = "Synthetic note" } })), "id"));
+    }
     try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 }
 
