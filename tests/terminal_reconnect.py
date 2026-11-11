@@ -6,15 +6,18 @@ account like Google's token endpoint (invalid_rapt) until a fixture reconnect.
 Consent runs Omagma's real loopback listener, PKCE, state and callback against
 the config's explicit `fixtureConsentPage`, a synthetic consent page written by
 this test that answers on loopback only. The configured `chrome` is a sentinel
-that must never run. No desktop windows, real accounts, Google traffic or
+that must never run. A FIFO or a directory at the fixture's reconnect marker
+stands in for a credential store that hangs or fails after Google's callback. No desktop windows, real accounts, Google traffic or
 credential stores are involved. Run under the cooperative host reservation.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import sys
 import tempfile
@@ -186,6 +189,34 @@ class Consent:
 
 def marker_exists(directory):
     return any((directory / "cache").glob("fixture-sign-in-*"))
+
+
+def marker_path(directory, account=EXPIRED):
+    """Where a fixture reconnect records itself: the test puts a FIFO (a
+    store that never finishes) or a directory (a store that fails) there."""
+    digest = hashlib.sha256(account.lower().encode()).hexdigest()[:16]
+    path = directory / "cache" / f"fixture-sign-in-{digest}"
+    # The cache directory must stay private, as Omagma creates it.
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    return path
+
+
+def until_finishing(terminal, consent, directory, store):
+    """Once this TUI has seen the refusal, make the store hang (a FIFO) or
+    fail (a directory) — before then the marker would read as reconnected —
+    and approve consent."""
+    if store == "hang":
+        os.mkfifo(marker_path(directory), 0o600)
+    else:
+        marker_path(directory).mkdir()
+    terminal.send(CTRL_O)
+    terminal.until(lambda: has(terminal, "[Reconnect · Enter]"))
+    terminal.send(ENTER)
+    consent.wait(1, terminal)
+    # A failing store may pass through "storing" faster than a screen poll.
+    if store == "hang":
+        terminal.until(lambda: has(terminal, "storing the renewed sign-in"), 10)
 
 
 def check_consent(entry):
@@ -380,6 +411,8 @@ def sizes_case(binary, root):
         lines = terminal.screen.lines()
         require(any("Enter Reconnect" in line for line in lines[-2:]), "40x24 dialog covers the footer keys")
         require("[Cancel" in terminal.text() and "]" in terminal.text().split("[Cancel", 1)[1][:16], "40x24 Cancel button clipped")
+        # Measured in cells, both full buttons fit one row at 40 columns.
+        require(any("[Reconnect · Enter]" in line and "[Cancel · Esc]" in line for line in lines), "40x24 buttons stacked though they fit")
         resize(terminal, 32, 14)
         terminal.until(lambda: "[Reconnect]" in terminal.text() and "[Cancel]" in terminal.text())
         require("j More" in terminal.text(), "32x14 dialog does not offer scrolling")
@@ -450,7 +483,142 @@ def calendar_case(binary, root):
     browser_never_ran(directory)
 
 
-CASES = {"jsonl": jsonl_case, "mail": mail_case, "commands": commands_case, "sizes": sizes_case, "calendar": calendar_case}
+def finishing_case(binary, root):
+    """After Google's callback the store never finishes (a FIFO stands in for
+    a hung credential write): Esc and Enter wait, q arms quitting, and the
+    commit's own bound ends it; the account is then checked with a refresh
+    and the truth reported, never a consent text."""
+    directory = root / "finishing"
+    config = setup(directory)
+    consent = Consent(directory)
+    terminal = launch(binary, directory, config, consent.control, EXPIRED)
+    try:
+        terminal.until(lambda: has(terminal, "Google sign-in expired · Ctrl+O Reconnect"), 20)
+        until_finishing(terminal, consent, directory, "hang")
+        for key in (ESC, ENTER, b"\t"):
+            terminal.send(key)
+            terminal.gap(.3)
+        require(has(terminal, "Reconnect Google sign-in") and has(terminal, "q twice quits anyway"), "finishing dialog closed on Esc/Enter")
+        terminal.send(b"q")
+        terminal.until(lambda: has(terminal, "q again quits anyway"))
+        require(terminal.process.poll() is None, "one q quit while storing")
+        started = time.monotonic()
+        terminal.until(lambda: has(terminal, "Reconnected work@example.com · confirmed"), 45)
+        elapsed = time.monotonic() - started
+        require(elapsed < 40, f"the commit bound did not end the hung store ({elapsed:.1f}s)")
+        for wrong in ("consent timed out", "Nothing was changed"):
+            require(not has(terminal, wrong), f"a consent text after Google's callback: {wrong}")
+        terminal.until(lambda: has(terminal, "Synthetic work thread"), 20)
+        no_secrets(terminal, consent)
+        quit_tui(terminal)
+        print(f"PASS reconnect finishing: keys wait, q arms, a hung store ends after {elapsed:.0f}s and is checked with a refresh")
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+    browser_never_ran(directory)
+
+
+def quit_case(binary, root):
+    """While storing: q twice, SIGTERM and SIGHUP each quit promptly with the
+    terminal restored, whatever the hung store does."""
+    results = []
+    for how in ("qq", signal.SIGTERM, signal.SIGHUP):
+        name = how if isinstance(how, str) else how.name
+        directory = root / f"quit-{name}"
+        config = setup(directory)
+        consent = Consent(directory)
+        terminal = launch(binary, directory, config, consent.control, EXPIRED)
+        try:
+            terminal.until(lambda: has(terminal, "Google sign-in expired · Ctrl+O Reconnect"), 20)
+            until_finishing(terminal, consent, directory, "hang")
+            started = time.monotonic()
+            if how == "qq":
+                terminal.send(b"q")
+                terminal.gap(.3)
+                terminal.send(b"q")
+            else:
+                os.kill(terminal.process.pid, how)
+            while terminal.process.poll() is None and time.monotonic() - started < 6:
+                terminal.gap(.1)
+            elapsed = time.monotonic() - started
+            require(terminal.process.poll() is not None, f"{name} did not quit while storing")
+            require(elapsed < 5, f"{name} took {elapsed:.1f}s to quit while storing")
+            require(terminal.process.returncode == 0, f"{name} exit status {terminal.process.returncode}")
+            require(termios.tcgetattr(terminal.slave) == terminal.settings, f"{name} did not restore the terminal")
+            results.append(f"{name} {elapsed:.1f}s")
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+    print("PASS reconnect quit while storing: " + ", ".join(results) + ", terminal restored")
+
+
+def store_failure_case(binary, root):
+    """The durable write fails after Google's callback (the marker path is a
+    directory): the dialog never says nothing changed; it checks the account
+    with a refresh and reports that the renewed sign-in works."""
+    directory = root / "store-failure"
+    config = setup(directory)
+    consent = Consent(directory)
+    terminal = launch(binary, directory, config, consent.control, EXPIRED)
+    try:
+        terminal.until(lambda: has(terminal, "Google sign-in expired · Ctrl+O Reconnect"), 20)
+        until_finishing(terminal, consent, directory, "fail")
+        terminal.until(lambda: has(terminal, "Reconnected work@example.com · confirmed"), 20)
+        for wrong in ("consent timed out", "Nothing was changed", "Not reconnected"):
+            require(not has(terminal, wrong), f"store failure reported as: {wrong}")
+        terminal.until(lambda: has(terminal, "Synthetic work thread"), 20)
+        quit_tui(terminal)
+        print("PASS reconnect store failure: checked with a refresh, reported as confirmed")
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
+def stale_case(binary, root):
+    """Another process reconnects the account while this TUI still holds the
+    refusal: the dialog no longer repeats Google's old reason."""
+    directory = root / "stale"
+    config = setup(directory)
+    consent = Consent(directory)
+    terminal = launch(binary, directory, config, consent.control, EXPIRED)
+    try:
+        terminal.until(lambda: has(terminal, "Google sign-in expired · Ctrl+O Reconnect"), 20)
+        previous = os.environ.get("OMAGMA_TEST_CONSENT")
+        os.environ["OMAGMA_TEST_CONSENT"] = str(consent.control)
+        try:
+            with Client(binary, directory, scenario="sign-in-expired", extra=("--config", str(config))) as client:
+                status = client.request("auth.status", EXPIRED)
+                renewed = client.request("auth.authorize", EXPIRED, capabilities=status["grant"]["capabilities"], reconnect=True, expectedGrantId=status["grant"]["grantId"])
+                require(renewed["reconnected"] is True, "the other process did not reconnect")
+        finally:
+            if previous is None:
+                os.environ.pop("OMAGMA_TEST_CONSENT", None)
+            else:
+                os.environ["OMAGMA_TEST_CONSENT"] = previous
+        terminal.send(CTRL_O)
+        terminal.until(lambda: has(terminal, "[Reconnect · Enter]"))
+        words = dialog(terminal)
+        require("re-authentication policy" not in words and "invalid_rapt" not in words, "an outdated refusal was repeated")
+        require("another Omagma window" in words, "the vanished reason was not explained")
+        terminal.send(ESC)
+        terminal.until(lambda: not has(terminal, "Reconnect Google sign-in"))
+        quit_tui(terminal)
+        print("PASS reconnect stale: another process's reconnect outdates this TUI's refusal")
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
+CASES = {"jsonl": jsonl_case, "mail": mail_case, "commands": commands_case, "sizes": sizes_case, "calendar": calendar_case,
+         "finishing": finishing_case, "quit": quit_case, "store-failure": store_failure_case, "stale": stale_case}
 
 
 def main():

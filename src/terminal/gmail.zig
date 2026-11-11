@@ -82,6 +82,8 @@ const Network = struct {
     /// The terminal grant whose credential this is; empty for the bar's
     /// read-only credential, whose refusals are not terminal diagnostics.
     diagnostic_grant: []const u8 = "",
+    /// Unix milliseconds at which refresh_token was read from its store.
+    diagnostic_read_at: i64 = 0,
     fn invalidate(self: *Network) void {
         if (self.cache) |cache| if (self.cache_lease) |lease| cache.invalidate(lease);
         self.cache_lease = null;
@@ -96,12 +98,14 @@ const Network = struct {
         const token = oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes) catch |err| {
             // Keep Google's sanitized reason for reconnect guidance/status.
             const refusal = oauth.takeTokenError();
-            if (err == error.InvalidGrant and self.diagnostic_grant.len != 0) auth_diagnostic.recordFailure(self.verified_account, self.diagnostic_grant, refusal, std.Io.Timestamp.now(self.client.io, .real).toMilliseconds());
+            // Timed by when this credential was read: a request that still
+            // used a since-replaced token never outdates the reconnect.
+            if (err == error.InvalidGrant and self.diagnostic_grant.len != 0) auth_diagnostic.recordFailure(self.verified_account, self.diagnostic_grant, refusal, self.diagnostic_read_at);
             return err;
         };
         const profile = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, token.access_token, null, self.response);
         try oauth.verifyProfile(profile.status, profile.body, self.verified_account);
-        if (self.diagnostic_grant.len != 0) auth_diagnostic.recordSuccess(self.verified_account, self.diagnostic_grant);
+        if (self.diagnostic_grant.len != 0) auth_diagnostic.recordSuccess(self.verified_account, self.diagnostic_grant, std.Io.Timestamp.now(self.client.io, .real).toMilliseconds());
         if (self.cache) |cache| _ = try cache.publishVerified(self.cache_lease.?, self.verified_account, token.access_token, started, token.expires_in, sessionNow(self.client.io));
         self.access = token.access_token;
     }
@@ -329,6 +333,7 @@ pub const NetworkSession = struct {
         errdefer buffers.deinit(buffer_allocator);
         const refresh = buffers.refresh;
         const access = buffers.access;
+        const read_at = std.Io.Timestamp.now(io, .real).toMilliseconds();
         const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, config.credentials(), account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, config.credentials(), account, self.desktop.client_id.slice(), refresh) else try keyring.lookup(io, config.credentials(), account, self.desktop.client_id.slice(), refresh)) orelse return error.NotConnected;
         // One absolute attachment deadline covers token refresh, the profile
         // check, the streamed download and its single 401 retry. Every other
@@ -348,7 +353,7 @@ pub const NetworkSession = struct {
         self.scopes = scopes;
         self.capabilities = capabilities;
         self.buffer_allocator = buffer_allocator;
-        self.network = .{ .client = &self.client, .access = "", .access_storage = access, .desktop = &self.desktop, .refresh_token = refresh_token, .scopes = scopes, .response = buffers.response, .verified_account = self.verified_account, .cache = config.runtime_access_cache, .cache_index = index, .diagnostic_grant = if (grant) |g| (if (bar_only) "" else g.grantId) else "" };
+        self.network = .{ .client = &self.client, .access = "", .access_storage = access, .desktop = &self.desktop, .refresh_token = refresh_token, .scopes = scopes, .response = buffers.response, .verified_account = self.verified_account, .cache = config.runtime_access_cache, .cache_index = index, .diagnostic_grant = if (grant) |g| (if (bar_only) "" else g.grantId) else "", .diagnostic_read_at = read_at };
         if (config.runtime_access_cache) |cache| {
             var location_buffer: [32]u8 = undefined;
             const location = if (config.credential_store == .vault) try std.fmt.bufPrint(&location_buffer, "vault:{x}", .{@intFromPtr((config.runtime_provider orelse return error.VaultLocked).context)}) else config.credential_directory.slice();

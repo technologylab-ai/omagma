@@ -79,6 +79,16 @@ pub fn refuse(io: std.Io, a: std.mem.Allocator, account: []const u8) anyerror {
     return error.InvalidGrant;
 }
 
+/// Every synthetic provider read: refused while expired, otherwise a
+/// verified success of the synthetic grant, recorded exactly as a real
+/// refresh records one, so fixtures and production report alike.
+pub fn check(io: std.Io, a: std.mem.Allocator, options: t.Options, config: *const Config, cache_root: []const u8, account: []const u8) !void {
+    if (try expired(io, a, options, config, cache_root, account)) return refuse(io, a, account);
+    if (!active(options)) return;
+    const grant = grantId(a) catch return;
+    auth_diagnostic.recordSuccess(account, &grant, std.Io.Timestamp.now(io, .real).toMilliseconds());
+}
+
 pub fn markReconnected(io: std.Io, a: std.mem.Allocator, options: t.Options, cache_root: []const u8, account: []const u8) !void {
     const wanted = try key(account);
     if (!remembered(account)) {
@@ -147,4 +157,28 @@ test "reconnect fixture sign-in: without --cache-dir the reconnect stays in memo
     try markReconnected(io, a, options, root, "work@example.com");
     try std.testing.expect(!try expired(io, a, options, &config, root, "work@example.com"));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, root, .{}));
+}
+
+test "reconnect fixture sign-in: provider reads record a refusal while expired and a verified success after another process reconnected" {
+    reset();
+    defer reset();
+    defer auth_diagnostic.reset();
+    auth_diagnostic.reset();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cache", .{temporary.sub_path});
+    var config: Config = undefined;
+    try config.defaults("/nonexistent/synthetic-home");
+    const options: t.Options = .{ .fixtures = true, .fixture_scenario = scenario, .cache_dir = root };
+    try std.testing.expectError(error.InvalidGrant, check(io, a, options, &config, root, "work@example.com"));
+    try std.testing.expectEqual(auth_diagnostic.Observed.failed, auth_diagnostic.observed("work@example.com").observed);
+    // Another fixture process records the reconnect; this one only sees the marker.
+    try markReconnected(io, a, options, root, "work@example.com");
+    reset();
+    try check(io, a, options, &config, root, "work@example.com");
+    try std.testing.expectEqual(auth_diagnostic.Observed.ok, auth_diagnostic.observed("work@example.com").observed);
 }

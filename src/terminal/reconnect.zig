@@ -11,9 +11,12 @@ const std = @import("std");
 const b = @import("../bounded.zig");
 const Value = std.json.Value;
 
-pub const Phase = enum { closed, checking, ready, waiting, succeeded, failed };
+pub const Phase = enum { closed, checking, ready, waiting, verifying, succeeded, failed };
 pub const max_capabilities = 16;
 pub const consent_minutes = 3;
+/// After Google's callback the backend finishes within its own bound; the
+/// dialog stops promising an outcome after this long.
+pub const finishing_seconds = 30;
 
 pub const State = struct {
     phase: Phase = .closed,
@@ -37,6 +40,19 @@ pub const State = struct {
     /// Google's callback arrived; the worker is storing the result and can
     /// no longer be cancelled (the backend reports the authorizing phase).
     finishing: bool = false,
+    /// Finishing took longer than finishing_seconds: the outcome is unknown
+    /// and the dialog may be closed while the worker completes.
+    unconfirmed: bool = false,
+    /// q or Ctrl+C was pressed once while finishing; the next one quits.
+    quit_armed: bool = false,
+    /// The verification refresh has been started.
+    verify_started: bool = false,
+    /// The error behind an unconfirmed store, or the verification refresh's.
+    detail: b.Text(64) = .{},
+    /// This session last saw Google refuse the account (InvalidGrant).
+    seen_refused: bool = false,
+    /// A one-line notice inside the dialog (visible over mail and Calendar).
+    notice: b.Text(96) = .{},
     /// First body line shown when the dialog is taller than the terminal.
     scroll: usize = 0,
 
@@ -86,8 +102,26 @@ pub const State = struct {
         self.failure.set(clip(code, 64)) catch {};
         self.phase = .failed;
         self.finishing = false;
+        self.unconfirmed = false;
+        self.quit_armed = false;
         self.scroll = 0;
         self.focus = 0;
+    }
+    /// Google approved but storing could not be confirmed: check the account
+    /// with a refresh before saying anything about the outcome.
+    pub fn verify(self: *State, cause: []const u8) void {
+        self.detail.set(clip(cause, 64)) catch {};
+        self.phase = .verifying;
+        self.finishing = false;
+        self.unconfirmed = false;
+        self.quit_armed = false;
+        self.verify_started = false;
+        self.scroll = 0;
+        self.focus = 1;
+    }
+    /// The finishing bound passed without a result.
+    pub fn storeUnconfirmed(self: *State) void {
+        if (self.finishing) self.unconfirmed = true;
     }
     /// Enter on the primary action: only a known grant can be renewed.
     pub fn canStart(self: *const State) bool {
@@ -96,8 +130,12 @@ pub const State = struct {
     pub fn begin(self: *State) !void {
         if (!self.canStart()) return error.ReconnectUnavailable;
         self.failure = .{};
+        self.detail = .{};
+        self.notice = .{};
         self.phase = .waiting;
         self.finishing = false;
+        self.unconfirmed = false;
+        self.quit_armed = false;
         self.scroll = 0;
         self.focus = 1;
     }
@@ -108,6 +146,11 @@ pub const State = struct {
     }
     pub fn cancellable(self: *const State) bool {
         return self.phase != .closed and !self.finishing;
+    }
+    /// Esc may close the dialog: always, except while finishing with the
+    /// outcome still promised.
+    pub fn closable(self: *const State) bool {
+        return self.phase != .closed and (!self.finishing or self.unconfirmed);
     }
     /// The worker's auth.authorize reply. Success must name exactly the
     /// requested capabilities; anything else is reported, never assumed.
@@ -148,21 +191,26 @@ pub const State = struct {
             else => "",
         };
     }
-    /// Empty while finishing: nothing may interrupt storing the result.
+    /// Empty while finishing: nothing may interrupt storing the result,
+    /// until the outcome is no longer promised.
     pub fn secondaryLabel(self: *const State, compact: bool) []const u8 {
-        if (self.finishing) return "";
+        if (self.finishing and !self.unconfirmed) return "";
+        if (self.finishing) return if (compact) "[Close]" else "[Close · Esc]";
         return switch (self.phase) {
             .waiting, .checking, .ready => if (compact) "[Cancel]" else "[Cancel · Esc]",
             else => if (compact) "[Close]" else "[Close · Esc]",
         };
     }
-    pub fn hints(self: *const State) []const u8 {
-        if (self.finishing) return "Google approved · storing the renewed sign-in… · please wait";
+    /// The footer; j/k is named only when the text actually scrolls.
+    pub fn hints(self: *const State, scrollable: bool) []const u8 {
+        if (self.finishing and self.unconfirmed) return "Storing has not finished · outcome unknown · Esc Close";
+        if (self.finishing) return if (self.quit_armed) "Storing the renewed sign-in… · q again quits anyway" else "Google approved · storing the renewed sign-in… · q twice quits anyway";
         return switch (self.phase) {
             .checking => "Reading this account's sign-in… · Esc Cancel",
-            .ready => "Enter Reconnect · Tab Choose · j/k Scroll · Esc Cancel",
+            .ready => if (scrollable) "Enter Reconnect · Tab Choose · j/k Scroll · Esc Cancel" else "Enter Reconnect · Tab Choose · Esc Cancel",
             .waiting => "Waiting for Google consent in Chrome · Esc Cancel",
-            .failed => if (self.canStart()) "Enter Try again · Tab Choose · Esc Close" else "Enter Close · Esc Close",
+            .verifying => "Checking the renewed sign-in with a refresh… · Esc Close",
+            .failed => if (self.canStart()) (if (scrollable) "Enter Try again · Tab Choose · j/k Scroll · Esc Close" else "Enter Try again · Tab Choose · Esc Close") else (if (scrollable) "Enter Close · j/k Scroll · Esc Close" else "Enter Close · Esc Close"),
             else => "",
         };
     }
@@ -173,13 +221,14 @@ pub const State = struct {
         if (std.mem.eql(u8, kind, "reauthenticationRequired")) return "Your Google Workspace requires signing in again (re-authentication policy)";
         if (std.mem.eql(u8, kind, "expiredOrRevoked")) return "The stored sign-in expired or was revoked (revoked access, a password change, or a Testing-mode app's 7-day limit)";
         if (kind.len > 0) return "Google refused the stored sign-in";
+        if (self.seen_refused) return "No refusal of this sign-in is recorded any more; it may have been renewed in another Omagma window · Ctrl+R in the mailbox checks it · reconnecting renews it anyway";
         return "No refusal of this sign-in is recorded · reconnecting renews it anyway";
     }
 };
 
 /// Failures a person can retry by pressing Enter again.
 pub fn retryable(code: []const u8) bool {
-    for ([_][]const u8{ "AuthorizationDenied", "AuthorizationFailed", "WrongAccount", "Timeout", "Canceled", "UnexpectedScope", "InvalidGrant", "TokenExchangeFailed", "CallbackConnectionsExhausted", "TransientFailure", "ConnectionRefused", "NetworkUnreachable", "ConnectionTimedOut", "MissingRefreshToken", "BackendStopped", "VaultOperationCanceled", "LaunchBusy" }) |item| if (std.mem.eql(u8, code, item)) return true;
+    for ([_][]const u8{ "AuthorizationDenied", "AuthorizationFailed", "WrongAccount", "Timeout", "Canceled", "UnexpectedScope", "InvalidGrant", "TokenExchangeFailed", "NotRenewed", "RenewalUnconfirmed", "CallbackConnectionsExhausted", "TransientFailure", "ConnectionRefused", "NetworkUnreachable", "ConnectionTimedOut", "MissingRefreshToken", "BackendStopped", "VaultOperationCanceled", "LaunchBusy" }) |item| if (std.mem.eql(u8, code, item)) return true;
     return false;
 }
 
@@ -190,6 +239,9 @@ pub fn failureText(code: []const u8) []const u8 {
         .{ .code = "AuthorizationDenied", .text = "You declined access in Google. Nothing was changed." },
         .{ .code = "WrongAccount", .text = "Google signed in a different account. Nothing was stored; choose this account in Chrome." },
         .{ .code = "Timeout", .text = "Google consent timed out after 3 minutes. Nothing was changed." },
+        .{ .code = "TokenExchangeFailed", .text = "Google approved, but exchanging the approval for a sign-in failed. Nothing was stored; try again." },
+        .{ .code = "NotRenewed", .text = "Google approved, but the renewed sign-in was not stored: Google still refuses this account's stored sign-in. Try again." },
+        .{ .code = "RenewalUnconfirmed", .text = "Google approved, but Omagma could not confirm that the renewed sign-in was stored: the check below failed. Check with omagma terminal-auth status, then try again if needed." },
         .{ .code = "Canceled", .text = "Reconnect canceled. Nothing was changed." },
         .{ .code = "UnexpectedScope", .text = "Google granted different permissions than this account had (a box was unchecked?). Nothing was stored; allow every requested permission." },
         .{ .code = "ReconnectRequiresGrant", .text = "This account has no recorded terminal grant to renew. Set it up with omagma terminal-auth authorize." },
@@ -205,7 +257,7 @@ pub fn failureText(code: []const u8) []const u8 {
         .{ .code = "KeyringUnavailable", .text = "The selected credential store is unavailable in this session. Nothing was changed." },
         .{ .code = "KeyringLocked", .text = "The selected credential store is locked. Unlock it and try again." },
         .{ .code = "FixtureOnly", .text = "Synthetic fixtures do not authorize accounts." },
-        .{ .code = "FixtureConsentPageRequired", .text = "Synthetic fixtures never open the installed browser; configure a synthetic consent page as chrome." },
+        .{ .code = "FixtureConsentPageRequired", .text = "Synthetic fixtures never open a browser; set fixtureConsentPage in the fixture config to a synthetic consent page." },
         .{ .code = "UnknownOutcome", .text = "The outcome is unknown. Check terminal-auth status before trying again." },
     };
     for (table) |entry| if (std.mem.eql(u8, entry.code, code)) return entry.text;
@@ -252,7 +304,7 @@ test "reconnect state: status, explicit start, success keeps the recorded capabi
     try std.testing.expectEqual(@as(usize, 3), request.len);
     try state.begin();
     try std.testing.expectEqual(Phase.waiting, state.phase);
-    try std.testing.expectEqualStrings("Waiting for Google consent in Chrome · Esc Cancel", state.hints());
+    try std.testing.expectEqualStrings("Waiting for Google consent in Chrome · Esc Cancel", state.hints(false));
     try state.finished(try parse(a, "{\"account\":\"work@example.com\",\"authorized\":true,\"reconnected\":true,\"capabilities\":[\"calendar-read\",\"mail-read\",\"mail-send\"]}"));
     try std.testing.expectEqual(Phase.succeeded, state.phase);
 }
@@ -331,7 +383,46 @@ test "reconnect state: after Google's callback the dialog cannot be cancelled an
     state.callbackArrived();
     try std.testing.expect(!state.cancellable());
     try std.testing.expectEqualStrings("", state.secondaryLabel(false));
-    try std.testing.expect(std.mem.indexOf(u8, state.hints(), "Esc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, state.hints(false), "Esc") == null);
     try state.finished(try parse(a, "{\"account\":\"work@example.com\",\"authorized\":true,\"capabilities\":[\"mail-read\"]}"));
     try std.testing.expectEqual(Phase.succeeded, state.phase);
+}
+
+test "reconnect state: an unknown store outcome is checked, a finishing bound makes it closable, and consent texts are never reused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state: State = .{};
+    try state.open(1, "work@example.com", false);
+    try state.statusLoaded(try parse(a, "{\"account\":\"work@example.com\",\"grant\":{\"grantId\":\"" ++ grant_id ++ "\",\"capabilities\":[\"mail-read\"]},\"lastRefreshError\":null}"));
+    try std.testing.expectEqualStrings("Enter Reconnect · Tab Choose · Esc Cancel", state.hints(false));
+    try std.testing.expect(std.mem.indexOf(u8, state.hints(true), "j/k Scroll") != null);
+    try state.begin();
+    state.callbackArrived();
+    try std.testing.expect(!state.closable());
+    try std.testing.expect(std.mem.indexOf(u8, state.hints(false), "q twice quits anyway") != null);
+    state.quit_armed = true;
+    try std.testing.expect(std.mem.indexOf(u8, state.hints(false), "q again quits anyway") != null);
+    // Past the bound: unknown, closable, still not cancellable.
+    state.storeUnconfirmed();
+    try std.testing.expect(state.closable() and !state.cancellable());
+    try std.testing.expectEqualStrings("[Close · Esc]", state.secondaryLabel(false));
+    state.verify("Timeout");
+    try std.testing.expectEqual(Phase.verifying, state.phase);
+    try std.testing.expect(state.closable() and !state.finishing and !state.quit_armed);
+    try std.testing.expectEqualStrings("", state.primaryLabel(false));
+    try std.testing.expectEqualStrings("Checking the renewed sign-in with a refresh… · Esc Close", state.hints(false));
+    for ([_][]const u8{ "TokenExchangeFailed", "NotRenewed", "RenewalUnconfirmed" }) |code| {
+        try std.testing.expect(retryable(code));
+        try std.testing.expect(std.mem.startsWith(u8, failureText(code), "Google approved, but"));
+        try std.testing.expect(std.mem.indexOf(u8, failureText(code), "consent timed out") == null);
+        try std.testing.expect(std.mem.indexOf(u8, failureText(code), "Nothing was changed") == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, failureText("FixtureConsentPageRequired"), "as chrome") == null);
+    try std.testing.expect(std.mem.indexOf(u8, failureText("FixtureConsentPageRequired"), "fixtureConsentPage") != null);
+    // A reason that disappeared is explained, not hidden.
+    var renewed: State = .{};
+    try renewed.open(1, "work@example.com", false);
+    renewed.seen_refused = true;
+    try std.testing.expect(std.mem.indexOf(u8, renewed.reasonText(), "another Omagma window") != null);
 }

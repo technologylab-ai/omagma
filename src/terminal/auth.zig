@@ -191,16 +191,21 @@ fn requestCapabilities(a: std.mem.Allocator, request: j.Value) ![]const []const 
 
 /// Reconsent keeps this account's terminal registration unless explicitly
 /// replaced. Falling back to the bar registration would broaden its grant.
-fn authorizationClient(request: j.Value, current: ?*const Grant, configured: []const u8) ![]const u8 {
-    const selected = if (j.get(request, "clientFile")) |value| try j.string(value) else if (current) |grant| grant.clientFile else configured;
+/// A reconnect identifies the registration by its client ID (checked by the
+/// caller), so any spelling of the same file is accepted.
+fn authorizationClient(request: j.Value, current: ?*const Grant, configured: []const u8, reconnect: bool) ![]const u8 {
+    var selected = if (j.get(request, "clientFile")) |value| try j.string(value) else if (current) |grant| grant.clientFile else configured;
+    if (reconnect) while (selected.len > 1 and selected[selected.len - 1] == '/') {
+        selected = selected[0 .. selected.len - 1];
+    };
     if (selected.len == 0) return error.OAuthClientRequired;
     return selected;
 }
 
 /// Reconnect renews this account's existing grant and nothing else: the
 /// request must name exactly the recorded capability set (and, when given,
-/// the recorded grant identity and registration), so consent can neither
-/// broaden nor narrow it, nor move it to another OAuth registration.
+/// the recorded grant identity), so consent can neither broaden nor narrow
+/// it. The registration is compared by client ID once its file is read.
 fn authorizationCapabilities(a: std.mem.Allocator, request: j.Value, current: ?*const Grant) ![]const []const u8 {
     const requested = try requestCapabilities(a, request);
     const expected = if (j.get(request, "expectedGrantId")) |value| try j.string(value) else null;
@@ -212,7 +217,6 @@ fn authorizationCapabilities(a: std.mem.Allocator, request: j.Value, current: ?*
     const grant = current orelse return error.ReconnectRequiresGrant;
     if (!grant.enabled) return error.GrantDisabled;
     if (expected) |id| if (!std.mem.eql(u8, id, grant.grantId)) return error.GrantChanged;
-    if (j.get(request, "clientFile")) |value| if (!std.mem.eql(u8, try j.string(value), grant.clientFile)) return error.ReconnectRegistrationChanged;
     if (requested.len != grant.capabilities.len) return error.ReconnectCapabilitiesChanged;
     for (requested) |capability| if (!grant.permits(capability)) return error.ReconnectCapabilitiesChanged;
     return grant.capabilities;
@@ -236,7 +240,38 @@ const CommitProgress = struct {
         const self: *CommitProgress = @ptrCast(@alignCast(context));
         self.sink.report(.{ .phase = .authorizing, .completed = 1, .total = 1 });
     }
+    /// Wire a commit to the caller: its progress and, for an in-process
+    /// caller, the cancel/commit gate.
+    fn attach(self: *CommitProgress, commit: *oauth.Commit, sink: ?types.ProgressSink) void {
+        const value = sink orelse return;
+        self.* = .{ .sink = value };
+        commit.notify = .{ .context = self, .callFn = notify };
+        commit.gate = value.commit_gate;
+    }
 };
+
+/// The durable grant-registry (or vault) write that completes a terminal
+/// authorization, run as one bounded commit step.
+const GrantWrite = struct {
+    io: std.Io,
+    a: std.mem.Allocator,
+    config: *const Config,
+    path: []const u8,
+    registry: Registry,
+    account: []const u8,
+    client_id: []const u8,
+    identity: []const u8,
+    captured: []const u8,
+    fn run(self: *const GrantWrite) anyerror!void {
+        if (self.config.credential_store == .vault) {
+            const bytes = try j.encodeAlloc(self.a, self.registry, .{});
+            try (self.config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = self.account }, .value = null }, .{ .kind = .grants, .value = bytes }, .{ .kind = .terminal_token, .key = .{ .account = self.account, .client = self.client_id, .grant = self.identity }, .value = self.captured } });
+        } else try save(self.io, self.a, self.path, self.registry);
+    }
+};
+fn nowMs(io: std.Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+}
 
 pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const std.process.Environ.Map, request: j.Value) !j.Value {
     return runWithProgress(io, a, config, env, request, null);
@@ -265,17 +300,26 @@ pub fn runWithProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, 
         } else try save(io, a, path, registry);
         // No grant, no refusal to describe: memory and sidecar alike.
         auth_diagnostic.forget(account);
-        if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.clearPersisted(io, a, sidecar, account) catch {};
+        if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.removePersisted(io, a, sidecar, account) catch {};
         return j.value(a, .{ .account = account, .cleared = true, .namespace = keyring.terminal_service });
     }
     if (!std.mem.eql(u8, command, "auth.authorize")) return error.UnsupportedCommand;
     const reconnect = try j.boolean(request, "reconnect", false);
     const caps = try authorizationCapabilities(a, request, current);
     const scopes = try scopesFor(a, caps);
-    const client_file = try authorizationClient(request, current, config.client_file.slice());
+    const client_file = try authorizationClient(request, current, config.client_file.slice(), reconnect);
     var desktop: oauth.DesktopClient = .{};
     defer desktop.wipe();
     try oauth.loadDesktopWithSettings(io, client_file, &desktop, config.credentials());
+    if (reconnect) {
+        // The registration, not its path: a file replaced at the recorded
+        // path (or another file) with a different client ID is refused here,
+        // before any consent.
+        if (!std.mem.eql(u8, desktop.client_id.slice(), current.?.clientId)) return error.ReconnectRegistrationChanged;
+        // Bring this process's memory in line with other processes (a
+        // refusal they have since outdated is dropped) before consent.
+        _ = auth_diagnostic.status(io, a, try diagnosticSidecar(a, config, path), account, current.?.grantId) catch null;
+    }
     // A new scope grant on the bar's OAuth client can change its refresh-token
     // scope response. Require a distinct Desktop client for broader access.
     if (scopes.len != 1 or !std.mem.eql(u8, scopes[0], oauth.readonly_scope)) {
@@ -289,31 +333,29 @@ pub fn runWithProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, 
     var captured: b.Text(@import("../limits.zig").secret) = .{};
     defer captured.wipe();
     const identity = grantIdentity(scopes);
-    // Consent waits at most auth_seconds; every later step has its own
-    // deadline. From Google's callback until the registry/vault commit below,
-    // the work is uncancellable so a stored credential is never reported as
-    // cancelled, timed out or unchanged.
+    // Consent waits at most auth_seconds. From Google's callback until the
+    // registry/vault write below, the work is not cancellable by the caller
+    // but shares one bound (oauth.commit_seconds), and a failure says whether
+    // anything may have been stored: TokenExchangeFailed (nothing stored) or
+    // SignInStoreUnconfirmed (check before trying again).
     var progress: CommitProgress = undefined;
     var commit: oauth.Commit = .{};
-    if (sink) |value| {
-        progress = .{ .sink = value };
-        commit.notify = .{ .context = &progress, .callFn = CommitProgress.notify };
-    }
+    progress.attach(&commit, sink);
     defer commit.end(io);
-    try oauth.authorizeScoped(io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, .{ .grant_id = &identity, .capture = if (config.credential_store == .vault) &captured else null, .commit = &commit }, config.credentials());
     const grant: Grant = .{ .account = try a.dupe(u8, account), .clientFile = try a.dupe(u8, client_file), .clientId = try a.dupe(u8, desktop.client_id.slice()), .grantId = try a.dupe(u8, &identity), .capabilities = caps, .scopes = scopes };
     var accounts: std.ArrayList(Grant) = .empty;
     for (registry.accounts) |old| if (!std.mem.eql(u8, old.account, account)) try accounts.append(a, old);
     try accounts.append(a, grant);
     if (accounts.items.len > 3) return error.InvalidGrantRegistry;
     registry.accounts = accounts.items;
-    if (config.credential_store == .vault) {
-        const bytes = try j.encodeAlloc(a, registry, .{});
-        try (config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = account }, .value = null }, .{ .kind = .grants, .value = bytes }, .{ .kind = .terminal_token, .key = .{ .account = account, .client = desktop.client_id.slice(), .grant = &identity }, .value = captured.slice() } });
-    } else try save(io, a, path, registry);
-    // The verified credential is stored; an obsolete refusal must not linger.
-    auth_diagnostic.recordSuccess(account, &identity);
-    if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.clearPersisted(io, a, sidecar, account) catch {};
+    try oauth.authorizeScoped(io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, .{ .grant_id = &identity, .capture = if (config.credential_store == .vault) &captured else null, .commit = &commit }, config.credentials());
+    const write: GrantWrite = .{ .io = io, .a = a, .config = config, .path = path, .registry = registry, .account = account, .client_id = desktop.client_id.slice(), .identity = &identity, .captured = captured.slice() };
+    commit.store();
+    try commit.step(io, GrantWrite.run, .{&write});
+    // The verified credential is stored; an obsolete refusal must not linger
+    // here or in any other process.
+    auth_diagnostic.recordSuccess(account, &identity, nowMs(io));
+    if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.markOk(io, a, sidecar, account, true) catch {};
     return j.value(a, .{ .account = account, .authorized = true, .reconnected = reconnect, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
 }
 
@@ -333,23 +375,26 @@ pub fn runFixture(io: std.Io, a: std.mem.Allocator, config: *const Config, optio
     const identity = grantIdentity(scopes);
     const grant: Grant = .{ .account = account, .clientFile = "fixture", .clientId = oauth.fixture_client_id, .grantId = &identity, .capabilities = &fixture_auth.capabilities, .scopes = scopes };
     if (std.mem.eql(u8, command, "auth.status")) {
+        // A reconnect another fixture process recorded outdates this
+        // process's refusal, as a known-good time does in production.
+        if (!try fixture_auth.expired(io, a, options, config, cache_root, account)) auth_diagnostic.recordSuccess(account, &identity, nowMs(io));
         const last = try auth_diagnostic.status(io, a, null, account, &identity);
         return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = true, .fixture = true, .grant = grant, .credentialStore = "fixture", .credentialDirectory = "", .lastRefreshError = try lastRefreshValue(a, last) });
     }
     if (!std.mem.eql(u8, command, "auth.authorize")) return error.FixtureOnly;
     const reconnect = try j.boolean(request, "reconnect", false);
     const caps = try authorizationCapabilities(a, request, &grant);
+    // The synthetic registration has no file; only its own name is accepted.
+    if (j.get(request, "clientFile")) |value| if (reconnect and !std.mem.eql(u8, try j.string(value), grant.clientFile)) return error.ReconnectRegistrationChanged;
     if (config.fixture_consent_page.len == 0) return error.FixtureConsentPageRequired;
     var progress: CommitProgress = undefined;
     var commit: oauth.Commit = .{};
-    if (sink) |value| {
-        progress = .{ .sink = value };
-        commit.notify = .{ .context = &progress, .callFn = CommitProgress.notify };
-    }
+    progress.attach(&commit, sink);
     defer commit.end(io);
     try oauth.authorizeFixture(io, account, config.accounts[index].profile.slice(), config.fixture_consent_page.slice(), try scopesFor(a, caps), platform.seconds(@import("../limits.zig").auth_seconds), &commit);
-    try fixture_auth.markReconnected(io, a, options, cache_root, account);
-    auth_diagnostic.recordSuccess(account, &identity);
+    commit.store();
+    try commit.step(io, fixture_auth.markReconnected, .{ io, a, options, cache_root, account });
+    auth_diagnostic.recordSuccess(account, &identity, nowMs(io));
     return j.value(a, .{ .account = account, .authorized = true, .reconnected = reconnect, .fixture = true, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
 }
 
@@ -436,12 +481,12 @@ test "attachment delivery: reconsent retains the existing terminal registration 
     const a = arena.allocator();
     const grant: Grant = .{ .account = "self@example.test", .clientFile = "existing-terminal-registration", .clientId = "synthetic.apps.googleusercontent.com", .grantId = "synthetic", .capabilities = &.{"mail-read"}, .scopes = &.{oauth.readonly_scope} };
     const request = j.object(a);
-    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, "bar-registration"));
-    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, ""));
+    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, "bar-registration", false));
+    try std.testing.expectEqualStrings("existing-terminal-registration", try authorizationClient(request, &grant, "", false));
     const explicit = try j.value(a, .{ .clientFile = "replacement-terminal-registration" });
-    try std.testing.expectEqualStrings("replacement-terminal-registration", try authorizationClient(explicit, &grant, "bar-registration"));
-    try std.testing.expectEqualStrings("bar-registration", try authorizationClient(request, null, "bar-registration"));
-    try std.testing.expectError(error.OAuthClientRequired, authorizationClient(request, null, ""));
+    try std.testing.expectEqualStrings("replacement-terminal-registration", try authorizationClient(explicit, &grant, "bar-registration", false));
+    try std.testing.expectEqualStrings("bar-registration", try authorizationClient(request, null, "bar-registration", false));
+    try std.testing.expectError(error.OAuthClientRequired, authorizationClient(request, null, "", false));
 }
 
 test "attachment delivery: reconsent via a persisted terminal registration cannot broaden the bar client" {

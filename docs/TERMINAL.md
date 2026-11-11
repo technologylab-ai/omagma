@@ -1134,12 +1134,21 @@ Cancel`. Approve as that account. On success the dialog closes, the new
 credential is stored in the selected credential store, and the account's mail
 (and, from Calendar, its calendars) refresh in the same TUI.
 
-Esc cancels the wait and closes the local callback listener. Once Google has
-answered, the dialog says `Google approved · storing the renewed sign-in…`
-without a Cancel button and closes when the renewed sign-in is stored.
-Declining in Google, signing in as another Google account, unchecking a requested
+Esc cancels the wait and closes the local callback listener. Declining in
+Google, signing in as another Google account, unchecking a requested
 permission, or three minutes without an answer store nothing; the dialog says
-which and offers **Try again** (another explicit consent). Reconnect never
+which and offers **Try again** (another explicit consent).
+
+Once Google has answered, the dialog says `Google approved · storing the
+renewed sign-in…` without a Cancel button; Esc and Enter wait, and **q** twice
+quits anyway (the outcome is then unknown and Omagma says so on exit). A
+failure before anything was stored is reported with **Try again**; a store that
+began but could not be confirmed is checked with a refresh of that account
+before the dialog reports anything. After 30 seconds without a result the
+dialog says the outcome is unknown and Esc closes it; the result appears on the
+status line when it arrives. Below the smallest layout the screen says
+`q quits`: q quits (cancelling a waiting consent first) and Esc cancels the
+hidden dialog. Reconnect never
 broadens or narrows access; use `terminal-auth authorize` to change
 permissions. Authorization codes, PKCE verifiers and tokens never appear on
 screen, in status text, in logs or on a command line. As with

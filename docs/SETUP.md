@@ -294,17 +294,27 @@ reason and the permissions that will be kept. Nothing happens until you press
 configured Chrome profile — sign in as that account and allow every requested
 permission — and shows `Waiting for Google consent in Chrome · Esc Cancel`.
 Esc cancels while the dialog waits for Google and closes the local callback
-listener; the consent wait ends after three minutes. Once Google has answered,
-the dialog says `Google approved · storing the renewed sign-in…` and closes
-once it is stored; that step cannot be cancelled. Declining, closing Chrome,
+listener; the consent wait ends after three minutes. Declining, closing Chrome,
 signing in as another Google account or unchecking a permission stores
-nothing, and **Try again** starts a new consent. On success the new refresh token is stored in your
-selected credential store (Secret Service, Keychain, private files or the
-encrypted vault, unchanged), and that account's mail and calendars refresh in
-the same TUI; no restart is needed.
+nothing, and **Try again** starts a new consent. On success the new refresh
+token is stored in your selected credential store (Secret Service, Keychain,
+private files or the encrypted vault, unchanged), and that account's mail and
+calendars refresh in the same TUI; no restart is needed.
+
+Once Google has answered, the dialog says `Google approved · storing the
+renewed sign-in…`: this step finishes on its own within 25 seconds and cannot
+be cancelled (pressing **q** twice still quits; whether the sign-in was stored
+is then unknown, and Omagma says so on exit). If it fails before anything was
+stored, the dialog says so and offers **Try again**. If storing began but could
+not be confirmed, Omagma checks the account with a refresh and reports the
+result. If it has not finished after 30 seconds, the dialog says the outcome is
+unknown and Esc closes it; the result is reported on the status line when it
+arrives.
 
 Reconnect renews exactly the account's recorded terminal grant: the same
-capabilities, scopes and OAuth registration. It never adds or removes access;
+capabilities, scopes and OAuth registration (identified by its client ID, so a
+different registration file at the recorded path is refused). It never adds or
+removes access;
 to change permissions use `terminal-auth authorize` below. An account without
 a recorded terminal grant (bar-only read-only setups) cannot be reconnected
 here; the dialog says so.
@@ -315,11 +325,13 @@ here; the dialog says so.
 `kind`: `reauthenticationRequired`, `expiredOrRevoked` (Google uses the same
 words for revoked access, password changes and a Testing-mode expiry) or
 `invalidGrant`. It never contains token material. It describes only the
-current terminal grant, never the bar's read-only credential, and the grant's
-next verified refresh, a new authorization or `terminal-auth revoke` clears
-it. Plaintext credential stores keep it in a private
-`terminal-auth-diagnostics.json` beside the grant registry; the encrypted vault
-keeps it only in the running backend.
+current terminal grant, never the bar's read-only credential, and only while
+the refusal is newer than the grant's latest verified refresh or authorization
+in any Omagma process (so another open TUI stops showing it once you reconnect
+elsewhere). `terminal-auth revoke` removes it. Plaintext credential stores
+keep it in a private `terminal-auth-diagnostics.json` (with a
+`terminal-auth-diagnostics.lock` beside it) next to the grant registry; the
+encrypted vault keeps it only in the running backend.
 
 ### Change permissions
 

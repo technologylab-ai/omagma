@@ -54,9 +54,9 @@ fn tokenAlphabet(c: u8) bool {
 /// Printable ASCII prose with single spaces. ASCII whitespace separates
 /// words. Every other dropped byte (controls, DEL, any non-ASCII byte) is
 /// shown as a space but cannot split a credential: token-alphabet pieces it
-/// joins count as one run. Descriptions are sentences, so any 20+ character
-/// run can only be an echoed credential, authorization code or identifier
-/// and is replaced as a whole.
+/// joins count as one run. A run is replaced as a whole when it looks like a
+/// credential (see `credentialRun`); ordinary words, help URLs, hyphenated
+/// words and long compounds stay readable.
 fn prose(out: *b.Text(160), raw: []const u8) void {
     // 0 marks one or more dropped bytes between visible ones.
     var normalized: [1024]u8 = undefined;
@@ -86,18 +86,16 @@ fn prose(out: *b.Text(160), raw: []const u8) void {
     var index: usize = 0;
     while (index < text.len) {
         var end = index + 1;
-        var letters: usize = 1;
         if (tokenAlphabet(text[index])) {
             while (end < text.len) {
                 if (tokenAlphabet(text[end])) {
-                    letters += 1;
                     end += 1;
                 } else if (text[end] == 0 and end + 1 < text.len and tokenAlphabet(text[end + 1])) {
                     end += 1;
                 } else break;
             }
         }
-        const word = if (letters >= 20) "[redacted]" else text[index..end];
+        const word = if (tokenAlphabet(text[index]) and credentialRun(text[index..end])) "[redacted]" else text[index..end];
         if (n + word.len > buffer.len - 3) {
             truncated = true;
             break;
@@ -112,6 +110,42 @@ fn prose(out: *b.Text(160), raw: []const u8) void {
         n += 3;
     }
     out.set(buffer[0..n]) catch {};
+}
+/// Prefixes of Google refresh tokens, access tokens, authorization codes,
+/// JWTs, client secrets and API keys.
+const credential_prefixes = [_][]const u8{ "1//", "ya29.", "4/0", "eyJ", "GOCSPX-", "AIza" };
+/// A token-alphabet run (dropped bytes marked 0) that must not be shown:
+/// one starting (or continuing after '=') with a known credential prefix, or
+/// a 20+ character run with a piece no sentence contains — digits mixed into
+/// a long piece, mixed case with more than two capitals, a long all-caps
+/// piece or more than 12 digits. Pieces are split
+/// at URL and word punctuation, so `support.google.com/a/answer/9368756`,
+/// `account-recovery-verification-required` and German compounds stay.
+fn credentialRun(run: []const u8) bool {
+    var letters: usize = 0;
+    for (run) |c| {
+        if (c != 0) letters += 1;
+    }
+    for (run, 0..) |_, at| {
+        if (at != 0 and run[at - 1] != '=') continue;
+        for (credential_prefixes) |prefix| if (letters >= 8 and std.mem.startsWith(u8, run[at..], prefix)) return true;
+    }
+    if (letters < 20) return false;
+    var pieces = std.mem.tokenizeAny(u8, run, "./-_~+=\x00");
+    while (pieces.next()) |piece| if (!wordPiece(piece)) return true;
+    return false;
+}
+fn wordPiece(piece: []const u8) bool {
+    var upper: usize = 0;
+    var lower: usize = 0;
+    var digits: usize = 0;
+    for (piece) |c| {
+        if (std.ascii.isUpper(c)) upper += 1 else if (std.ascii.isLower(c)) lower += 1 else if (std.ascii.isDigit(c)) digits += 1;
+    }
+    // A number, or a short versioned word (oauth2, v1).
+    if (digits > 0) return (upper == 0 and lower == 0 and digits <= 12) or piece.len <= 6;
+    // A word, a Capitalized or camelCase word, or a short all-caps word.
+    return upper <= 2 or (lower == 0 and upper <= 12);
 }
 /// One network worker owns token exchanges; the lock only guards a reader on
 /// another thread. The value is a sanitized diagnostic, never token material.
@@ -412,22 +446,75 @@ pub const Notify = struct {
     context: *anyopaque,
     callFn: *const fn (*anyopaque) void,
 };
+/// A gate shared with a canceller in this process (the TUI): exactly one of
+/// "cancel before Google's callback" and "commit after it" wins, so a
+/// canceller never waits on a commit and a commit never starts once a
+/// cancellation was promised.
+pub const gate_open: u8 = 0;
+pub const gate_canceled: u8 = 1;
+pub const gate_committing: u8 = 2;
+/// Everything after Google's callback — the token exchange, the identity
+/// check and every durable write — shares this one bound.
+pub const commit_seconds = 25;
+/// Unit tests only: a shorter commit bound.
+pub const TestBound = if (@import("builtin").is_test) struct {
+    pub var ms: ?i64 = null;
+} else struct {};
 /// Once Google's callback has arrived, the exchange, identity check and the
 /// durable store must finish: cancelling then would discard a credential
 /// Google already issued, or report "unchanged" after it was stored. The
-/// commit blocks cancellation of the current task (deadlines still bound each
-/// network and keyring step) and marks the process as committing until the
-/// caller ends it after its own durable writes.
+/// commit blocks cancellation of the current task and marks the process as
+/// committing until the caller ends it after its own durable writes. Each
+/// step runs in its own task under the shared commit_seconds bound, which
+/// alone can interrupt it (including a blocked file or keyring write).
+///
+/// A failure is classified by how far the commit got: before the first
+/// durable write nothing was stored (TokenExchangeFailed, or the specific
+/// WrongAccount/UnexpectedScope); from the first durable write on, the
+/// outcome is unknown (SignInStoreUnconfirmed) and the caller must check.
 pub const Commit = struct {
     notify: ?Notify = null,
+    gate: ?*std.atomic.Value(u8) = null,
     started: bool = false,
+    storing: bool = false,
+    deadline_ms: i64 = 0,
     previous: std.Io.CancelProtection = .unblocked,
-    pub fn begin(self: *Commit, io: std.Io) void {
+    pub fn begin(self: *Commit, io: std.Io) error{Canceled}!void {
         if (self.started) return;
         self.previous = io.swapCancelProtection(.blocked);
+        if (self.gate) |gate| if (gate.cmpxchgStrong(gate_open, gate_committing, .acq_rel, .acquire) != null) {
+            _ = io.swapCancelProtection(self.previous);
+            return error.Canceled;
+        };
         self.started = true;
+        const bound: i64 = if (comptime @import("builtin").is_test) (TestBound.ms orelse commit_seconds * std.time.ms_per_s) else commit_seconds * std.time.ms_per_s;
+        self.deadline_ms = std.Io.Timestamp.now(io, .awake).toMilliseconds() + bound;
         committing_flag.store(true, .release);
         if (self.notify) |notify| notify.callFn(notify.context);
+    }
+    /// The first durable write starts now.
+    pub fn store(self: *Commit) void {
+        self.storing = true;
+    }
+    /// One bounded step of the commit; its failure is classified.
+    pub fn step(self: *Commit, io: std.Io, function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) anyerror!@typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.payload {
+        const left = self.deadline_ms - std.Io.Timestamp.now(io, .awake).toMilliseconds();
+        if (left <= 0) return self.classify(error.Timeout);
+        return platform.deadline(io, .{ .clock = .awake, .raw = .fromMilliseconds(left) }, function, args) catch |err| return self.classify(err);
+    }
+    pub fn classify(self: *const Commit, err: anyerror) anyerror {
+        if (err == error.OutOfMemory and !self.storing) return err;
+        if (self.storing) {
+            recordCause(err);
+            return error.SignInStoreUnconfirmed;
+        }
+        return switch (err) {
+            error.WrongAccount, error.UnexpectedScope => err,
+            else => blk: {
+                recordCause(err);
+                break :blk error.TokenExchangeFailed;
+            },
+        };
     }
     pub fn end(self: *Commit, io: std.Io) void {
         if (!self.started) return;
@@ -440,6 +527,26 @@ var committing_flag: std.atomic.Value(bool) = .init(false);
 /// Whether this process is past a consent callback and storing its result.
 pub fn committing() bool {
     return committing_flag.load(.acquire);
+}
+/// The underlying error name of the last classified commit failure (an
+/// identifier, never provider text), for the error frame's `cause`.
+var cause_lock: std.atomic.Mutex = .unlocked;
+var cause_name: [64]u8 = undefined;
+var cause_len: usize = 0;
+fn recordCause(err: anyerror) void {
+    while (!cause_lock.tryLock()) std.atomic.spinLoopHint();
+    defer cause_lock.unlock();
+    const name = @errorName(err);
+    cause_len = @min(name.len, cause_name.len);
+    @memcpy(cause_name[0..cause_len], name[0..cause_len]);
+}
+pub fn takeCommitCause(out: *[64]u8) []const u8 {
+    while (!cause_lock.tryLock()) std.atomic.spinLoopHint();
+    defer cause_lock.unlock();
+    const len = cause_len;
+    @memcpy(out[0..len], cause_name[0..len]);
+    cause_len = 0;
+    return out[0..len];
 }
 /// Unit-test-only consent page. Production always launches the configured
 /// browser; no runtime option, environment variable or production
@@ -524,12 +631,19 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     var flow: Flow = .{};
     defer flow.wipe();
     const code = try consent(io, &flow, auth_desktop.client_id.slice(), address, profile, chrome, scopes, platform.seconds(limits.auth_seconds));
-    // Google answered: finish the exchange and store, uncancellable. A caller
-    // with its own durable writes owns the commit and ends it afterwards.
+    // Google answered: finish the exchange and store, uncancellable but
+    // bounded. A caller with its own durable writes owns the commit and ends
+    // it afterwards.
     var local_commit: Commit = .{};
     const commit = if (terminal) |credential| credential.commit orelse &local_commit else &local_commit;
     defer local_commit.end(io);
-    commit.begin(io);
+    try commit.begin(io);
+    try commit.step(io, exchangeStep, .{ io, code, &flow, scopes, address });
+    commit.store();
+    try commit.step(io, storeStep, .{ io, terminal, address, credentials });
+}
+/// Token exchange and Gmail identity proof; nothing is stored here.
+fn exchangeStep(io: std.Io, code: []const u8, flow: *const Flow, scopes: []const []const u8, address: []const u8) anyerror!void {
     var client = try http.Client.init(io);
     defer client.deinit();
     var form = std.Io.Writer.fixed(&form_buffer);
@@ -543,6 +657,10 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     const tokens = try parseTokensScoped(token_response.status, token_response.body, &auth_access, &auth_refresh, scopes);
     const identity = try client.request("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, &token_body);
     try verifyProfile(identity.status, identity.body, address);
+}
+/// The verified refresh token into the selected store (or the caller's
+/// capture for the vault, which writes it with the grant registry).
+fn storeStep(io: std.Io, terminal: ?TerminalCredential, address: []const u8, credentials: keyring.Settings) anyerror!void {
     const refresh_token = std.mem.sliceTo(&auth_refresh, 0);
     if (terminal) |credential| {
         if (credential.capture) |capture| try capture.set(refresh_token) else try keyring.storeTerminal(io, credentials, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token);
@@ -571,8 +689,9 @@ pub fn authorizeFixture(io: std.Io, address: []const u8, profile: []const u8, co
     const code = try consent(io, &flow, fixture_client_id, address, profile, consent_page, scopes, wait);
     var local_commit: Commit = .{};
     defer local_commit.end(io);
-    (commit orelse &local_commit).begin(io);
-    try fixtureExchange(code, &flow.verifier, address);
+    const owned = commit orelse &local_commit;
+    try owned.begin(io);
+    try owned.step(io, fixtureExchange, .{ code, @as([]const u8, &flow.verifier), address });
 }
 fn fixtureExchange(code: []const u8, verifier: []const u8, address: []const u8) !void {
     var parts = std.mem.splitScalar(u8, code, '.');
