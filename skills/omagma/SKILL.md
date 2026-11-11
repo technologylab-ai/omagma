@@ -133,8 +133,10 @@ returned operation ID and `reviewHash`. First run the review with `--dry-run`
 - `state: unknown` or `UnknownOutcome` (exit 6) is never retried under a new
   operation ID: run `calendar event-reconcile`; only its `retryPossible`
   permits `event-retry` with `--next-attempt`. `CalendarOperationPending` means
-  an unconfirmed write to this event, its series or one of its occurrences:
-  find it with `calendar event-pending --event-id ID` and settle it first.
+  an unconfirmed write (of any kind, edits included) to this event, its series
+  or one of its occurrences: open exactly that one with `calendar event-pending
+  --operation-id` set to the refusal's `blockingOperationId` (or `--event-id ID
+  --series-event-id` with the event's `recurring_event_id`) and settle it first.
   There is no undo for a delete. After success report what was requested
   ("Google was asked to email 2 guests"), not that email was delivered.
 

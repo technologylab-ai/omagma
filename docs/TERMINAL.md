@@ -738,11 +738,17 @@ in Mail's Trash dialog.
 
 `y`, Enter on the confirm button and a click act only when the event's title,
 time and calendar, the sentence saying what happens and the confirm button are
-all on screen together, and only once that step has been shown for a moment: a
-key typed ahead or the second click of a double click never confirms (the
-status asks to **press y again**). On a short terminal scroll (`Ctrl+D`/`Ctrl+U`,
-PgDn/PgUp) or enlarge it; a terminal too small for Calendar does not open the
-dialog. The mouse wheel only scrolls the dialog.
+all on screen together, with nothing drawn over them, and only once that exact
+step (including the answer and email choice) has been shown unchanged for a
+moment: a key typed ahead, a held key, a changed choice or the second click of
+a double click never confirms (the status asks to **press y again**). When the
+dialog does not fit, the title and the consequence stay put and only the
+choices scroll (`Ctrl+D`/`Ctrl+U`, PgDn/PgUp): an answer or a single delete
+fits at 40x12, and a step that still does not fit says **Enlarge the
+terminal** instead of offering y. A terminal too small for Calendar does not
+open the dialog. The mouse wheel only scrolls the
+dialog. A due meeting card waits while the dialog is open (**Meeting due · M
+shows it**).
 
 - **Events you organize with guests**: choose **Email N guests a cancellation**
   or **Don't email the guests** first; the button then says exactly what `y`
