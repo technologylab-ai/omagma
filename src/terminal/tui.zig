@@ -18389,7 +18389,11 @@ const App = struct {
         const stale = integer(get(self.calendar.agenda.value, "staleSources"));
         if (failed > 0 or stale > 0) return std.fmt.allocPrint(a, "Saved calendars · {d} calendar{s} · {d} unavailable · {d} stale · availability unknown", .{ count, if (count == 1) @as([]const u8, "") else "s", failed, stale });
         if (self.calendar.stale) return "Saved calendar · stale · availability is unknown";
-        if (!self.calendar.complete) return "Incomplete range · events may be missing · Ctrl+R Retry";
+        if (!self.calendar.complete) {
+            const absent = self.calendarAbsentAccounts().count;
+            if (absent > 0) return std.fmt.allocPrint(a, "{d} account{s} not shown · the other calendars are up to date", .{ absent, if (absent == 1) @as([]const u8, "") else "s" });
+            return "Incomplete range · events may be missing · Ctrl+R Retry";
+        }
         return self.calendarUpToDateText();
     }
     /// The up-to-date sentence; only calendarStatusText decides to use it.
@@ -21452,10 +21456,33 @@ const App = struct {
         try self.calendarLegend(body, row + 1);
         return 2;
     }
+    /// Accounts whose calendar list failed while every loaded calendar is
+    /// complete: the shown range is whole, only those accounts are absent.
+    fn calendarAbsentAccounts(self: *App) struct { count: usize = 0, first: usize = 0 } {
+        if (!truth(get(get(self.calendar.agenda.value, "snapshot"), "complete"))) return .{};
+        // A failed account also makes the merged list incomplete; a list that
+        // is partial without a failed account is a real gap.
+        if (get(self.calendar.calendars.value, "complete") == .bool and !truth(get(self.calendar.calendars.value, "complete")) and integer(get(self.calendar.calendars.value, "unavailableAccounts")) == 0) return .{};
+        var count: usize = 0;
+        var first: usize = 0;
+        for (self.calendar.list_errors, 0..) |failure, index| if (failure.len > 0) {
+            if (self.ui_preferences.calendar.scope == .account and index < self.accounts.len and !same(text(get(self.accounts[index], "address")), self.calendar.account.slice())) continue;
+            if (count == 0) first = index;
+            count += 1;
+        };
+        return .{ .count = count, .first = first };
+    }
     /// The persistent warning for a live window that is missing data.
     fn calendarIncompleteText(self: *App) !?[]const u8 {
         if (!self.calendar.ready or self.calendar.complete or self.calendar.source_loading or self.calendar.dimmed or self.calendar.stale) return null;
         const a = self.frame.allocator();
+        const absent = self.calendarAbsentAccounts();
+        if (absent.count > 0) {
+            const code = self.calendar.list_errors[absent.first].slice();
+            const sign_in = std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null;
+            const who = if (absent.count > 1) try std.fmt.allocPrint(a, "{d} accounts", .{absent.count}) else if (absent.first < self.accounts.len) text(get(self.accounts[absent.first], "address")) else "1 account";
+            return try std.fmt.allocPrint(a, "Not shown: {s} · {s} · all other calendars are complete", .{ who, if (sign_in) @as([]const u8, "Google sign-in expired, reconnect it") else try std.fmt.allocPrint(a, "its calendars could not be loaded ({s}) · Ctrl+R Retry", .{code}) });
+        }
         var partial: std.ArrayList(u8) = .empty;
         var missing: std.ArrayList(u8) = .empty;
         var partial_count: usize = 0;
@@ -22549,7 +22576,7 @@ const App = struct {
         if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) for (self.calendarEntries()) |entry| {
             if (self.calendarSelection().selected(get(entry, "calendar"))) checked += 1;
         };
-        try self.line(win, 1, try self.fitLine(win, if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) try std.fmt.allocPrint(a, " Showing {d} · {d} checked · {s}", .{ items(get(self.calendar.agenda.value, "sources")).len, checked, if (self.calendarPickerDiscovering()) @as([]const u8, "Loading calendars…") else "Enter applies · Esc cancels" }) else if (self.calendar.calendar_id.len == 0) " Choose an account-bound calendar" else try std.fmt.allocPrint(a, " {s} · {s}{s}{s}", .{ if (self.calendar.single_source) self.calendar.calendar_name.slice() else try std.fmt.allocPrint(a, "{d} selected calendars", .{items(get(self.calendar.agenda.value, "sources")).len}), self.calendar.zone_name.slice(), if (self.calendar.stale) @as([]const u8, " · some saved results / availability unknown") else if (self.calendar.ready and !self.calendar.complete and !self.calendar.source_loading) " · incomplete" else "", freshness }), win.width), if (self.calendar.stale or (self.calendar.ready and !self.calendar.complete and !self.calendar.source_loading)) .offline else .muted);
+        try self.line(win, 1, try self.fitLine(win, if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) try std.fmt.allocPrint(a, " Showing {d} · {d} checked · {s}", .{ items(get(self.calendar.agenda.value, "sources")).len, checked, if (self.calendarPickerDiscovering()) @as([]const u8, "Loading calendars…") else "Enter applies · Esc cancels" }) else if (self.calendar.calendar_id.len == 0) " Choose an account-bound calendar" else try std.fmt.allocPrint(a, " {s} · {s}{s}{s}", .{ if (self.calendar.single_source) self.calendar.calendar_name.slice() else try std.fmt.allocPrint(a, "{d} selected calendars", .{items(get(self.calendar.agenda.value, "sources")).len}), self.calendar.zone_name.slice(), if (self.calendar.stale) @as([]const u8, " · some saved results / availability unknown") else if (self.calendar.ready and !self.calendar.complete and !self.calendar.source_loading) (if (self.calendarAbsentAccounts().count > 0) try std.fmt.allocPrint(a, " · {d} account{s} not shown", .{ self.calendarAbsentAccounts().count, if (self.calendarAbsentAccounts().count == 1) @as([]const u8, "") else "s" }) else " · incomplete") else "", freshness }), win.width), if (self.calendar.stale or (self.calendar.ready and !self.calendar.complete and !self.calendar.source_loading)) .offline else .muted);
         if (self.calendarHelpVisible()) {
             try self.helpDraw(win);
             return;
@@ -37563,6 +37590,15 @@ test "calendar UI: incomplete and failed windows keep a warning row and never cl
     try std.testing.expectEqualStrings("Incomplete: Personal returned only part of Tue 10 Nov – Mon 16 Nov 2026 — events may be missing · Ctrl+R Retry", (try app.calendarIncompleteText()).?);
     try app.calendar.agenda.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = &[_]Value{}, .complete = false, .window = window }, .sources = .{.{ .name = "Holidays", .complete = false, .missing = true }} }));
     try std.testing.expectEqualStrings("Unavailable: Holidays could not be loaded for Tue 10 Nov – Mon 16 Nov 2026 — events may be missing · Ctrl+R Retry", (try app.calendarIncompleteText()).?);
+    // An account whose sign-in expired is named; the loaded range is not called partial.
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = &[_]Value{}, .complete = true, .window = window }, .sources = .{.{ .name = "Personal", .complete = true, .missing = false }} }));
+    try app.calendar.list_errors[0].set("InvalidGrant");
+    const absent_text = (try app.calendarIncompleteText()).?;
+    try std.testing.expect(std.mem.startsWith(u8, absent_text, "Not shown: "));
+    try std.testing.expect(std.mem.indexOf(u8, absent_text, "Google sign-in expired, reconnect it · all other calendars are complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, absent_text, "returned only part") == null);
+    try std.testing.expect(std.mem.indexOf(u8, try app.calendarStatusText(), "account not shown") != null);
+    app.calendar.list_errors[0] = .{};
     // While loading, stale or complete the row is absent.
     app.calendar.source_loading = true;
     try std.testing.expect((try app.calendarIncompleteText()) == null);
