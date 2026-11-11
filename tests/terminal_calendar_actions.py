@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 import types
@@ -21,6 +23,7 @@ from terminal_calendar import Invitations
 from terminal_calendar_tui import capture, start, wait_calendar
 from terminal_integration import ACCOUNTS, fixture_calendar_writes, require
 from terminal_mouse import point, report
+from terminal_pty import FIXTURES
 from terminal_theme_picker import focused
 
 SHIFT_TAB = b"\x1b[Z"
@@ -62,6 +65,54 @@ def require_sent(owned, index, method, event_id, if_match, send_updates):
 def settle(terminal):
     """A confirm acts only a moment after a step became visible."""
     terminal.gap(.7)
+
+
+def quiet(terminal):
+    """After a refused confirm key, y counts only after a still keyboard."""
+    terminal.gap(2.2)
+
+
+def flat(terminal):
+    """The screen's words with wrapping undone."""
+    return " ".join(terminal.text().split())
+
+
+def dialog_words(terminal):
+    """The dialog's words inside its border, with its wrapping undone."""
+    parts = []
+    for line in terminal.screen.lines():
+        first, last = line.find("│"), line.rfind("│")
+        if first >= 0 and last > first:
+            parts.append(line[first + 1:last])
+    return " ".join(" ".join(parts).split())
+
+
+def spans(terminal, literal):
+    found = []
+    for row, line in enumerate(terminal.screen.lines()):
+        start = line.find(literal)
+        while start >= 0:
+            found.append((start, start + len(literal), row))
+            start = line.find(literal, start + 1)
+    return found
+
+
+def cli(binary, owned, fixture, lines, scenario="calendar-actions"):
+    """JSONL requests for the same synthetic account and cache (another
+    process, as an agent would run it)."""
+    env = dict(os.environ, HOME=str(owned / "home"), TZ="UTC", XDG_RUNTIME_DIR=str(owned / "runtime"))
+    for name in ("CONFIG", "CACHE", "DATA", "STATE"):
+        env[f"XDG_{name}_HOME"] = str(owned / name.lower())
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS"):
+        env.pop(name, None)
+    (owned / "runtime").mkdir(parents=True, mode=0o700, exist_ok=True)
+    arguments = [str(binary), "cli", "--fixtures", "--fixture-root", str(FIXTURES), *fixture.options(),
+                 "--fixture-scenario", scenario, "--cache-dir", str(owned / "cache"), "--account", ACCOUNTS[0]]
+    data = "".join(json.dumps(line) + "\n" for line in lines).encode()
+    result = subprocess.run(arguments, input=data, capture_output=True, env=env, cwd=owned, timeout=60)
+    replies = [json.loads(line) for line in result.stdout.decode().splitlines() if line.strip()]
+    require(len(replies) == len(lines), f"the CLI answered {len(replies)} of {len(lines)} requests: {result.stderr[-400:]}")
+    return replies
 
 
 def selected(terminal):
@@ -270,9 +321,9 @@ def uncertain(binary, directory, frames):
         # An answer and y typed together: y waits until the answer's effect
         # has been on screen for a moment, then confirms.
         terminal.send(b"ay")
-        terminal.until(lambda: "press y again" in terminal.text())
+        terminal.until(lambda: "press y once more" in terminal.text())
         require(writes(owned) == 0, "y typed with the answer sent it before its consequence was shown")
-        settle(terminal)
+        quiet(terminal)
         terminal.send(b"y")
         terminal.until(lambda: "Calendar did not confirm the outcome" in terminal.text())
         require("[r Check Calendar]" in terminal.text(), "unknown outcome has no read-only check")
@@ -316,7 +367,9 @@ def uncertain(binary, directory, frames):
         terminal.send(b"r")
         terminal.until(lambda: "Calendar still shows the event unchanged" in terminal.text())
         terminal.send(CTRL_R)
-        terminal.until(lambda: "Send the identical request once more?" in terminal.text())
+        terminal.until(lambda: "[y Delete again]" in terminal.text())
+        require("Send it once more, identically: Deletes this event from" in dialog_words(terminal),
+                "the retry confirmation does not say what it sends again")
         require(writes(owned) == 1, "retry was sent before its own confirmation")
         frame(frames, terminal, "delete-retry-confirm")
         settle(terminal)
@@ -702,9 +755,9 @@ def meeting_card(binary, directory, frames):
         terminal.until(lambda: "keys here" not in terminal.text() and "[y Accept" in terminal.text())
         # Shown whole again: the wait starts over, then y sends.
         terminal.send(b"y")
-        terminal.until(lambda: "press y again" in terminal.text())
+        terminal.until(lambda: "press y once more" in terminal.text())
         require(writes(owned) == 0, "y confirmed the moment the dialog reappeared")
-        settle(terminal)
+        quiet(terminal)
         terminal.send(b"y")
         terminal.until(lambda: "Accepted · Partner sync" in terminal.text())
         require_sent(owned, 0, "PATCH", "fixture-invite", '"fixture-seed-fixture-invite"', "all")
@@ -739,7 +792,7 @@ def meeting_card(binary, directory, frames):
         terminal.send(b"r")
         terminal.until(lambda: "Ctrl+R" in terminal.text() and "Checking" not in terminal.text())
         terminal.send(CTRL_R)
-        terminal.until(lambda: "Send the identical request once more?" in terminal.text())
+        terminal.until(lambda: "Send it once more, identically: Removes" in dialog_words(terminal))
         deferred(terminal)
         settle(terminal)
         terminal.send(b"y")
@@ -747,7 +800,7 @@ def meeting_card(binary, directory, frames):
         require_sent(owned, 3, "DELETE", "fixture-daily_" + str(midnight_ms() + 16 * 3600000), sent(owned)[2]["ifMatch"], "none")
         terminal.until(lambda: "Ctrl+D" in terminal.text() and "Sending" not in terminal.text())
         terminal.send(b"\x04")
-        terminal.until(lambda: "Stop tracking this unconfirmed delete?" in terminal.text())
+        terminal.until(lambda: "Stop tracking this unconfirmed delete? It was: Removes" in dialog_words(terminal))
         deferred(terminal)
         settle(terminal)
         terminal.send(b"y")
@@ -839,6 +892,296 @@ def split_series(binary, directory, frames):
     return {"case": "split-series-pending", "reads": spent}
 
 
+def repeat_delays(binary, directory, frames):
+    """One long press of y never confirms, whatever the keyboard's repeat
+    delay (Hyprland's 600 ms, X11's 660 ms, 1 s ...); one deliberate press
+    after letting go does."""
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        pick(terminal, "Focus block")
+        delays = (.25, .5, .6, .66, 1.0)
+        for delay in delays:
+            terminal.send(b"D")
+            ready(terminal, "It has no guests, so no email is sent")
+            began = time.monotonic()
+            terminal.send(b"y")  # pressed as the dialog appears
+            while time.monotonic() - began < delay:
+                time.sleep(.004)
+            for _ in range(30):  # then repeated every 30 ms while held
+                terminal.send(b"y")
+                time.sleep(.03)
+            terminal.gap(.8)
+            require(writes(owned) == 0, f"one long press of y with a {int(delay * 1000)} ms repeat delay deleted the event")
+            if delay != delays[-1]:
+                terminal.send(b"\x1b")
+                terminal.until(lambda: "Nothing was changed" in terminal.text())
+        require("Let go, look, then press y once more" in terminal.text(), "the status does not say how to confirm")
+        frame(frames, terminal, "held-y-refused")
+        # Let go: one press after a still moment confirms, exactly once.
+        quiet(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "Deleted · Focus block" in terminal.text())
+        require(writes(owned) == 1, "the deliberate press did not delete exactly once")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    return {"case": "repeat-delays", "delaysMs": [int(delay * 1000) for delay in delays], "writes": writes(owned)}
+
+
+def retry_names_write(binary, directory, frames):
+    """The identical retry and the archive show the saved write they act on
+    (answer, scope and email) and name it on their buttons."""
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        terminal.finish()
+    finally:
+        terminal.close()
+    terminal = start(binary, owned, fixture, scenario="calendar-prewrite-unavailable", columns=80, rows=24)
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        for query, opener, marker, choose, chosen, button, sentence in (
+                ("Partner", b"r", "Your answer now", b"x", "[y Decline · email organizer]",
+                 "[y Send Decline again · email organizer]", "Declines this event as"),
+                ("Standup", b"D", "This event only", SHIFT_TAB + b"\r" + b"\t\r", "[y Delete series & email 1 guest]",
+                 "[y Delete series again · email 1 guest]", "Deletes every event in this series")):
+            pick(terminal, query)
+            terminal.send(opener)
+            ready(terminal, marker)
+            terminal.send(choose)
+            terminal.until(lambda: chosen in terminal.text())
+            settle(terminal)
+            terminal.send(b"y")
+            terminal.until(lambda: "Calendar did not confirm the outcome" in terminal.text())
+            terminal.send(b"r")
+            terminal.until(lambda: "Ctrl+R" in terminal.text() and "Checking" not in terminal.text())
+            terminal.send(CTRL_R)
+            terminal.until(lambda: button in terminal.text())
+            require("Send it once more, identically: " + sentence in dialog_words(terminal),
+                    f"the retry of {query} does not show what it sends again")
+            frame(frames, terminal, "retry-names-" + query.lower())
+            terminal.send(b"\x1b")
+            terminal.until(lambda: "[Ctrl+D Archive]" in terminal.text())
+            terminal.send(b"\x04")
+            terminal.until(lambda: "Stop tracking this unconfirmed" in terminal.text())
+            require("It was: " + sentence in dialog_words(terminal), f"the archive of {query} does not name the saved write")
+            settle(terminal)
+            terminal.send(b"y")
+            terminal.until(lambda: "Stopped tracking the unconfirmed" in terminal.text())
+            clear_filter(terminal)
+        require(writes(owned) == 0, "the unavailable provider recorded a write")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    return {"case": "retry-names-write", "writes": writes(owned)}
+
+
+def meeting_reappears(binary, directory, frames):
+    """A meeting card that returns under the pointer when the dialog closes
+    waits before it acts; on an event card nothing promises M; the Enlarge
+    note comes first."""
+    results = []
+    for columns, rows in ((100, 13), (60, 13)):
+        root = directory / f"{columns}x{rows}"
+        root.mkdir()
+        fixture = Invitations(root)
+        owned = root / "client"
+        (fixture.root / "calendar-notification-now-ms").write_text(str(midnight_ms() + 10 * 3600000 + 55 * 60000) + "\n")
+        terminal = start(binary, owned, fixture, scenario="calendar-actions", columns=columns, rows=rows)
+        try:
+            terminal.send(b"C")
+            terminal.until(lambda: "Calendar · Agenda" in terminal.text() and "Loading" not in terminal.text(), seconds=15)
+            pick(terminal, "Focus block")
+            terminal.until(lambda: "Starts in" in terminal.text(), seconds=12)
+            terminal.gap(.3)
+            card = [item for name in ("[Join]", "[Dismiss]", "[Next]") for item in spans(terminal, name)]
+            terminal.send(b"D")
+            ready(terminal, "It has no guests")
+            cancel = spans(terminal, "[Esc Cancel]") or spans(terminal, "[Esc]")
+            hit = next(((max(cx0, dx0), cy) for cx0, cx1, cy in card for dx0, dx1, dy in cancel
+                        if cy == dy and max(cx0, dx0) < min(cx1, dx1)), None)
+            require(hit is not None, f"at {columns}x{rows} the dialog's Cancel no longer sits on the card's buttons")
+            x, y = hit
+            # A double click on Cancel: the first closes the dialog, the
+            # second lands on the card that returns under the pointer.
+            report(terminal, x, y)
+            report(terminal, x, y, release=True)
+            terminal.gap(.12)
+            report(terminal, x, y)
+            report(terminal, x, y, release=True)
+            terminal.gap(1.0)
+            frame(frames, terminal, f"meeting-reappears-{columns}x{rows}")
+            # A larger terminal shows the whole card: its feedback line and
+            # how many meetings are due.
+            terminal.resize(110, 30)
+            terminal.until(lambda: "Upcoming meeting" in terminal.text())
+            terminal.gap(.5)
+            require("Join target validated" not in terminal.text() and "Opening meeting" not in terminal.text(),
+                    f"at {columns}x{rows} the second click joined the meeting")
+            require("Roadmap review" in terminal.text() and "1 of 3" in terminal.text(),
+                    f"at {columns}x{rows} the second click dismissed the meeting")
+            results.append(f"{columns}x{rows}")
+            terminal.finish()
+        except Exception:
+            print(terminal.text())
+            raise
+        finally:
+            terminal.close()
+    root = directory / "card"
+    root.mkdir()
+    fixture = Invitations(root)
+    owned = root / "client"
+    (fixture.root / "calendar-notification-now-ms").write_text(str(midnight_ms() + 10 * 3600000 + 55 * 60000) + "\n")
+    terminal = start(binary, owned, fixture, scenario="calendar-actions", columns=100, rows=30)
+    try:
+        terminal.send(b"C")
+        terminal.until(lambda: "Calendar · Agenda" in terminal.text() and "Loading" not in terminal.text(), seconds=15)
+        terminal.until(lambda: "Starts in" in terminal.text(), seconds=12)
+        pick(terminal, "Focus block")
+        terminal.send(b"\r")
+        terminal.until(lambda: "Starts in" not in terminal.text() and "Focus block" in terminal.text())
+        terminal.gap(.3)
+        terminal.send(b"D")
+        ready(terminal, "It has no guests")
+        require("Meeting due" not in status_line(terminal), "the event card promises a meeting M cannot show there")
+        terminal.send(b"M")
+        terminal.gap(.5)
+        require("Starts in" not in terminal.text(), "M showed a meeting over the event card's dialog")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        # Too small to confirm: Enlarge first, then the held-back meeting.
+        terminal.send(b"q")
+        terminal.until(lambda: "Calendar · Agenda" in terminal.text())
+        clear_filter(terminal)
+        pick(terminal, "Roadmap")
+        terminal.resize(40, 10)
+        terminal.gap(.5)
+        terminal.send(b"D")
+        terminal.until(lambda: "Checking" not in terminal.text() and "Email 2 guests" in terminal.text())
+        terminal.send(b"j\r")
+        terminal.until(lambda: "Enlarge" in status_line(terminal))
+        require(status_line(terminal).strip().startswith("Enlarge the"), "the Enlarge note is not first in the status")
+        frame(frames, terminal, "enlarge-before-meeting")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    return {"case": "meeting-reappears", "sizes": results}
+
+
+def blockers(binary, directory, frames):
+    """A blocking write is named by its own event, the editor speaks only of
+    writes that overlap it, and an invitation's own unconfirmed update is
+    settled from the dialog."""
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        pick(terminal, "Standup")
+        terminal.send(b"D")
+        ready(terminal, "This event only")
+        terminal.send(SHIFT_TAB + b"\r" + b"\t\r")
+        terminal.until(lambda: "[y Delete series & email 1 guest]" in terminal.text())
+        # Meanwhile another process leaves an unconfirmed edit of another occurrence.
+        today = datetime.datetime.now(datetime.UTC).date().isoformat()
+        week = cli(binary, owned, fixture, [{"cmd": "calendar.agenda", "calendarId": ACCOUNTS[0], "date": today, "view": "week"}])[0]
+        occurrences = sorted((event for event in week["data"]["snapshot"]["events"]
+                              if event.get("recurring_event_id") == "fixture-standup" and event["summary"] == "Standup"),
+                             key=lambda event: event["start"]["value"])
+        other = occurrences[-1]
+        detail = cli(binary, owned, fixture, [{"cmd": "calendar.event", "calendarId": ACCOUNTS[0], "eventId": other["id"]}])[0]["data"]
+        draft = dict(detail["eventDraft"], summary="Standup moved")
+        edit = cli(binary, owned, fixture, [{"cmd": "calendar.event-review", "calendarId": ACCOUNTS[0], "eventId": other["id"],
+                                              "expectedEtag": detail["event"]["etag"], "sendUpdates": "none",
+                                              "operationId": "edit-other", "event": draft}])[0]["data"]
+        lost = cli(binary, owned, fixture, [{"cmd": "calendar.event-apply", "calendarId": ACCOUNTS[0], "operationId": "edit-other",
+                                              "reviewHash": edit["reviewHash"]}], scenario="calendar-prewrite-unavailable")[0]
+        require(lost["data"]["state"] == "unknown", "the edit of another occurrence did not stay unconfirmed")
+        settle(terminal)
+        terminal.send(b"y")
+        terminal.until(lambda: "An unconfirmed edit of “Standup” · " in dialog_words(terminal), seconds=10)
+        require("open that event and press e to check it" in dialog_words(terminal) and "edit of this event" not in dialog_words(terminal),
+                "the blocking edit was not named by its own event")
+        frame(frames, terminal, "blocked-by-named-edit")
+        require(stored(owned, "fixture-standup")["status"] == "confirmed", "the series was deleted over an unconfirmed edit")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        # The editor on the selected occurrence: that edit does not overlap it.
+        terminal.send(b"e")
+        terminal.until(lambda: "Edit event" in terminal.text())
+        terminal.gap(2)
+        require("An unconfirmed edit" not in flat(terminal), "the editor warned about an edit of another occurrence")
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    # An invitation's own update to an event, never sent and unconfirmed.
+    imported = cli(binary, owned, fixture, [{"cmd": "calendar.review", "calendarId": ACCOUNTS[0], "messageId": "calendar-mail-4", "operationId": "invite-import"}])[0]["data"]
+    added = cli(binary, owned, fixture, [{"cmd": "calendar.import", "calendarId": ACCOUNTS[0], "operationId": "invite-import", "reviewHash": imported["reviewHash"]}])[0]["data"]
+    update = cli(binary, owned, fixture, [{"cmd": "calendar.review", "calendarId": ACCOUNTS[0], "messageId": "calendar-mail-5", "operationId": "invite-update"}])[0]["data"]
+    lost = cli(binary, owned, fixture, [{"cmd": "calendar.update", "calendarId": ACCOUNTS[0], "operationId": "invite-update", "reviewHash": update["reviewHash"]}],
+               scenario="calendar-prewrite-unavailable")[0]["data"]
+    require(lost["state"] == "unknown", "the invitation's update did not stay unconfirmed")
+    event = cli(binary, owned, fixture, [{"cmd": "calendar.event", "calendarId": ACCOUNTS[0], "eventId": added["providerId"]}])[0]["data"]["event"]
+    day = datetime.datetime.fromtimestamp(event["start"]["value"] / 1000, datetime.UTC).date().isoformat()
+    terminal = start(binary, owned, fixture, scenario="calendar-actions")
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        terminal.send(b"\x07")
+        terminal.until(lambda: "Go to" in terminal.text())
+        terminal.send(day.encode() + b"\r")
+        terminal.until(lambda: event["summary"] in terminal.text() and "Loading" not in terminal.text(), seconds=15)
+        pick(terminal, event["summary"])
+        terminal.send(b"r")
+        terminal.until(lambda: "from the invitation for “Planning version 5”" in dialog_words(terminal), seconds=10)
+        require("r checks Calendar (reads only)" in dialog_words(terminal) and "Ctrl+D stops tracking it" in dialog_words(terminal),
+                "the invitation's update has no way out in the dialog")
+        frame(frames, terminal, "invitation-blocker")
+        terminal.send(b"r")
+        terminal.until(lambda: "Calendar does not confirm the invitation update" in dialog_words(terminal), seconds=10)
+        terminal.send(b"\x04")
+        terminal.until(lambda: "Stop tracking the invitation's unconfirmed Calendar update" in dialog_words(terminal))
+        settle(terminal)
+        terminal.send(b"y")
+        # No longer tracked: the event itself is checked again (here it has
+        # no guest entry for this calendar, so there is nothing to answer).
+        terminal.until(lambda: "Checking" not in terminal.text() and "nothing to answer" in dialog_words(terminal), seconds=10)
+        require("unconfirmed" not in dialog_words(terminal), "the archived invitation update still blocks the event")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Nothing was changed" in terminal.text())
+        terminal.finish()
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:
+        terminal.close()
+    found = cli(binary, owned, fixture, [{"cmd": "calendar.event-pending", "calendarId": ACCOUNTS[0], "eventId": added["providerId"]}])[0]["data"]
+    require(found["pending"] is None and "blockedBy" not in found, f"the archived invitation update still blocks the event: {found}")
+    require(writes(owned) == 1, "settling the invitation's update wrote Calendar")
+    return {"case": "named-blockers", "writes": writes(owned)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -860,7 +1203,11 @@ def main():
                           ("series-facts", lambda d: series_facts(binary, d, args.frames_dir)),
                           ("pending-series", lambda d: pending_series(binary, d, args.frames_dir)),
                           ("meeting-card", lambda d: meeting_card(binary, d, args.frames_dir)),
-                          ("split-series", lambda d: split_series(binary, d, args.frames_dir))):
+                          ("split-series", lambda d: split_series(binary, d, args.frames_dir)),
+                          ("repeat-delays", lambda d: repeat_delays(binary, d, args.frames_dir)),
+                          ("retry-names-write", lambda d: retry_names_write(binary, d, args.frames_dir)),
+                          ("meeting-reappears", lambda d: meeting_reappears(binary, d, args.frames_dir)),
+                          ("blockers", lambda d: blockers(binary, d, args.frames_dir))):
             if args.case and name not in args.case:
                 continue
             directory = root / name
@@ -871,7 +1218,8 @@ def main():
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     print("PASS Calendar delete/RSVP TUI: dialogs, explicit choices, If-Match conflicts, "
           "read-only recovery, restart retry, permissions, 40x12 mono, confirm guards, "
-          "series facts and series pending; no mail sent")
+          "series facts and series pending, repeat delays, named retries and blockers, "
+          "returning meeting cards; no mail sent")
 
 
 if __name__ == "__main__":
