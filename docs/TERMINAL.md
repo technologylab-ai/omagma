@@ -1069,9 +1069,10 @@ Google, signing in as another Google account, unchecking a requested
 permission, or three minutes without an answer store nothing; the dialog says
 which and offers **Try again** (another explicit consent). Reconnect never
 broadens or narrows access; use `terminal-auth authorize` to change
-permissions. Codes, PKCE values, state values and tokens are never shown,
-logged or passed on any command line by Omagma; the consent URL itself, as for
-`terminal-auth authorize`, is handed to the configured Chrome. See
+permissions. Authorization codes, PKCE verifiers and tokens never appear on
+screen, in status text, in logs or on a command line. As with
+`terminal-auth authorize`, the consent URL — with its one-time state value and
+the PKCE challenge, never the verifier — is passed to the configured Chrome. See
 [account setup](SETUP.md#reconnect-an-expired-sign-in-from-the-tui) for the
 `lastRefreshError` status field.
 
