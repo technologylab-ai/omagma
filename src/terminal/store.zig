@@ -14,13 +14,31 @@ pub const blob_limit = 4096;
 pub const vault_object_limit = t.Limits.metadata_hard + 2 * 128 + blob_limit + 16;
 pub const mail_record_bytes = @import("send_memory.zig").record_bytes;
 pub const MigrationObject = @import("store_migration.zig").Object;
+/// The private document holding the one draft the terminal UI discarded
+/// last (see DiscardedDraft); it lives outside the index, so older clients
+/// read the index unchanged.
+pub const discarded_document = "discarded-draft.json";
+/// One discarded draft, kept for a single undo. Its index entry, pins and
+/// Gmail link are set aside here while the draft's own records stay where
+/// they are; `retire` names the records removed for good when the slot is
+/// forgotten or replaced, exactly those a plain discard removes at once.
+pub const DiscardedDraft = struct {
+    schema: u8 = 1,
+    account: []const u8,
+    summary: t.Draft,
+    pins: ?DraftBlobReferences = null,
+    gmailLink: ?@import("draft_link.zig").Link = null,
+    /// Every attachment handle the draft uses; none may be discarded while kept.
+    blobs: []const []const u8 = &.{},
+    retire: []const []const u8 = &.{},
+};
 fn vaultKind(name: []const u8) !vault_types.RecordKind {
     if (@import("operation_history.zig").direct(name)) {
         _ = try @import("operation_history.zig").handleOf(name);
         return if (std.mem.startsWith(u8, name, "history-draft-") or std.mem.startsWith(u8, name, "history-active-")) .draft else .operation_ledger;
     }
     if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return .preferences;
-    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json") or std.mem.eql(u8, name, "drive-uploads.json") or std.mem.eql(u8, name, "meet-notes.json") or std.mem.eql(u8, name, "meet-provider-fixture.json")) return .operation_ledger;
+    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json") or std.mem.eql(u8, name, "drive-uploads.json") or std.mem.eql(u8, name, "meet-notes.json") or std.mem.eql(u8, name, "meet-provider-fixture.json") or std.mem.eql(u8, name, discarded_document)) return .operation_ledger;
     if (std.mem.eql(u8, name, "calendar-agenda.json")) return .cache_index;
     const kind: vault_types.RecordKind = if (std.mem.startsWith(u8, name, "mail-")) .mail_body else if (std.mem.startsWith(u8, name, "draft-")) .draft else if (std.mem.startsWith(u8, name, "outbox-")) .outbox else if (std.mem.startsWith(u8, name, "blob-")) .attachment else return error.VaultOperationUnsupported;
     const prefix: usize = switch (kind) {
@@ -988,6 +1006,8 @@ pub const Store = struct {
         if (std.mem.eql(u8, name, "calendar-state.json")) return 4 * 1024 * 1024;
         if (std.mem.eql(u8, name, "meet-notes.json")) return 4 * 1024 * 1024;
         if (std.mem.eql(u8, name, "drive-uploads.json")) return 1024 * 1024;
+        // The vault's operation ledger bound; a native index entry is small.
+        if (std.mem.eql(u8, name, discarded_document)) return 4 * 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-agenda.json")) return 8 * 1024 * 1024;
         if (std.mem.eql(u8, name, "calendar-provider-fixture.json") and s.options.fixtures) return 4 * 1024 * 1024;
         if (std.mem.eql(u8, name, "meet-provider-fixture.json") and s.options.fixtures) return 512 * 1024;
@@ -1235,6 +1255,8 @@ pub const Store = struct {
             for (try s.activeDraftPinIds(phase.allocator(), reference.draftId)) |key| if (std.mem.eql(u8, key, id)) return true;
         };
         if (try @import("operation_history.zig").blobReferenced(s, id)) return true;
+        // A draft kept for undo still owns its files.
+        if (try s.discardedDraftUses(id)) return true;
         var changed = false;
         for (s.state.entries) |*entry| if (entry.bytes != 0 and entry.bodyBlobIds == null) {
             var ids: [t.Limits.message_attachments][64]u8 = undefined;
@@ -2057,6 +2079,135 @@ pub const Store = struct {
     /// A discard that must never cancel a queued or paused send refuses.
     pub fn requireNoQueuedSend(s: *const Store, id: []const u8) !void {
         for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and entry.state == .queued) return error.DraftSendQueued;
+    }
+    /// The draft kept for one undo, if any (see DiscardedDraft).
+    pub fn discardedDraft(s: *Store, a: std.mem.Allocator) !?DiscardedDraft {
+        const raw = (try s.readDocument(a, discarded_document, 4 * 1024 * 1024)) orelse return null;
+        const slot = try std.json.parseFromSliceLeaky(DiscardedDraft, a, raw, .{ .allocate = .alloc_always });
+        if (slot.schema != 1 or !std.mem.eql(u8, slot.account, s.state.account) or slot.blobs.len > @import("draft_pins.zig").max_blobs or slot.retire.len > 2) return error.InvalidDiscardedDraft;
+        try @import("../bounded.zig").identifier(slot.summary.id);
+        return slot;
+    }
+    fn removeDiscardedDocument(s: *Store) !void {
+        try s.removeRecord(discarded_document);
+        try s.save();
+    }
+    /// Discard for the terminal UI's undo: the same refusals and Drive
+    /// retirement as discardDraft, a queued send is never cancelled, and the
+    /// draft leaves Drafts (list, read, send, queue) while its records stay
+    /// for restoreDiscardedDraft. The previously kept draft goes for good:
+    /// there is exactly one slot. Nothing is sent or changed in Gmail.
+    pub fn softDiscardDraft(s: *Store, id: []const u8) !void {
+        const previous_protected = s.history_protected_draft;
+        s.history_protected_draft = id;
+        defer s.history_protected_draft = previous_protected;
+        try s.compactHistory();
+        const link_type = @import("draft_link.zig");
+        const linked_index = link_type.find(s.state.draftLinks, id);
+        if (linked_index) |index| if (s.state.draftLinks[index].paused) return error.DraftPausedInGmail;
+        for (s.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, id) and std.mem.eql(u8, operation.outcome, "unknown")) return error.UnknownOutcome;
+        const index = for (s.state.drafts, 0..) |draft_value, i| {
+            if (std.mem.eql(u8, draft_value.id, id)) break i;
+        } else return if (try @import("operation_history.zig").source(s, s.allocator, id) != null) error.ArchivedDraftReadOnly else error.DraftNotFound;
+        if (try @import("operation_history.zig").immutableSource(s, id)) return error.ArchivedDraftReadOnly;
+        try s.requireNoQueuedSend(id);
+        try s.cancelDraftQueue(id);
+        errdefer if (s.vault != null) {
+            s.vaultFailed = true;
+        };
+        try @import("drive_retirement.zig").source(s, id, null, null);
+        try @import("drive_retirement.zig").requireSourceRetired(s, id);
+        try s.finishHistoryCleanup();
+        _ = try s.forgetDiscardedDraft("");
+        const full = try s.draft(id);
+        var pins: ?DraftBlobReferences = null;
+        for (s.state.relatedDraftBlobs) |reference| if (std.mem.eql(u8, reference.draftId, id)) {
+            pins = reference;
+        };
+        const slot: DiscardedDraft = .{
+            .account = s.state.account,
+            .summary = s.state.drafts[index],
+            .pins = pins,
+            .gmailLink = if (linked_index) |link_index| s.state.draftLinks[link_index] else null,
+            .blobs = try @import("draft_pins.zig").collect(s.allocator, full),
+            .retire = try s.activeDraftOwnedRecords(s.allocator, id),
+        };
+        // The slot is durable before the draft leaves the index: an
+        // interruption in between leaves the draft in Drafts, never lost.
+        try s.writeDocument(discarded_document, try j.encodeAlloc(s.allocator, slot, .{}));
+        if (s.vault == null) s.dir.deleteFile(s.io, "preview.html") catch |err| if (err != error.FileNotFound) return err;
+        std.mem.copyForwards(t.Draft, s.state.drafts[index .. s.state.drafts.len - 1], s.state.drafts[index + 1 ..]);
+        s.state.drafts = s.state.drafts[0 .. s.state.drafts.len - 1];
+        try s.replaceDraftPins(id, null);
+        if (linked_index) |link_index| {
+            const links = s.state.draftLinks;
+            std.mem.copyForwards(link_type.Link, links[link_index .. links.len - 1], links[link_index + 1 ..]);
+            s.state.draftLinks = links[0 .. links.len - 1];
+        }
+        try s.save();
+    }
+    /// Put the kept draft back into Drafts exactly as it was: the same ID,
+    /// content, recipients, threading, sender, files and Gmail link. `expected`
+    /// (when not empty) must name it, so one window never restores another's.
+    pub fn restoreDiscardedDraft(s: *Store, expected: []const u8) ![]const u8 {
+        const slot = (try s.discardedDraft(s.allocator)) orelse return error.DiscardedDraftUnavailable;
+        const id = slot.summary.id;
+        if (expected.len != 0 and !std.mem.eql(u8, expected, id)) return error.DiscardedDraftUnavailable;
+        for (s.state.drafts) |draft_value| if (std.mem.eql(u8, draft_value.id, id)) {
+            // Already back (an interrupted restore or discard): only the slot goes.
+            try s.removeDiscardedDocument();
+            return id;
+        };
+        if (s.state.drafts.len >= 128) return error.DraftLimitExceeded;
+        const before = s.state;
+        errdefer s.state = before;
+        var drafts: std.ArrayList(t.Draft) = .empty;
+        try drafts.appendSlice(s.allocator, s.state.drafts);
+        try drafts.append(s.allocator, slot.summary);
+        s.state.drafts = drafts.items;
+        if (slot.pins) |pins| {
+            var references: std.ArrayList(DraftBlobReferences) = .empty;
+            try references.appendSlice(s.allocator, s.state.relatedDraftBlobs);
+            try references.append(s.allocator, pins);
+            s.state.relatedDraftBlobs = references.items;
+        }
+        if (slot.gmailLink) |link| {
+            var links: std.ArrayList(@import("draft_link.zig").Link) = .empty;
+            try links.appendSlice(s.allocator, s.state.draftLinks);
+            try links.append(s.allocator, link);
+            s.state.draftLinks = links.items;
+        }
+        // The kept records must still be intact (pins verify the source hash).
+        _ = s.draft(id) catch return error.DiscardedDraftUnavailable;
+        try s.save();
+        try s.removeDiscardedDocument();
+        return id;
+    }
+    /// Drop the kept draft for good (removing exactly what a plain discard
+    /// removes). `expected` (when not empty) must name it. Returns whether a
+    /// slot was dropped. A draft that is still or again in Drafts keeps its
+    /// records; only the slot goes.
+    pub fn forgetDiscardedDraft(s: *Store, expected: []const u8) !bool {
+        const slot = (try s.discardedDraft(s.allocator)) orelse return false;
+        if (expected.len != 0 and !std.mem.eql(u8, expected, slot.summary.id)) return false;
+        var active = false;
+        for (s.state.drafts) |draft_value| active = active or std.mem.eql(u8, draft_value.id, slot.summary.id);
+        if (!active and slot.retire.len != 0) {
+            try s.finishHistoryCleanup();
+            s.beginHistory();
+            errdefer s.abortHistory();
+            try s.commitHistory(slot.retire);
+        }
+        try s.removeDiscardedDocument();
+        return true;
+    }
+    /// Whether the kept draft still uses this attachment handle.
+    fn discardedDraftUses(s: *Store, id: []const u8) !bool {
+        var phase: std.heap.ArenaAllocator = .init(s.allocator);
+        defer phase.deinit();
+        const slot = (try s.discardedDraft(phase.allocator())) orelse return false;
+        for (slot.blobs) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        return false;
     }
     fn cancelDraftQueue(s: *Store, id: []const u8) !void {
         for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and (entry.state == .preparing or entry.state == .submitting or entry.state == .unknown)) return error.UnknownOutcome;

@@ -30,6 +30,8 @@ const entries = [_]Entry{
     .{ .code = "GmailDraftImportUnsupported", .text = "This Gmail draft cannot be imported completely; continue in Gmail" },
     .{ .code = "DraftPausedInGmail", .text = "This draft is paused in Gmail; check or take it back first" },
     .{ .code = "DraftSendQueued", .text = "A send is queued for this draft; cancel it (queue.cancel) before discarding" },
+    .{ .code = "DiscardedDraftUnavailable", .text = "No discarded draft is kept for this account (only the terminal UI keeps its last discard, until it exits)" },
+    .{ .code = "InvalidDiscardedDraft", .text = "The kept discarded draft is unreadable; nothing was restored" },
     .{ .code = "GmailDraftOutcomeUnknown", .text = "The Gmail draft upload is unconfirmed; check status and do not upload again" },
     .{ .code = "GmailDraftChanged", .text = "The Gmail draft handoff changed; read it again" },
     .{ .code = "GmailDraftConflict", .text = "The Gmail draft changed; check status before choosing a local copy" },

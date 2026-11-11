@@ -208,8 +208,6 @@ def run(binary, directory, capture_dir=None, mono=False):
         terminal.gap(.12)
         terminal.send(b"q")
         terminal.until(lambda: "Compose" not in terminal.screen.lines()[0])
-        # Leaving an unchanged composer drops keys until the keyboard is quiet.
-        terminal.gap(.75)
         terminal.send(b"2")
         terminal.until(lambda: ACCOUNTS[1] in terminal.screen.lines()[0] and "I · Respond" in terminal.text())
         banner(terminal, mono)

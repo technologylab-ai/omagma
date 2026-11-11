@@ -63,6 +63,14 @@ fn operationPayload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, c
 fn operationDigest(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar: ?[]const u8) ![64]u8 {
     return @import("send_outcome.zig").digest(a, draft, account, if (calendar) |ics| try calendarIdentity(a, ics) else null);
 }
+/// The terminal UI asks a save to name the digest of what the store now
+/// holds, computed in the same transaction, so a later guarded discard
+/// (expectedContentDigest) compares exactly that.
+fn reportSavedDigest(a: std.mem.Allocator, store: *storage.Store, request: Value, response: *Value, id: []const u8, address: []const u8) !void {
+    if (!try j.boolean(request, "returnContentDigest", false)) return;
+    const digest = try operationDigest(a, try store.draft(id), address, null);
+    try response.object.put(a, "contentDigest", .{ .string = try a.dupe(u8, &digest) });
+}
 fn requireReviewedDigest(request: Value, digest: []const u8) !void {
     if (j.get(request, "expectedContentDigest")) |value| {
         const expected = try j.string(value);
@@ -805,6 +813,7 @@ pub const Session = struct {
             const forked = previous_id.len != 0 and fork_if_settled and try recoveryForkAllowed(&store, previous_id);
             const saved = if (copy_source.len != 0 or forked) try store.putRecoveryCopy(draft, source_id) else try store.putDraft(draft, if (previous_id.len != 0) previous_id else null);
             var response = try draft_summary.savedResponse(a, saved, acknowledgement_only);
+            try reportSavedDigest(a, &store, req, &response, saved.id, address);
             if (forked) try response.object.put(a, "forkedFrom", .{ .string = previous_id });
             if (copy_source.len != 0) try response.object.put(a, "copiedFrom", .{ .string = copy_source });
             if (copy_source.len != 0 or forked) if (try @import("operation_history.zig").gmailLink(&store, a, saved.id)) |link| {
@@ -815,10 +824,22 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "draft.discard")) {
             const draft_id = try j.required(req, "draftId");
-            // Checked under the same store lock as the removal itself.
+            // Checked under the same store lock as the removal itself: a draft
+            // changed since the caller saw it is never removed.
+            if (j.get(req, "expectedContentDigest") != null) try requireReviewedDigest(req, &(try operationDigest(a, try store.draft(draft_id), address, null)));
             if (try j.boolean(req, "keepQueuedSend", false)) try store.requireNoQueuedSend(draft_id);
+            if (try j.boolean(req, "keepForUndo", false)) {
+                try store.softDiscardDraft(draft_id);
+                return j.value(a, .{ .discarded = true, .keptForUndo = true });
+            }
             try store.discardDraft(draft_id);
             return j.value(a, .{ .discarded = true });
+        }
+        if (std.mem.eql(u8, cmd, "draft.restore")) {
+            const expected = j.text(req, "draftId");
+            if (expected.len != 0) try @import("../bounded.zig").identifier(expected);
+            if (try j.boolean(req, "forget", false)) return j.value(a, .{ .forgotten = try store.forgetDiscardedDraft(expected) });
+            return j.value(a, .{ .restored = true, .draftId = try store.restoreDiscardedDraft(expected) });
         }
         if (std.mem.eql(u8, cmd, "draft.patch")) return s.patchDraft(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.create") or std.mem.eql(u8, cmd, "draft.update")) {
@@ -831,7 +852,10 @@ pub const Session = struct {
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "includeOriginal") == null) draft.includeOriginal = (try store.draft(try j.required(req, "draftId"))).includeOriginal;
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "original") == null) draft.original = (try store.draft(try j.required(req, "draftId"))).original;
             try validateDraft(draft, false);
-            return draft_summary.savedResponse(a, try store.putDraft(draft, if (std.mem.eql(u8, cmd, "draft.update")) try j.required(req, "draftId") else null), acknowledgement_only);
+            const saved = try store.putDraft(draft, if (std.mem.eql(u8, cmd, "draft.update")) try j.required(req, "draftId") else null);
+            var response = try draft_summary.savedResponse(a, saved, acknowledgement_only);
+            try reportSavedDigest(a, &store, req, &response, saved.id, address);
+            return response;
         }
         if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) {
             if (std.mem.eql(u8, cmd, "draft.send")) {
@@ -7370,5 +7394,61 @@ test "draft discard: keepQueuedSend refuses a queued send instead of cancelling 
     // cancelled and the draft removed.
     _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id }));
     try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "draft discard: kept for undo, restored exactly, replaced by the next discard and refused when changed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/undo-discard", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/notes.txt", .{tmp.sub_path});
+    const input = try tmp.dir.createFile(std.testing.io, "notes.txt", .{ .permissions = .fromMode(0o600) });
+    try input.writeStreamingAll(std.testing.io, "Synthetic attachment for undo\n");
+    input.close(std.testing.io);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const imported = try j.decode(t.Attachment, a, try session.dispatch(a, try j.value(a, .{ .cmd = "attachment.import", .account = account, .path = input_path })));
+    const reply: t.Draft = .{ .from = .{ .address = account, .name = "Fixture account" }, .to = &.{.{ .address = "peer@example.test", .name = "Peer Fixture" }}, .cc = &.{.{ .address = "cc@example.test" }}, .subject = "Re: Undo plan", .bodyText = "Typed reply worth keeping", .threadId = "thread-undo", .inReplyTo = "<source@example.test>", .references = "<root@example.test> <source@example.test>", .attachments = &.{imported} };
+    const id = j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = reply })), "id");
+    const before = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id }));
+    const before_text = try std.json.Stringify.valueAlloc(a, before, .{});
+    // A digest that no longer matches refuses: nothing is removed.
+    const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    try std.testing.expectError(error.ReviewedDraftChanged, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id, .expectedContentDigest = wrong, .keepForUndo = true })));
+    // Kept for undo: gone from Drafts, unreadable, unsendable, its file protected.
+    const kept = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id, .expectedContentDigest = j.text(before, "contentDigest"), .keepForUndo = true, .keepQueuedSend = true }));
+    try std.testing.expect(j.get(kept, "keptForUndo").?.bool);
+    try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id })));
+    try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = "kept-queue", .delaySeconds = 30 })));
+    try std.testing.expectError(error.AttachmentInUse, session.dispatch(a, try j.value(a, .{ .cmd = "attachment.discard", .account = account, .blobId = imported.blobId.? })));
+    // Another window's restore must name this draft.
+    try std.testing.expectError(error.DiscardedDraftUnavailable, session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .draftId = "draft-someone-else" })));
+    const restored = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .draftId = id }));
+    try std.testing.expectEqualStrings(id, j.text(restored, "draftId"));
+    try std.testing.expectEqualStrings(before_text, try std.json.Stringify.valueAlloc(a, try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id })), .{}));
+    try std.testing.expectError(error.DiscardedDraftUnavailable, session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account })));
+    // One slot: a second discard replaces the first, which is then final.
+    const other = j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Second", .bodyText = "Second note" } })), "id");
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id, .keepForUndo = true }));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = other, .keepForUndo = true }));
+    try std.testing.expectError(error.DiscardedDraftUnavailable, session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .draftId = id })));
+    try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id })));
+    // Forgetting is bound to the kept draft too, then final.
+    try std.testing.expect(!j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .draftId = id, .forget = true })), "forgotten").?.bool);
+    try std.testing.expect(j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account, .draftId = other, .forget = true })), "forgotten").?.bool);
+    try std.testing.expectError(error.DiscardedDraftUnavailable, session.dispatch(a, try j.value(a, .{ .cmd = "draft.restore", .account = account })));
+    try std.testing.expectEqual(@as(usize, 0), j.get(try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account })), "drafts").?.array.items.len);
+    // With nothing kept any more, the file is no longer protected.
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "attachment.discard", .account = account, .blobId = imported.blobId.? }));
     try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 }

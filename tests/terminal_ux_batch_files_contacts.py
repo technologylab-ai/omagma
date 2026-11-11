@@ -319,7 +319,7 @@ def discard_draft(binary, directory, capture_dir=None):
         terminal.until(lambda: "Review send" not in terminal.text())
         before = read_draft(binary, directory, extra)
         # The review shows its own keys: footer and the line under its buttons.
-        review = ("Discard local draft", "[y Discard]", "[Esc Cancel]", "y Discard · Esc Keep draft · Tab Buttons")
+        review = ("Discard local draft", "[Ctrl+X Discard]", "[Esc Cancel]", "Ctrl+X Discard · Esc Keep draft · Tab Buttons")
         command(terminal, "discard-draft")
         terminal.until(lambda: all(value in terminal.text() for value in (*review, "Discard only this local draft · 1 recipient")))
         terminal.send(ENTER)
@@ -328,17 +328,14 @@ def discard_draft(binary, directory, capture_dir=None):
         command(terminal, "discard-draft")
         terminal.until(lambda: all(value in terminal.text() for value in review))
         capture(terminal, capture_dir, "ux-local-draft-discard-review")
-        # The review confirms only after the keyboard has been still.
-        focus_button(terminal, "[y Discard]")
-        terminal.gap(.75)
+        # Tab reaches [Ctrl+X Discard]; Enter on it discards (Ctrl+Z restores).
+        focus_button(terminal, "[Ctrl+X Discard]")
         terminal.send(ENTER)
         terminal.until(lambda: "Subject:" not in terminal.text() and "[Esc Cancel]" not in terminal.text()
-                       and "Draft discarded" in terminal.text())
+                       and "Draft discarded · Ctrl+Z Undo" in terminal.text())
         with Client(binary, directory, extra=extra) as client:
-            require(client.request("draft.list")["drafts"] == [], "explicit local discard left recovery draft behind")
+            require(client.request("draft.list")["drafts"] == [], "explicit local discard left the draft in Drafts")
         no_writes(binary, directory, extra)
-        # Keys right after a discard are dropped until the keyboard is quiet.
-        terminal.gap(.75)
         terminal.finish()
     except Exception:
         diagnose(terminal)
