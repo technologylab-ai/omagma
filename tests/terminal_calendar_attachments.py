@@ -19,7 +19,7 @@ TITLE = "Utility payment due"
 MESSAGE = "published-payment"
 
 
-def setup(binary, root, ordinary=False, unsupported=False, long=False, inline=False, prime=True):
+def setup(binary, root, ordinary=False, unsupported=False, long=False, inline=False, prime=True, cancelled=False, huge=False):
     fixture = Invitations(root)
     path = fixture.root / "accounts/personal.json"
     source = json.loads(path.read_text())
@@ -31,6 +31,13 @@ def setup(binary, root, ordinary=False, unsupported=False, long=False, inline=Fa
         raw = raw.replace(b"ACTION:DISPLAY", b"ACTION:EMAIL")
     if long:
         raw = raw.replace(b"DESCRIPTION:\\nYour fictional", ("DESCRIPTION:" + "\\n".join(f"Fictional payment detail {n:03d}" for n in range(45)) + "\\nYour fictional").encode())
+    if huge:
+        # More than the card's 4096 bytes of notes, folded as RFC 5545 asks.
+        notes = "".join(f"Fictional payment detail {n:03d}. " for n in range(160))
+        folded = "\r\n ".join(notes[i:i + 70] for i in range(0, len(notes), 70))
+        raw = raw.replace(b"DESCRIPTION:\\nYour fictional", ("DESCRIPTION:" + folded + "\\nYour fictional").encode())
+    if cancelled:
+        raw = raw.replace(b"CLASS:PUBLIC\r\n", b"CLASS:PUBLIC\r\nSTATUS:CANCELLED\r\n")
     parts = message["payload"]["parts"]
     calendar = parts[1]
     calendar["mimeType"] = "text/plain"
@@ -198,6 +205,46 @@ def details_case(binary, root, ordinary=False):
     print("PASS published Calendar details:", "ordinary" if ordinary else "PUBLISH", "80x24 100x30 160x45 and 40x12")
 
 
+def truth_case(binary, root, cancelled=False, unsupported=False):
+    """Every sentence on the I card is true for that event: a cancelled event
+    has no A, so its shortened notes cannot point to A; an event whose only
+    alarm is unsupported says it will have no reminders, like the A review."""
+    fixture, directory = setup(binary, root, cancelled=cancelled, huge=cancelled, unsupported=unsupported)
+    terminal = MouseTerminal(binary, directory, extra=fixture.options(), columns=120, rows=36, screen_type=CalendarScreen,
+                             environment={"TZ": "Europe/Vienna", "NO_COLOR": None, "COLORTERM": "truecolor"})
+    try:
+        terminal.until(lambda: TITLE in terminal.text())
+        terminal.gap(.2)
+        terminal.send(b"I")
+        terminal.until(lambda: "Calendar event · details" in terminal.text() and "[Esc Close]" in terminal.text())
+        terminal.gap(.2)
+        terminal.send(b"G")
+        terminal.gap(.3)
+        shown = terminal.text()
+        if cancelled:
+            require("Event cancelled · nothing to add" in shown and "shortened here" in shown, "cancelled card lost its facts")
+            for refused in ("A shows the complete notes", "A adds it", "[A Add to calendar]"):
+                require(refused not in shown, f"cancelled card promised what A cannot do: {refused}")
+        if unsupported:
+            # The sentence wraps inside the card, beside the mailbox columns.
+            lines = terminal.screen.lines()
+            at = next((index for index, line in enumerate(lines) if "won't be added · this event will have no" in line), None)
+            whole = at is not None and ("will have no reminders" in lines[at] or (at + 1 < len(lines) and "│  reminders" in lines[at + 1]))
+            require(whole and "[A Add to calendar]" in shown,
+                    "an event with only unsupported alarms did not say it will have no reminders")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Calendar event · details" not in terminal.text())
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(client.request("cache.stats")["fixtureSends"] == 0, "viewing event details sent mail")
+        terminal.finish()
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+    print("PASS published Calendar card truth:", "cancelled" if cancelled else "unsupported alarms only")
+
+
 def legacy_case(binary, old_binary, root):
     fixture, directory = setup(binary, root, prime=False)
     with Client(old_binary, directory, extra=fixture.options()) as old:
@@ -231,6 +278,8 @@ def main():
         cli_case(binary, root / "unsupported", unsupported=True)
         details_case(binary, root / "publish-details")
         details_case(binary, root / "ordinary-details", ordinary=True)
+        truth_case(binary, root / "cancelled-truth", cancelled=True)
+        truth_case(binary, root / "unsupported-truth", unsupported=True)
         tui_case(binary, root / "publish-tui", args.captures)
         tui_case(binary, root / "ordinary-tui", args.captures, ordinary=True)
         tui_case(binary, root / "unsupported-tui", args.captures, unsupported=True)

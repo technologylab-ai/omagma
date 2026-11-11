@@ -962,12 +962,17 @@ reminders `A` would copy (or that your calendar's defaults apply, and any
 unsupported alarm that would not be copied), the notes (long notes are
 shortened here; the `A` review shows them in full) and what `A` adds: the event
 in your primary calendar, with nothing sent. There is no RSVP for such an event.
+Only an event `A` can add says what `A` adds: a cancelled or damaged event, or
+one sent with additional occurrences, shows its facts without that promise, and
+a damaged one says it can't be added from Omagma.
 
 The invitation card asks for a larger terminal only when it genuinely cannot
 show its account, organizer, outcome and controls, and then names the size it
-needs, for example **Make the terminal at least 80×18 to review this event**.
-Only an invitation you can answer adds **No RSVP can be sent at this size**.
-The `A` review names its required size the same way.
+needs, for example **Make the terminal at least 80×18 to review this event**
+(narrower than a usable card, it names the width first). The request uses the
+area between the header rows and the footer. Only an invitation you can answer
+adds **No RSVP can be sent at this size**. The `A` review names its required
+size the same way.
 
 Cancellation, publication and RSVP notices also open
 in the invitation drawer, with response controls disabled. Cancelled events do
