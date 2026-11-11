@@ -4,6 +4,9 @@
 //! Every result is bounded by the caps below and allocated by the caller's
 //! frame arena; the layout never depends on which event is focused, except
 //! that an explicitly selected block is always drawn, on top (see `place`).
+//! Invariant: no event is ever undrawn without being counted. A block is
+//! drawn, or `hidden` (counted by "+N" at its first visible hour), or loses
+//! rows to the floating selection (`cover_*`, counted where it loses them).
 const std = @import("std");
 const t = @import("calendar_types.zig");
 
@@ -79,8 +82,17 @@ pub const Placement = struct {
     lanes: u8 = 1,
     hidden: bool = false,
     /// A selection that had no free lane: drawn last, over its cluster's
-    /// last lane, so nothing else moves or disappears.
+    /// last lane (full width beyond `max_segments`), so lane geometry never
+    /// shifts. Blocks beneath it lose those rows, as `cover_*` records.
     floating: bool = false,
+    /// Rows `[cover_top, cover_bottom)` drawn over by the floating selection;
+    /// empty when equal. A block covered entirely is `hidden` instead.
+    cover_top: usize = 0,
+    cover_bottom: usize = 0,
+
+    pub fn covered(self: Placement) bool {
+        return self.cover_bottom > self.cover_top;
+    }
 };
 
 fn rowSpan(item: Item, rph: u8) struct { usize, usize } {
@@ -91,18 +103,16 @@ fn rowSpan(item: Item, rph: u8) struct { usize, usize } {
 
 const Order = struct {
     items: []const Item,
-    placements: []const Placement,
-    /// Earlier first; at the same row non-declined, then Priority, then the
-    /// longer block, then the caller's chronological order. Stable.
+    /// The real start minute first (rows follow it, so greedy lanes stay
+    /// optimal); at the same minute non-declined, then Priority, then the
+    /// longer event, then the caller's chronological order. Stable.
     fn less(self: Order, left: usize, right: usize) bool {
-        const a = self.placements[left];
-        const b = self.placements[right];
-        if (a.top != b.top) return a.top < b.top;
         const x = self.items[left];
         const y = self.items[right];
+        if (x.first != y.first) return x.first < y.first;
         if (x.declined != y.declined) return !x.declined;
         if (x.preferred != y.preferred) return x.preferred;
-        if (a.bottom != b.bottom) return a.bottom > b.bottom;
+        if (x.end - x.first != y.end - y.first) return x.end - x.first > y.end - y.first;
         return left < right;
     }
 };
@@ -111,13 +121,15 @@ fn overlaps(a: Placement, b: Placement) bool {
     return a.top < b.bottom and b.top < a.bottom;
 }
 
-/// Lay out one day column. Items are in the caller's chronological order;
-/// results use the same indices. Only `max_segments` items are placed; any
-/// further item is returned hidden. `selected`, when given, is drawn even if
-/// its cluster has more lanes than `lane_cap`: it floats over the last drawn
-/// lane, so lane geometry and the other blocks never shift.
-pub fn place(a: std.mem.Allocator, items: []const Item, rph: u8, lane_cap: u8, selected: ?usize) ![]Placement {
-    std.debug.assert(rph >= 1 and rph <= 4 and lane_cap >= 1 and lane_cap <= max_lanes);
+/// Lay out one day column `cells` wide. Items are in the caller's
+/// chronological order; results use the same indices. Only `max_segments`
+/// items are placed; any further item is returned hidden. `selected`, when
+/// given, is always drawn: without a lane of its own (or beyond
+/// `max_segments`) it floats over its cluster's last lane (full width), and
+/// every block beneath it records the rows it loses.
+pub fn place(a: std.mem.Allocator, items: []const Item, rph: u8, cells: usize, selected: ?usize) ![]Placement {
+    std.debug.assert(rph >= 1 and rph <= 4);
+    const lane_cap = laneCap(cells);
     const result = try a.alloc(Placement, items.len);
     errdefer a.free(result);
     const laid = @min(items.len, max_segments);
@@ -128,7 +140,7 @@ pub fn place(a: std.mem.Allocator, items: []const Item, rph: u8, lane_cap: u8, s
     const order = try a.alloc(usize, laid);
     defer a.free(order);
     for (order, 0..) |*value, index| value.* = index;
-    std.mem.sort(usize, order, Order{ .items = items, .placements = result }, Order.less);
+    std.mem.sort(usize, order, Order{ .items = items }, Order.less);
     var lane_end: [tracked_lanes]usize = undefined;
     var cluster_start: usize = 0;
     var cluster_bottom: usize = 0;
@@ -149,6 +161,11 @@ pub fn place(a: std.mem.Allocator, items: []const Item, rph: u8, lane_cap: u8, s
         cluster_bottom = @max(cluster_bottom, placement.bottom);
     }
     if (laid > 0) finish(result, order[cluster_start..laid], lane_cap, selected);
+    if (selected) |chosen| if (chosen < items.len and chosen >= laid) {
+        // Never laid out: drawn full width over whatever shares its rows.
+        result[chosen] = .{ .top = result[chosen].top, .bottom = result[chosen].bottom, .floating = true };
+    };
+    cover(result, cells);
     return result;
 }
 
@@ -160,10 +177,14 @@ fn finish(result: []Placement, members: []const usize, lane_cap: u8, selected: ?
         result[index].lanes = lanes;
         result[index].hidden = result[index].lane >= lanes;
     }
-    // Widen a block into following lanes that stay free for its whole height.
+    if (selected) |chosen| if (std.mem.indexOfScalar(usize, members, chosen) != null and result[chosen].hidden) {
+        result[chosen] = .{ .top = result[chosen].top, .bottom = result[chosen].bottom, .lane = lanes - 1, .lanes = lanes, .floating = true };
+    };
+    // Widen a block into following lanes that stay free for its whole
+    // height; a floating selection occupies its lane like any other block.
     for (members) |index| {
         const block = &result[index];
-        if (block.hidden) continue;
+        if (block.hidden or block.floating) continue;
         var span: u8 = 1;
         widen: while (block.lane + span < lanes) : (span += 1) {
             for (members) |other| {
@@ -174,9 +195,29 @@ fn finish(result: []Placement, members: []const usize, lane_cap: u8, selected: ?
         }
         block.span = span;
     }
-    if (selected) |chosen| if (std.mem.indexOfScalar(usize, members, chosen) != null and result[chosen].hidden) {
-        result[chosen] = .{ .top = result[chosen].top, .bottom = result[chosen].bottom, .lane = lanes - 1, .lanes = lanes, .floating = true };
-    };
+}
+
+/// Every drawn block the floating selection overlaps loses those rows; one
+/// that loses all of them is hidden, so "+N" still counts it.
+fn cover(result: []Placement, cells: usize) void {
+    const floating = for (result) |block| {
+        if (block.floating) break block;
+    } else return;
+    const left = laneX(cells, floating.lane, floating.lanes);
+    const right = laneX(cells, @as(usize, floating.lane) + floating.span, floating.lanes);
+    for (result) |*block| {
+        if (block.floating or block.hidden or !overlaps(block.*, floating)) continue;
+        const x0 = laneX(cells, block.lane, block.lanes);
+        const x1 = laneX(cells, @as(usize, block.lane) + block.span, block.lanes);
+        if (x1 <= left or right <= x0) continue;
+        block.cover_top = @max(block.top, floating.top);
+        block.cover_bottom = @min(block.bottom, floating.bottom);
+        if (block.cover_top == block.top and block.cover_bottom == block.bottom) {
+            block.hidden = true;
+            block.cover_top = 0;
+            block.cover_bottom = 0;
+        }
+    }
 }
 
 pub const BandItem = struct {
@@ -285,8 +326,17 @@ pub fn contrast(left: Rgb, right: Rgb) f64 {
     const r = luminance(right);
     return (@max(l, r) + 0.05) / (@min(l, r) + 0.05);
 }
-/// Body text keeps at least WCAG AA contrast on a tinted block.
+/// Titles, times and places keep at least WCAG AA contrast on their fill,
+/// including the selected block's solid fill.
 pub const text_floor = 4.5;
+/// Deliberately dimmed text (past, declined, busy-only, stale) and the
+/// source-coloured title of an unanswered event keep at least 3:1; below
+/// that they fall back to the theme foreground.
+pub const quiet_floor = 3.0;
+/// `preferred` when it keeps `floor` on `fill`, otherwise `fallback`.
+pub fn inkOn(preferred: Rgb, fill: Rgb, fallback: Rgb, floor: f64) Rgb {
+    return if (contrast(preferred, fill) >= floor) preferred else fallback;
+}
 /// A tint of `color` on `background` at up to `percent`, reduced until `text`
 /// keeps `floor` contrast on it (never below the plain background).
 pub fn readableFill(color: Rgb, background: Rgb, text: Rgb, percent: u8, floor: f64) Rgb {
@@ -301,11 +351,38 @@ pub fn readableFill(color: Rgb, background: Rgb, text: Rgb, percent: u8, floor: 
 pub fn onColor(color: Rgb, background: Rgb, foreground: Rgb) Rgb {
     return if (contrast(background, color) >= contrast(foreground, color)) background else foreground;
 }
+pub const Solid = struct { fill: Rgb, ink: Rgb };
+/// The selected block's solid fill and text: the calendar colour, moved
+/// toward the theme end opposite its text until the text reaches
+/// `text_floor` (or as far as the theme's own contrast allows).
+pub fn selectedColors(color: Rgb, background: Rgb, foreground: Rgb) Solid {
+    const ink = onColor(color, background, foreground);
+    const away = if (std.mem.eql(u8, &ink, &background)) foreground else background;
+    var percent: u8 = 0;
+    while (percent <= 100) : (percent += 5) {
+        const fill = mix(color, away, percent);
+        if (contrast(ink, fill) >= text_floor) return .{ .fill = fill, .ink = ink };
+    }
+    return .{ .fill = away, .ink = ink };
+}
 
 // Tests --------------------------------------------------------------------
 
 fn testPlace(items: []const Item, rph: u8, cap: u8, selected: ?usize) ![]Placement {
-    return place(std.testing.allocator, items, rph, cap, selected);
+    return place(std.testing.allocator, items, rph, @as(usize, cap) * min_lane_cells, selected);
+}
+/// The grid's promise: each item is drawn on at least one row, or hidden
+/// (and so counted), and every row lost to the selection is recorded.
+fn expectAccounted(placements: []const Placement) !void {
+    for (placements) |block| {
+        if (block.hidden) continue;
+        try std.testing.expect(block.top < block.bottom);
+        if (block.covered()) {
+            try std.testing.expect(!block.floating);
+            try std.testing.expect(block.cover_top >= block.top and block.cover_bottom <= block.bottom);
+            try std.testing.expect(block.cover_top > block.top or block.cover_bottom < block.bottom);
+        }
+    }
 }
 
 test "calendar grid: row mapping keeps short and zero-length events readable" {
@@ -388,15 +465,67 @@ test "calendar grid: crowded clusters keep bounded lanes and an explicit selecti
     const promoted = try testPlace(&items, 2, 3, 11);
     defer std.testing.allocator.free(promoted);
     try std.testing.expect(!promoted[11].hidden and promoted[11].floating and promoted[11].lane == 2 and promoted[11].span == 1);
-    // Everything else is exactly as before: the selection floats on top.
+    // Lanes never move. The block it covers in the last lane is hidden, so
+    // "+N" counts it; everything else is exactly as before.
     for (placements, promoted, 0..) |before, after, index| {
         if (index == 11) continue;
+        if (before.lane == 2 and !before.hidden) {
+            try std.testing.expect(after.hidden and after.lane == 2);
+            continue;
+        }
         try std.testing.expectEqualDeep(before, after);
     }
+    try expectAccounted(promoted);
     // A selection that already has a lane is not moved.
     const visible = try testPlace(&items, 2, 3, 2);
     defer std.testing.allocator.free(visible);
     try std.testing.expectEqualDeep(placements[2], visible[2]);
+}
+
+test "calendar grid: a revealed selection never leaves a covered event uncounted" {
+    // One lane: 08:30–09:30, a 09:00–17:00 routine, 13:00 and 15:00 starts.
+    const items = [_]Item{
+        .{ .first = 510, .end = 570 },
+        .{ .first = 540, .end = 1020 },
+        .{ .first = 780, .end = 840 },
+        .{ .first = 900, .end = 930 },
+    };
+    const passive = try testPlace(&items, 2, 1, null);
+    defer std.testing.allocator.free(passive);
+    try std.testing.expect(passive[1].hidden and !passive[2].hidden and !passive[3].hidden);
+    const revealed = try testPlace(&items, 2, 1, 1);
+    defer std.testing.allocator.free(revealed);
+    try expectAccounted(revealed);
+    try std.testing.expect(revealed[1].floating and !revealed[1].hidden);
+    // 08:30 keeps its first row and records losing 09:00–09:30; the later
+    // starts lie wholly beneath the routine and are hidden, hence counted.
+    try std.testing.expect(!revealed[0].hidden and revealed[0].cover_top == 18 and revealed[0].cover_bottom == 19);
+    try std.testing.expect(revealed[2].hidden and revealed[3].hidden);
+    // Two identical meetings in one lane: revealing the second hides the first.
+    const twins = [_]Item{ .{ .first = 600, .end = 660 }, .{ .first = 600, .end = 660 } };
+    const pair = try testPlace(&twins, 2, 1, 1);
+    defer std.testing.allocator.free(pair);
+    try std.testing.expect(pair[1].floating and pair[0].hidden);
+    // With room in another lane nothing floats and nothing is covered.
+    const roomy = try testPlace(&items, 2, 3, 1);
+    defer std.testing.allocator.free(roomy);
+    for (roomy) |block| try std.testing.expect(!block.hidden and !block.floating and !block.covered());
+}
+
+test "calendar grid: lanes follow real start minutes, then duration, within a rounded row" {
+    // One row per hour: 09:30–11:15 and 09:00–09:15 share the 09:00 row; the
+    // earlier start keeps the first lane even though the other is longer.
+    const placements = try testPlace(&.{
+        .{ .first = 570, .end = 675 },
+        .{ .first = 540, .end = 555 },
+    }, 1, 2, null);
+    defer std.testing.allocator.free(placements);
+    try std.testing.expectEqual(@as(u8, 1), placements[0].lane);
+    try std.testing.expectEqual(@as(u8, 0), placements[1].lane);
+    // Equal starts: the longer event first.
+    const equal = try testPlace(&.{ .{ .first = 600, .end = 630 }, .{ .first = 600, .end = 720 } }, 2, 2, null);
+    defer std.testing.allocator.free(equal);
+    try std.testing.expectEqual(@as(u8, 0), equal[1].lane);
 }
 
 test "calendar grid: an unbounded day is laid out in bounded memory and order" {
@@ -404,8 +533,19 @@ test "calendar grid: an unbounded day is laid out in bounded memory and order" {
     defer arena.deinit();
     const items = try arena.allocator().alloc(Item, max_segments + 40);
     for (items, 0..) |*item, index| item.* = .{ .first = @intCast(index % 1440), .end = @intCast(@min(index % 1440 + 90, 1440)) };
-    const placements = try place(arena.allocator(), items, 4, max_lanes, null);
+    const placements = try place(arena.allocator(), items, 4, max_lanes * min_lane_cells, null);
     for (placements[max_segments..]) |placement| try std.testing.expect(placement.hidden);
+    try expectAccounted(placements);
+    // A selection beyond the laid-out segments is still drawn, full width,
+    // and whatever it covers is accounted for.
+    const chosen = max_segments + 20;
+    const selected = try place(arena.allocator(), items, 4, max_lanes * min_lane_cells, chosen);
+    try std.testing.expect(selected[chosen].floating and !selected[chosen].hidden and selected[chosen].lanes == 1);
+    try expectAccounted(selected);
+    for (selected, 0..) |block, index| {
+        if (index == chosen or block.hidden or block.floating) continue;
+        if (overlaps(block, selected[chosen])) try std.testing.expect(block.covered());
+    }
     for (placements) |placement| {
         try std.testing.expect(placement.top < placement.bottom and placement.bottom <= dayRows(4));
         try std.testing.expect(placement.lanes >= 1 and placement.lanes <= max_lanes);
@@ -482,12 +622,18 @@ test "calendar grid: tinted blocks keep text contrast in dark and light themes" 
     const dark_fg: Rgb = .{ 232, 235, 241 };
     const light_bg: Rgb = .{ 250, 250, 248 };
     const light_fg: Rgb = .{ 30, 30, 36 };
-    for ([_]Rgb{ .{ 92, 177, 255 }, .{ 255, 198, 98 }, .{ 255, 112, 112 }, .{ 255, 255, 255 }, .{ 0, 0, 0 } }) |color| {
+    for ([_]Rgb{ .{ 92, 177, 255 }, .{ 255, 198, 98 }, .{ 255, 112, 112 }, .{ 255, 255, 255 }, .{ 0, 0, 0 }, .{ 128, 128, 128 }, .{ 119, 119, 119 } }) |color| {
         for ([_][2]Rgb{ .{ dark_bg, dark_fg }, .{ light_bg, light_fg } }) |theme| {
             const fill = readableFill(color, theme[0], theme[1], 40, text_floor);
-            try std.testing.expect(contrast(theme[1], fill) >= text_floor or std.mem.eql(u8, &fill, &theme[0]));
+            try std.testing.expect(contrast(theme[1], fill) >= text_floor);
             const on = onColor(color, theme[0], theme[1]);
             try std.testing.expectEqual(@max(contrast(theme[0], color), contrast(theme[1], color)), contrast(on, color));
+            // The selected block's text reaches text_floor on its fill.
+            const solid = selectedColors(color, theme[0], theme[1]);
+            try std.testing.expect(contrast(solid.ink, solid.fill) >= text_floor);
+            // Dimmed text falls back below its own floor.
+            const quiet = inkOn(mix(theme[0], theme[1], 30), fill, theme[1], quiet_floor);
+            try std.testing.expect(contrast(quiet, fill) >= quiet_floor or std.mem.eql(u8, &quiet, &theme[1]));
         }
     }
     try std.testing.expectEqualSlices(u8, &.{ 17, 22, 32 }, &mix(dark_bg, dark_fg, 0));

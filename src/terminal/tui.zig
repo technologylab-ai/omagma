@@ -964,7 +964,7 @@ const calendar_help_rows = [_]HelpRow{
     .{ .keys = "Space / click +N", .action = "List the events beside the selected one, or in that hour; Enter selects and reveals, Esc returns" },
     .{ .keys = "Ctrl+E / Ctrl+Y", .action = "Scroll the Day/Week time axis an hour later / earlier" },
     .{ .keys = "g then p", .action = "Optional Priority calendar: first lane at equal starts" },
-    .{ .action = "Day/Week blocks: solid bar accepted · dashed tentative · outline unanswered, or declined and struck through · hatched busy only; +N lists events without room." },
+    .{ .action = "Day/Week: solid bar accepted · dashed tentative · dotted bar, no fill: unanswered, or declined (struck) · hatched busy only; ~ ? × lead titles. +N counts the rest." },
     .{ .keys = "Enter", .action = "Open the selected event or activate the focused control" },
     .{ .keys = "g", .action = "Choose calendars to show together; Space selects, Enter applies, Esc cancels" },
     .{ .keys = "a / c / o in calendar picker", .action = "Switch account/all-account scope / change source color / open only this calendar" },
@@ -19427,7 +19427,21 @@ const App = struct {
         const query: calendar_slot.Query = if (bucket) |value| .{ .bucket = value } else .{ .selected = .{ .identity = origin, .viewport = viewport } };
         var snapshot = try calendar_slot.Snapshot.init(self.allocator, self.calendarEvents(), query, self.calendar_query.value(), &self.calendar.zone, origin);
         errdefer snapshot.deinit();
-        if (snapshot.events.len == 0) return snapshot.deinit();
+        if (snapshot.events.len == 0 and bucket == null) {
+            // Space with the selection scrolled out of view (Ctrl+E/Ctrl+Y):
+            // bring it back and list what shares its rows over the whole day.
+            self.calendar_grid_pinned = null;
+            snapshot.deinit();
+            var whole = viewport;
+            whole.first_hour = 0;
+            whole.hours = 24;
+            snapshot = try calendar_slot.Snapshot.init(self.allocator, self.calendarEvents(), .{ .selected = .{ .identity = origin, .viewport = whole } }, self.calendar_query.value(), &self.calendar.zone, origin);
+        }
+        if (snapshot.events.len == 0) {
+            snapshot.deinit();
+            try self.calendar.notice.set("Nothing to list here · the selected event is outside this range");
+            return;
+        }
         // Finish every allocation/validation before transferring the arena.
         // A later display failure must never leave an App-owned dangling copy.
         var initial: usize = 0;
@@ -19440,7 +19454,7 @@ const App = struct {
         while (title_end > 0 and !std.unicode.utf8ValidateSlice(title[0..title_end])) title_end -= 1;
         var bounded_title: @import("../bounded.zig").Text(128) = .{};
         try bounded_title.set(title[0..title_end]);
-        try self.calendar.notice.set("Choose an event to reveal in Week · no event is opened or changed");
+        try self.calendar.notice.set(if (self.calendar.view == .day) "Choose an event to reveal in Day · no event is opened or changed" else "Choose an event to reveal in Week · no event is opened or changed");
         self.preemptReadOnly();
         self.calendar_slots_drawn = null;
         self.calendar_slots.deinit();
@@ -20232,7 +20246,9 @@ const App = struct {
         if (value != .null) {
             const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, value, .{});
             const end = get(event, "end");
-            const at = if (point.kind == .instant and end != .null) try std.fmt.allocPrint(a, "{s}–{s}", .{ try calendar_ui.clock(a, point, &self.calendar.zone), try calendar_ui.clock(a, try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, end, .{}), &self.calendar.zone) }) else try calendar_ui.clock(a, point, &self.calendar.zone);
+            const closing: ?@import("calendar_time.zig").Point = if (end != .null) try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, end, .{}) else null;
+            // A timed event lasting a day or more names its end day too.
+            const at = if (point.kind == .instant and closing != null and calendar_grid.inBand(point, closing.?)) try std.fmt.allocPrint(a, "{s} – {s} {s}", .{ try calendar_ui.clock(a, point, &self.calendar.zone), try calendar_text.shortDate(a, try calendar_ui.pointDay(closing.?, &self.calendar.zone)), try calendar_ui.clock(a, closing.?, &self.calendar.zone) }) else if (point.kind == .instant and closing != null) try std.fmt.allocPrint(a, "{s}–{s}", .{ try calendar_ui.clock(a, point, &self.calendar.zone), try calendar_ui.clock(a, closing.?, &self.calendar.zone) }) else try calendar_ui.clock(a, point, &self.calendar.zone);
             stamp = if (include_date) try std.fmt.allocPrint(a, "{s} {s}", .{ try calendar_ui.dayText(a, try calendar_ui.pointDay(point, &self.calendar.zone)), at }) else at;
         }
         return calendarEventLabel(a, stamp, calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), calendar_ui.canJoin(event));
@@ -20423,7 +20439,7 @@ const App = struct {
             x +|= @intCast(body.gwidth(shown));
         }
         x = try self.calendarTab(body, row, x, " ›", false, self.calendar.focus == 5, 5);
-        const extra = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ if (self.calendar.view == .week and width < 104) @as([]const u8, " · Week needs 104 cols") else "", if (self.calendar_query.value().len > 0) @as([]const u8, " · Filter: ") else "", self.calendar_query.value() });
+        const extra = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ if (self.calendar.view == .week and width < 60) @as([]const u8, " · Week needs 60 cols") else if (self.calendar.view == .week and width < 104) " · 104 cols show 7 days" else "", if (self.calendar_query.value().len > 0) @as([]const u8, " · Filter: ") else "", self.calendar_query.value() });
         if (extra.len > 0 and x < body.width) {
             const shown = try self.fitLine(body, extra, body.width - x);
             try self.line(body.child(.{ .x_off = x, .y_off = @intCast(row), .height = 1 }), 0, shown, .accent);
@@ -20873,15 +20889,17 @@ const App = struct {
     /// role; without colour, every state stays distinct through glyphs and
     /// attributes and the selection is reverse video.
     const GridLook = struct { body: vaxis.Style, title: vaxis.Style, bar: vaxis.Style, glyph: []const u8, hatch: bool };
-    fn calendarGridLook(self: *App, event: Value, selected: bool, past: bool) GridLook {
+    /// `ground` is the empty column's background (today and weekends are
+    /// tinted), used where a block is drawn without a fill.
+    fn calendarGridLook(self: *App, event: Value, selected: bool, past: bool, ground: theme.Color) GridLook {
         const placeholder = calendarPlaceholder(event);
         const response = text(get(event, "response"));
         const declined = same(response, "declined");
         const tentative = same(response, "tentative");
         const pending = same(response, "needs_action");
         const quiet = declined or placeholder or past or truth(get(event, "source_stale"));
-        // Solid bar: accepted; dashed: tentative; dotted outline: unanswered
-        // or declined (declined is also struck through).
+        // The bar: solid when accepted, dashed when tentative, dotted when
+        // unanswered or declined. The title's ~ ? × says the same in text.
         const glyph: []const u8 = if (declined or pending) "┊" else if (tentative) "┆" else "▌";
         if (self.mono) {
             const body: vaxis.Style = .{ .reverse = selected, .italic = tentative, .dim = quiet and !selected };
@@ -20893,9 +20911,10 @@ const App = struct {
         const palette = self.palette;
         const source: theme.Color = if (placeholder) palette.muted else if (calendar_sources.jsonTarget(event)) |target| calendar_sources.readableRgb(self.ui_preferences.calendar.color(target), palette) else |_| palette.muted;
         if (selected) {
-            // The whole block takes its calendar colour: unmistakable at a glance.
-            const ink = calendar_grid.onColor(source, palette.background, palette.foreground);
-            const body: vaxis.Style = .{ .fg = .{ .rgb = ink }, .bg = .{ .rgb = source }, .italic = tentative };
+            // The whole block takes its calendar colour, adjusted only as far
+            // as its text needs to reach calendar_grid.text_floor.
+            const solid = calendar_grid.selectedColors(source, palette.background, palette.foreground);
+            const body: vaxis.Style = .{ .fg = .{ .rgb = solid.ink }, .bg = .{ .rgb = solid.fill }, .italic = tentative };
             var title = body;
             title.bold = true;
             title.strikethrough = declined;
@@ -20903,11 +20922,14 @@ const App = struct {
             bar.bold = true;
             return .{ .body = body, .title = title, .bar = bar, .glyph = glyph, .hatch = placeholder };
         }
-        const outline = declined or pending;
-        const percent: u8 = if (outline) 0 else if (placeholder) 12 else if (tentative) 16 else if (past) 18 else 32;
-        const fill = if (percent == 0) palette.background else calendar_grid.readableFill(source, palette.background, palette.foreground, percent, calendar_grid.text_floor);
-        const preferred_ink = if (quiet) palette.muted else if (pending) source else palette.foreground;
-        const ink = if (calendar_grid.contrast(preferred_ink, fill) >= 3) preferred_ink else palette.foreground;
+        // Unanswered and declined events have no fill, only their bar.
+        const unfilled = declined or pending;
+        const percent: u8 = if (unfilled) 0 else if (placeholder) 12 else if (tentative) 16 else if (past) 18 else 32;
+        // Plain text keeps text_floor on the tint (readableFill guarantees it
+        // for the foreground); dimmed and source-coloured text keep quiet_floor.
+        // Filled blocks look alike in every column; unfilled ones show it.
+        const fill = if (unfilled) ground else calendar_grid.readableFill(source, palette.background, palette.foreground, percent, calendar_grid.text_floor);
+        const ink = if (quiet) calendar_grid.inkOn(palette.muted, fill, palette.foreground, calendar_grid.quiet_floor) else if (pending) calendar_grid.inkOn(source, fill, palette.foreground, calendar_grid.quiet_floor) else palette.foreground;
         const body: vaxis.Style = .{ .fg = .{ .rgb = ink }, .bg = .{ .rgb = fill }, .italic = tentative };
         var title = body;
         title.bold = !declined and !placeholder;
@@ -20985,22 +21007,21 @@ const App = struct {
         const parts = calendarBlockTitle(event, with_camera);
         return std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}{s}", .{ parts.mark, if (parts.mark.len > 0) @as([]const u8, " ") else "", if (parts.camera) @as([]const u8, " ") else "", parts.title });
     }
-    const GridFrame = struct { top: usize, grid_y: usize, rph: u8, cells: usize, day: i64, selected: bool, sources: usize, now_ms: i64 };
-    /// One timed block's visible rows: fill, state bar, wrapped title, time
-    /// and place, and one mouse target per hour so a click pins its hour.
-    fn calendarGridBlock(self: *App, area: vaxis.Window, entry: calendar_slot.Projection, block: calendar_grid.Placement, first_row: usize, last_row: usize, frame: GridFrame) !void {
+    const GridFrame = struct { top: usize, grid_y: usize, rph: u8, cells: usize, day: i64, selected: bool, sources: usize, now_ms: i64, ground: theme.Color };
+    /// Rows `[first_row, last_row)` of one timed block: fill, state bar,
+    /// wrapped title, time and place, and one mouse target per hour so a
+    /// click pins its hour. `start_minute` is the block's civil start in this
+    /// column; a title row that does not begin at that minute says when.
+    fn calendarGridBlock(self: *App, area: vaxis.Window, entry: calendar_slot.Projection, block: calendar_grid.Placement, first_row: usize, last_row: usize, start_minute: u16, frame: GridFrame) !void {
         const a = self.frame.allocator();
         const zone = &self.calendar.zone;
         const top = frame.top;
         const grid_y = frame.grid_y;
         const rph = frame.rph;
         const cells = frame.cells;
-        const sources = frame.sources;
-        const now_ms = frame.now_ms;
-        const day = frame.day;
         const event = entry.event;
-        const past = (if (entry.end.kind == .date) entry.end.value * 86400000 else entry.end.value) <= now_ms;
-        const look = self.calendarGridLook(event, frame.selected, past);
+        const past = (if (entry.end.kind == .date) entry.end.value * 86400000 else entry.end.value) <= frame.now_ms;
+        const look = self.calendarGridLook(event, frame.selected, past, frame.ground);
         const lx = calendar_grid.laneX(cells, block.lane, block.lanes);
         const rx = calendar_grid.laneX(cells, @as(usize, block.lane) + block.span, block.lanes);
         const width = rx - lx;
@@ -21010,7 +21031,7 @@ const App = struct {
             calendarGridPaint(area, lx, y0 + offset, width, if (look.hatch and offset > 0) "╱" else " ", look.body);
             calendarGridPaint(area, lx, y0 + offset, 1, look.glyph, look.bar);
         }
-        if (sources > 1) try self.calendarGridText(area, lx, y0, 1, try self.calendarSourceLabel(event), look.bar);
+        if (frame.sources > 1) try self.calendarGridText(area, lx, y0, 1, try self.calendarSourceLabel(event), look.bar);
         // Text: title (wrapped when tall), then time, then place.
         const inner = width -| 1;
         const clock_from = try calendar_ui.clock(a, entry.identity.start, zone);
@@ -21020,9 +21041,13 @@ const App = struct {
         const label = try self.calendarBlockLabel(event, inner >= 6);
         // The full interval when it fits, else its start.
         const when = if (area.gwidth(times) <= inner) times else clock_from;
-        if (height == 1) {
-            const single = if (inner >= 20 and !look.hatch) try std.fmt.allocPrint(a, "{s} {s}", .{ clock_from, label }) else label;
-            try self.calendarGridText(area, lx + 1, y0, inner, single, look.title);
+        // A row covers rph minutes; a start inside it must be named, at
+        // every scale ("13:30", or ":30" when narrow).
+        const off_row = first_row == block.top and start_minute != calendar_grid.minuteOf(block.top, rph) and clock_from.len == 5;
+        const stamp: []const u8 = if (off_row) (if (inner >= 16) clock_from else clock_from[2..]) else "";
+        if (height == 1 or look.hatch) {
+            const prefix = if (stamp.len > 0) stamp else if (inner >= 20 and height == 1) clock_from else "";
+            try self.calendarGridText(area, lx + 1, y0, inner, if (prefix.len > 0) try std.fmt.allocPrint(a, "{s} {s}", .{ prefix, label }) else label, look.title);
         } else {
             const detail_rows: usize = if (height >= 3 and location.len > 0) 2 else 1;
             const title_rows = @min(height - detail_rows, 3);
@@ -21032,20 +21057,19 @@ const App = struct {
             if (detail_rows == 2) {
                 try self.calendarGridText(area, lx + 1, y0 + after, inner, when, look.body);
                 try self.calendarGridText(area, lx + 1, y0 + after + 1, inner, location, look.body);
-            } else if (!look.hatch) try self.calendarGridText(area, lx + 1, y0 + after, inner, if (location.len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ when, location }) else when, look.body);
+            } else try self.calendarGridText(area, lx + 1, y0 + after, inner, if (location.len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ when, location }) else when, look.body);
         }
-        // One mouse target per hour of the block, so a click pins the
-        // hour it was made in.
         var row = first_row;
         while (row < last_row) {
             const hour_end = @min(last_row, (row / rph + 1) * rph);
-            self.calendarWeekTitleHit(area.child(.{ .x_off = @intCast(lx), .width = @intCast(width) }), grid_y + row - top, @intCast(hour_end - row), entry.visible_index, .{ .day = day, .hour = @intCast(row / rph) });
+            self.calendarWeekTitleHit(area.child(.{ .x_off = @intCast(lx), .width = @intCast(width) }), grid_y + row - top, @intCast(hour_end - row), entry.visible_index, .{ .day = frame.day, .hour = @intCast(row / rph) });
             row = hour_end;
         }
     }
     /// Day (one column) and Week (seven, or three when compact): a time axis
     /// with event blocks sized by duration, overlapping events side by side,
-    /// and all-day or day-long events in a spanning band above.
+    /// and all-day or day-long events in a spanning band above. Every event
+    /// in range is drawn or counted by a "+N" that lists it.
     fn drawCalendarWeekAt(self: *App, win: vaxis.Window, now_ms: i64) !void {
         self.calendar_week_viewport = null;
         self.calendar_week_related = 0;
@@ -21058,7 +21082,7 @@ const App = struct {
             return self.drawCalendarAgenda(win.child(.{ .y_off = 1, .height = win.height -| 1 }));
         }
         const gutter: usize = 6;
-        if (win.width < gutter + 12 or win.height < 3) return self.drawCalendarAgenda(win);
+        if (win.width < gutter + 12) return self.drawCalendarAgenda(win);
         const a = self.frame.allocator();
         const zone = &self.calendar.zone;
         const pitch: usize = (win.width - gutter) / days;
@@ -21102,23 +21126,31 @@ const App = struct {
             }
         }
 
-        // Rows: day headers, band, a rule, the timed grid and a footer row
-        // that names other events beside the selected one.
-        const header_rows: usize = @intFromBool(win.height >= 10);
+        // Rows: dated day headers (always), the band (at least one row when
+        // it has events, and its own "+N" row when some do not fit), a rule,
+        // the timed grid (at least two rows) and a footer naming another event
+        // beside the selection. Too short for that: the list, with a notice.
+        const header_rows: usize = 1;
         const band_needed = try calendar_grid.bandRows(a, band_items.items);
-        const band_cap: usize = if (win.height >= 40) 3 else if (win.height >= 14) 2 else if (win.height >= 7) 1 else 0;
-        const band_rows = @min(band_needed, band_cap);
+        const band_cap: usize = if (win.height >= 40) 3 else if (win.height >= 14) 2 else 1;
+        var bar_rows = @min(band_needed, band_cap);
+        while (bar_rows > 0 and header_rows + bar_rows + @intFromBool(band_needed > bar_rows) + 2 > win.height) bar_rows -= 1;
+        const overflow_rows: usize = @intFromBool(band_needed > bar_rows);
+        if (header_rows + bar_rows + overflow_rows + 2 > win.height) {
+            if (win.height < 2) return self.drawCalendarAgenda(win);
+            try self.line(win, 0, "Too short for the grid · list shown", .muted);
+            return self.drawCalendarAgenda(win.child(.{ .y_off = 1, .height = win.height - 1 }));
+        }
+        const band_rows = bar_rows + overflow_rows;
         const rule_rows: usize = @intFromBool(band_rows > 0 and win.height >= 18);
         const grid_y = header_rows + band_rows + rule_rows;
-        if (grid_y + 2 > win.height) return self.drawCalendarAgenda(win);
         var visible = win.height - grid_y;
         // The footer row is always budgeted for the scale, so showing it
         // never changes the minutes per row.
         const rph = calendar_grid.rowsPerHour(visible -| 1);
         const total = calendar_grid.dayRows(rph);
-        const lane_cap = calendar_grid.laneCap(cells);
         var placements: [7][]calendar_grid.Placement = undefined;
-        for (0..days) |column| placements[column] = try calendar_grid.place(a, columns[column].items.items, rph, lane_cap, if (promote != null) columns[column].selected else null);
+        for (0..days) |column| placements[column] = try calendar_grid.place(a, columns[column].items.items, rph, cells, if (promote != null) columns[column].selected else null);
 
         // The selection's rows: the bucket it was revealed in, its start, or
         // its first visible segment, in that order.
@@ -21139,32 +21171,38 @@ const App = struct {
             }
         };
         const previous = self.calendar_grid_top;
-        // A new range, view or terminal height starts from the working day.
-        const same_range = if (previous) |value| value.first_day == first and value.view == self.calendar.view and value.rows == visible and value.rph == rph else false;
+        const same_view = if (previous) |value| value.first_day == first and value.view == self.calendar.view else false;
+        // Ctrl+E/Ctrl+Y pin the axis for this selection, also across a resize;
+        // otherwise a new range, view or height starts from the working day.
+        const pinned = same_view and self.calendar_grid_pinned != null and self.calendar_grid_pinned.? == self.calendar.selected;
+        const same_range = same_view and (pinned or (previous.?.rows == visible and previous.?.rph == rph));
+        if (!pinned) self.calendar_grid_pinned = null;
         const rows_available = visible;
         var top = if (same_range) calendar_grid.rowOf(previous.?.minute, rph) else calendar_grid.defaultTop(visible, rph);
-        const pinned = same_range and self.calendar_grid_pinned != null and self.calendar_grid_pinned.? == self.calendar.selected;
-        if (!pinned) self.calendar_grid_pinned = null;
         if (!pinned) if (want) |rows| {
             top = calendar_grid.follow(top, visible, total, rows[0], rows[1]);
         };
         top = calendar_grid.clampTop(top, visible, total);
-        var viewport = gridViewport(first, days, top, visible, rph);
-        // Overlapping events are already side by side; a small grid keeps
-        // its rows and leaves the list to Space.
-        const footer = selected != null and visible >= 8 and (try calendar_slot.related(a, projected, selected.?, viewport, zone)).len > 1;
-        const small_related = selected != null and !footer;
-        if (footer) {
-            visible -= 1;
+        // The footer row is taken only when, in the rows that remain, the
+        // selection shares its rows with another event: never left empty.
+        // Small grids keep their rows and leave the list to Space.
+        var footer = false;
+        if (selected != null and visible >= 8) {
+            var shorter = top;
             if (!pinned) if (want) |rows| {
-                top = calendar_grid.follow(top, visible, total, rows[0], rows[1]);
+                shorter = calendar_grid.follow(shorter, visible - 1, total, rows[0], rows[1]);
             };
-            top = calendar_grid.clampTop(top, visible, total);
-            viewport = gridViewport(first, days, top, visible, rph);
+            shorter = calendar_grid.clampTop(shorter, visible - 1, total);
+            if ((try calendar_slot.related(a, projected, selected.?, gridViewport(first, days, shorter, visible - 1, rph), zone)).len > 1) {
+                footer = true;
+                visible -= 1;
+                top = shorter;
+            }
         }
+        const viewport = gridViewport(first, days, top, visible, rph);
         // A tall terminal holds the whole day; rows past 24:00 stay empty.
         visible = @min(visible, total);
-        self.calendar_grid_top =.{ .minute = calendar_grid.minuteOf(top, rph), .first_day = first, .view = self.calendar.view, .rph = rph, .visible = visible, .rows = rows_available };
+        self.calendar_grid_top = .{ .minute = calendar_grid.minuteOf(top, rph), .first_day = first, .view = self.calendar.view, .rph = rph, .visible = visible, .rows = rows_available };
         self.calendar_week_viewport = viewport;
         self.calendar_now_minute = @divFloor(now_ms, 60000);
         const now_seconds = @divFloor(now_ms, 1000);
@@ -21178,10 +21216,12 @@ const App = struct {
 
         // Column backgrounds: today faintly accented, weekends faintly shaded.
         var shades: [7]vaxis.Style = undefined;
+        var grounds: [7]theme.Color = undefined;
         for (0..days) |column| {
             const day = first + @as(i64, @intCast(column));
             const weekend = calendar_text.weekday(day) >= 5;
-            shades[column] = if (self.mono) .{} else .{ .fg = .{ .rgb = calendar_grid.mix(self.palette.background, self.palette.muted, 55) }, .bg = .{ .rgb = if (day == today) calendar_grid.mix(self.palette.background, self.palette.accent, 6) else if (weekend) calendar_grid.mix(self.palette.background, self.palette.foreground, 4) else self.palette.background } };
+            grounds[column] = if (day == today) calendar_grid.mix(self.palette.background, self.palette.accent, 6) else if (weekend) calendar_grid.mix(self.palette.background, self.palette.foreground, 4) else self.palette.background;
+            shades[column] = if (self.mono) .{} else .{ .fg = .{ .rgb = calendar_grid.mix(self.palette.background, self.palette.muted, 55) }, .bg = .{ .rgb = grounds[column] } };
             const x = gutter + column * pitch;
             for (header_rows..win.height) |y| calendarGridPaint(win, x, y, cells, " ", shades[column]);
             // Hour rules: a faint dotted line where each hour begins.
@@ -21221,33 +21261,47 @@ const App = struct {
         var actually_shown = try a.alloc(bool, projected.len);
         @memset(actually_shown, false);
 
-        // All-day band.
+        // All-day band: bars, then a row of its own for "+N" so a count is
+        // never drawn through a bar.
         if (band_rows > 0) {
-            const bands = try calendar_grid.placeBand(a, band_items.items, @intCast(band_rows), if (promote != null) band_selected else null);
+            const bands = try calendar_grid.placeBand(a, band_items.items, @intCast(bar_rows), if (promote != null) band_selected else null);
             for (band_items.items, bands, band_events.items) |item, placement, index| {
                 if (placement.hidden) continue;
-                const event = projected[index].event;
-                const look = self.calendarGridLook(event, selected == index, false);
+                const entry = projected[index];
+                const event = entry.event;
+                const look = self.calendarGridLook(event, selected == index, false, self.palette.background);
                 const y = header_rows + placement.row;
                 const x = gutter + @as(usize, item.first) * pitch;
                 const right = gutter + @as(usize, item.last) * pitch + cells;
                 calendarGridPaint(win, x, y, right - x, " ", look.body);
-                const starts_before = try calendar_ui.pointDay(projected[index].identity.start, zone) < first + item.first;
-                var last_point = projected[index].end;
-                last_point.value = @max(last_point.value - 1, projected[index].identity.start.value);
+                const starts_before = try calendar_ui.pointDay(entry.identity.start, zone) < first + item.first;
+                var last_point = entry.end;
+                last_point.value = @max(last_point.value - 1, entry.identity.start.value);
                 const ends_after = try calendar_ui.pointDay(last_point, zone) > first + item.last;
                 const lead: []const u8 = if (starts_before) "◂" else if (sources > 1) try self.calendarSourceLabel(event) else look.glyph;
                 try self.calendarGridText(win, x, y, 1, lead, look.bar);
-                try self.calendarGridText(win, x + 1, y, (right - x) -| (1 + @as(usize, @intFromBool(ends_after))), try self.calendarBlockLabel(event, true), look.title);
+                const room = (right - x) -| (1 + @as(usize, @intFromBool(ends_after)));
+                const label = try self.calendarBlockLabel(event, true);
+                // A day-long timed event names its times when they fit.
+                const timed = if (entry.identity.start.kind == .instant) try std.fmt.allocPrint(a, "{s} · {s} → {s} {s}", .{ label, try calendar_ui.clock(a, entry.identity.start, zone), calendar_text.weekday_names[calendar_text.weekday(try calendar_ui.pointDay(last_point, zone))], try calendar_ui.clock(a, entry.end, zone) }) else label;
+                try self.calendarGridText(win, x + 1, y, room, if (win.gwidth(timed) <= room) timed else label, look.title);
                 if (ends_after) try self.calendarGridText(win, right - 1, y, 1, "▸", look.bar);
-                for (item.first..@as(usize, item.last) + 1) |column| self.calendarWeekTitleHit(win.child(.{ .x_off = @intCast(gutter + column * pitch), .width = @intCast(cells) }), y, 1, projected[index].visible_index, .{ .day = first + @as(i64, @intCast(column)) });
+                for (item.first..@as(usize, item.last) + 1) |column| self.calendarWeekTitleHit(win.child(.{ .x_off = @intCast(gutter + column * pitch), .width = @intCast(cells) }), y, 1, entry.visible_index, .{ .day = first + @as(i64, @intCast(column)) });
                 actually_shown[index] = true;
             }
-            for (0..days) |column| {
+            if (overflow_rows > 0) for (0..days) |column| {
                 var hidden: usize = 0;
                 for (band_items.items, bands) |item, placement| hidden += @intFromBool(placement.hidden and item.first <= column and column <= item.last);
-                if (hidden > 0) try self.calendarSlotBadge(win.child(.{ .x_off = @intCast(gutter + column * pitch), .width = @intCast(cells) }), header_rows + band_rows - 1, try std.fmt.allocPrint(a, "+{d}", .{hidden}), 400 + column * 25 + 24);
-            }
+                if (hidden == 0) continue;
+                const long = try std.fmt.allocPrint(a, "+{d} more", .{hidden});
+                const badge_text = if (long.len <= cells) long else try std.fmt.allocPrint(a, "+{d}", .{hidden});
+                var appearance = self.style(.accent);
+                appearance.bold = true;
+                appearance.ul_style = .single;
+                const badge = win.child(.{ .x_off = @intCast(gutter + column * pitch), .y_off = @intCast(header_rows + bar_rows), .width = @intCast(@min(badge_text.len, cells)), .height = 1 });
+                _ = badge.printSegment(.{ .text = badge_text, .style = appearance }, .{ .wrap = .none });
+                self.mouseRows(badge, 0, 1, .dialog_action, 400 + column * 25 + 24);
+            };
         }
 
         // Timed blocks, column by column.
@@ -21255,55 +21309,73 @@ const App = struct {
             const day = first + @as(i64, @intCast(column));
             const x0 = gutter + column * pitch;
             const area = win.child(.{ .x_off = @intCast(x0), .width = @intCast(cells) });
+            const frame: GridFrame = .{ .top = top, .grid_y = grid_y, .rph = rph, .cells = cells, .day = day, .selected = false, .sources = sources, .now_ms = now_ms, .ground = grounds[column] };
+            const window_end = top + visible;
             var earlier: usize = 0;
             var later: usize = 0;
             var badge_counts: [24]usize = @splat(0);
             var badge_rows: [24]usize = @splat(0);
-            for (placements[column], columns[column].events.items) |block, index| {
+            for (placements[column], columns[column].events.items, columns[column].items.items) |block, index, item| {
                 if (block.bottom <= top) {
                     earlier += 1;
                     continue;
                 }
-                if (block.top >= top + visible) {
+                if (block.top >= window_end) {
                     later += 1;
                     continue;
                 }
-                const first_row = @max(block.top, top);
+                var count_at: ?usize = null;
                 if (block.hidden) {
-                    const hour = first_row / rph;
-                    if (badge_counts[hour] == 0 or first_row < badge_rows[hour]) badge_rows[hour] = first_row;
-                    badge_counts[hour] += 1;
-                    continue;
+                    count_at = @max(block.top, top);
+                } else if (!block.floating) {
+                    var current = frame;
+                    current.selected = selected == index;
+                    var drawn = false;
+                    // Rows drawn over by the selection are counted where they
+                    // start; the rows above and below it are still drawn.
+                    const lost_first = if (block.covered()) block.cover_top else block.bottom;
+                    const lost_last = if (block.covered()) block.cover_bottom else block.bottom;
+                    if (block.covered() and lost_first < window_end and lost_last > top) count_at = @max(lost_first, top);
+                    for ([_][2]usize{ .{ block.top, lost_first }, .{ lost_last, block.bottom } }) |segment| {
+                        const from = @max(segment[0], top);
+                        const to = @min(segment[1], window_end);
+                        if (from >= to) continue;
+                        try self.calendarGridBlock(area, projected[index], block, from, to, item.first, current);
+                        drawn = true;
+                    }
+                    if (drawn) actually_shown[index] = true else if (count_at == null) count_at = @max(block.top, top);
                 }
-                if (block.floating) continue;
-                try self.calendarGridBlock(area, projected[index], block, first_row, @min(block.bottom, top + visible), .{ .top = top, .grid_y = grid_y, .rph = rph, .cells = cells, .day = day, .selected = selected == index, .sources = sources, .now_ms = now_ms });
-                actually_shown[index] = true;
+                if (count_at) |row| {
+                    const hour = row / rph;
+                    if (badge_counts[hour] == 0 or row < badge_rows[hour]) badge_rows[hour] = row;
+                    badge_counts[hour] += 1;
+                }
             }
             // A revealed selection without a lane of its own is drawn on top.
-            for (placements[column], columns[column].events.items) |block, index| {
-                if (!block.floating or block.bottom <= top or block.top >= top + visible) continue;
-                try self.calendarGridBlock(area, projected[index], block, @max(block.top, top), @min(block.bottom, top + visible), .{ .top = top, .grid_y = grid_y, .rph = rph, .cells = cells, .day = day, .selected = selected == index, .sources = sources, .now_ms = now_ms });
+            for (placements[column], columns[column].events.items, columns[column].items.items) |block, index, item| {
+                if (!block.floating or block.bottom <= top or block.top >= window_end) continue;
+                var current = frame;
+                current.selected = selected == index;
+                try self.calendarGridBlock(area, projected[index], block, @max(block.top, top), @min(block.bottom, window_end), item.first, current);
                 actually_shown[index] = true;
             }
-            // "+N": more blocks than lanes; it lists that exact hour.
+            // "+N": events without room or drawn over; it lists that exact hour.
             for (badge_counts, badge_rows, 0..) |count, row, hour| if (count > 0) {
                 try self.calendarSlotBadge(area, grid_y + row - top, try std.fmt.allocPrint(a, "+{d}", .{count}), 400 + column * 25 + hour);
             };
             // Header: the date, then what lies above or below the window.
-            if (header_rows > 0) {
-                const weekend = calendar_text.weekday(day) >= 5;
-                const short = try calendar_text.shortDate(a, day);
-                // "Mon 19 Oct", or "Mon 19" in a narrow column.
-                const date = if (days == 1) try calendar_text.dayHeader(a, day, today) else if (cells >= 10) short else short[0 .. std.mem.lastIndexOfScalar(u8, short, ' ') orelse short.len];
-                const hints = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ if (earlier > 0) try std.fmt.allocPrint(a, "↑{d}", .{earlier}) else "", if (earlier > 0 and later > 0) @as([]const u8, " ") else "", if (later > 0) try std.fmt.allocPrint(a, "↓{d}", .{later}) else "" });
-                var heading = self.style(if (weekend) .muted else .accent);
-                if (day == today) heading = if (self.mono) .{ .bold = true, .ul_style = .single } else .{ .fg = .{ .rgb = calendar_grid.onColor(self.palette.accent, self.palette.background, self.palette.foreground) }, .bg = .{ .rgb = self.palette.accent }, .bold = true };
-                calendarGridPaint(win, x0, 0, cells, " ", self.style(.text));
-                const hint_width = area.gwidth(hints);
-                const date_width = @min(area.gwidth(date), cells -| (hint_width + @as(usize, @intFromBool(hint_width > 0))));
-                try self.calendarGridText(win, x0, 0, date_width, date, heading);
-                if (hint_width > 0 and hint_width < cells) try self.line(win.child(.{ .x_off = @intCast(x0 + cells - hint_width), .width = @intCast(hint_width) }), 0, hints, .muted);
-            }
+            const weekend = calendar_text.weekday(day) >= 5;
+            const short = try calendar_text.shortDate(a, day);
+            // "Mon 19 Oct", or "Mon 19" in a narrow column.
+            const date = if (days == 1) try calendar_text.dayHeader(a, day, today) else if (cells >= 10) short else short[0 .. std.mem.lastIndexOfScalar(u8, short, ' ') orelse short.len];
+            const hints = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ if (earlier > 0) try std.fmt.allocPrint(a, "↑{d}", .{earlier}) else "", if (earlier > 0 and later > 0) @as([]const u8, " ") else "", if (later > 0) try std.fmt.allocPrint(a, "↓{d}", .{later}) else "" });
+            var heading = self.style(if (weekend) .muted else .accent);
+            if (day == today) heading = if (self.mono) .{ .bold = true, .ul_style = .single } else .{ .fg = .{ .rgb = calendar_grid.onColor(self.palette.accent, self.palette.background, self.palette.foreground) }, .bg = .{ .rgb = self.palette.accent }, .bold = true };
+            calendarGridPaint(win, x0, 0, cells, " ", self.style(.text));
+            const hint_width = area.gwidth(hints);
+            const date_width = @min(area.gwidth(date), cells -| (hint_width + @as(usize, @intFromBool(hint_width > 0))));
+            try self.calendarGridText(win, x0, 0, date_width, date, heading);
+            if (hint_width > 0 and hint_width < cells) try self.line(win.child(.{ .x_off = @intCast(x0 + cells - hint_width), .width = @intCast(hint_width) }), 0, hints, .muted);
         }
         if (projected.len == 0) {
             const empty = if (self.calendar_query.value().len > 0) try std.fmt.allocPrint(a, "No matches for \"{s}\" · Esc clears the filter", .{self.calendar_query.value()}) else if (!self.calendar.complete and !self.calendar.source_loading) @as([]const u8, "No events returned · the range is incomplete · Ctrl+R Retry") else if (self.calendar.source_loading) "Loading calendar…" else "Nothing scheduled · n New event · g Calendars";
@@ -21315,19 +21387,20 @@ const App = struct {
         if (now_row) |y| {
             const column = now_column.?;
             const x0 = gutter + column * pitch;
-            // Blocks keep their text and colours and gain a red underline;
-            // free time between them shows the line itself.
-            const covered = try a.alloc(bool, cells);
-            @memset(covered, false);
+            // Drawn blocks keep their text and colours and gain a red
+            // underline; free time between them shows the line itself.
+            const occupied = try a.alloc(bool, cells);
+            @memset(occupied, false);
             const now_at = calendar_grid.rowOf(now_minute, rph);
             for (placements[column]) |block| {
                 if (block.hidden or block.top > now_at or block.bottom <= now_at) continue;
-                @memset(covered[calendar_grid.laneX(cells, block.lane, block.lanes)..calendar_grid.laneX(cells, @as(usize, block.lane) + block.span, block.lanes)], true);
+                if (block.covered() and block.cover_top <= now_at and now_at < block.cover_bottom) continue;
+                @memset(occupied[calendar_grid.laneX(cells, block.lane, block.lanes)..calendar_grid.laneX(cells, @as(usize, block.lane) + block.span, block.lanes)], true);
             }
             var mark: vaxis.Style = .{ .fg = if (self.mono) .default else .{ .rgb = self.palette.red }, .bold = true };
             for (0..cells) |offset| {
                 var value = win.readCell(@intCast(x0 + offset), @intCast(y)) orelse continue;
-                if (!covered[offset] and (same(value.char.grapheme, " ") or same(value.char.grapheme, "┈"))) {
+                if (!occupied[offset] and (same(value.char.grapheme, " ") or same(value.char.grapheme, "┈"))) {
                     mark.bg = value.style.bg;
                     value = .{ .char = .{ .grapheme = "─", .width = 1 }, .style = mark };
                 } else {
@@ -21344,7 +21417,7 @@ const App = struct {
         // Footer: another event beside the selection, and the chooser.
         const related = if (selected) |index| try calendar_slot.related(a, projected, index, viewport, zone) else &.{};
         // Without the footer there is no Show all button to Tab to.
-        self.calendar_week_related = if (small_related) @min(related.len, 1) else related.len;
+        self.calendar_week_related = if (footer) related.len else @min(related.len, 1);
         if (footer and related.len > 1) {
             const footer_row = win.height - 1;
             calendarGridPaint(win, 0, footer_row, win.width, " ", self.style(.text));
@@ -33417,14 +33490,19 @@ test "calendar grid: Busy, declined, tentative and unanswered blocks stay distin
             for (0..2) |offset| for (6..79) |x| try std.testing.expect(screen.readCell(@intCast(x), @intCast(lunch_row + offset)).?.style.reverse);
             for (6..79) |x| try std.testing.expect(!screen.readCell(@intCast(x), pending_row).?.style.reverse);
         } else {
-            // An unanswered event is an outline; the selection takes its
-            // calendar colour, with readable text.
+            // An unanswered event has no fill, only its bar; the selection
+            // takes its calendar colour. Plain and selected text keep
+            // text_floor; dimmed and source-coloured text keep quiet_floor.
             try std.testing.expectEqual(vaxis.Color{ .rgb = app.palette.background }, screen.readCell(40, pending_row).?.style.bg);
             const selected = screen.readCell(40, lunch_row).?.style;
             const tinted = screen.readCell(40, tentative_row).?.style;
             try std.testing.expect(!std.meta.eql(selected.bg, tinted.bg));
-            try std.testing.expect(calendar_grid.contrast(selected.fg.rgb, selected.bg.rgb) >= 3);
+            try std.testing.expect(calendar_grid.contrast(selected.fg.rgb, selected.bg.rgb) >= calendar_grid.text_floor);
             try std.testing.expect(calendar_grid.contrast(tinted.fg.rgb, tinted.bg.rgb) >= calendar_grid.text_floor);
+            for ([_]u16{ pending_row, declined_row, busy_row }) |row| {
+                const quiet = screen.readCell(10, row).?.style;
+                try std.testing.expect(calendar_grid.contrast(quiet.fg.rgb, quiet.bg.rgb) >= calendar_grid.quiet_floor);
+            }
         }
     }
 }
@@ -33468,10 +33546,183 @@ test "calendar grid: Ctrl+E and Ctrl+Y move the time axis until the selection ch
     try std.testing.expect(calendarGridTestRowOf(&screen, "Evening") != null);
 }
 
-test "calendar grid: the all-day band keeps bounded rows, a counted overflow badge and ordered hour labels" {
+test "calendar grid: a revealed selection never leaves the blocks it covers uncounted" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    const day = try timezone.dateDay("2026-10-19");
+    const base = day * 86400000;
+    // One lane per day at 110 columns: a long routine and starts beneath it.
+    const events = [_]Value{
+        try calendarGridTestEvent(scratch, "early", "Early sync", base + (8 * 60 + 30) * 60000, base + (9 * 60 + 30) * 60000),
+        try calendarGridTestEvent(scratch, "routine", "Routine block", base + 9 * 3600000, base + 17 * 3600000),
+        try calendarGridTestEvent(scratch, "new", "New start", base + 13 * 3600000, base + 14 * 3600000),
+        try calendarGridTestEvent(scratch, "later", "Later call", base + 15 * 3600000, base + (15 * 60 + 30) * 60000),
+    };
+    try calendarGridTestAgenda(&app, &events, .week, day);
+    for ([_]u16{ 30, 12 }) |height| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = 110, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win = calendarGridTestWindow(&screen);
+        app.calendar.selected = 1;
+        app.calendar.week_reveal_selected = true;
+        app.calendar_grid_top = null;
+        app.mouse_hits.clear();
+        try app.drawCalendarWeekAt(win, base - 86400000);
+        // Each start beneath the routine is counted at its hour and a click
+        // there reaches the routine drawn on top, not the event underneath.
+        for ([_]u8{ 13, 15 }) |hour| {
+            const row = calendarWeekTestHourRow(&screen, hour) catch continue;
+            try std.testing.expect(calendarGridTestFind(&screen, row, "+1") != null);
+            try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(7, @intCast(row)).?.index].index);
+        }
+        // Not drawn in the grid itself (the footer row may name them).
+        for (0..height - 1) |y| {
+            try std.testing.expect(calendarGridTestFind(&screen, @intCast(y), "New start") == null);
+            try std.testing.expect(calendarGridTestFind(&screen, @intCast(y), "Later call") == null);
+        }
+        if (height == 30) {
+            // The early meeting keeps its own first half hour and counts the
+            // half hour it loses; the footer names a hidden start.
+            try std.testing.expect(calendarGridTestRowOf(&screen, "Early sync") != null);
+            try std.testing.expect(calendarGridTestFind(&screen, try calendarWeekTestHourRow(&screen, 9), "+1") != null);
+            try std.testing.expect(calendarGridTestRowOf(&screen, "Hidden here: 13:00") != null);
+        }
+    }
+    // Two identical meetings: revealing the second counts the first.
+    const twins = [_]Value{
+        try calendarGridTestEvent(scratch, "alpha", "Alpha meeting", base + 10 * 3600000, base + 11 * 3600000),
+        try calendarGridTestEvent(scratch, "beta", "Beta meeting", base + 10 * 3600000, base + 11 * 3600000),
+    };
+    try calendarGridTestAgenda(&app, &twins, .week, day);
+    app.calendar.selected = 1;
+    app.calendar.week_reveal_selected = true;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 110, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+    const ten = try calendarWeekTestHourRow(&screen, 10);
+    try std.testing.expect(calendarGridTestFind(&screen, ten, "Beta") != null and calendarGridTestFind(&screen, ten, "+1") != null);
+}
+
+test "calendar grid: a one-row block starting inside its row names its start at every scale" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    const day = try timezone.dateDay("2026-10-19");
+    const base = day * 86400000;
+    const events = [_]Value{try calendarGridTestEvent(scratch, "half", "Half past", base + (13 * 60 + 30) * 60000, base + 14 * 3600000)};
+    try calendarGridTestAgenda(&app, &events, .week, day);
+    // 110x20: one row per hour and 12-cell columns; 200x20: wide columns.
+    for ([_]u16{ 110, 200 }, [_][]const u8{ ":30 Half", "13:30 Half past" }) |width, expected| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        app.calendar_grid_top = null;
+        try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+        try std.testing.expectEqual(@as(u8, 1), app.calendar_grid_top.?.rph);
+        try std.testing.expect(calendarGridTestFind(&screen, try calendarWeekTestHourRow(&screen, 13), expected) != null);
+    }
+    // At two rows per hour the 13:30 row is its own: no stamp is needed.
+    var tall = try vaxis.Screen.init(a, .{ .cols = 110, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer tall.deinit(a);
+    app.calendar_grid_top = null;
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&tall), base - 86400000);
+    const row = try calendarWeekTestHourRow(&tall, 13) + 1;
+    try std.testing.expect(calendarGridTestFind(&tall, row, "Half past") != null and calendarGridTestFind(&tall, row, ":30") == null);
+}
+
+test "calendar grid: day-long timed events show their times in the band and dated ends in the status" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    const day = try timezone.dateDay("2026-10-19");
+    const base = day * 86400000;
+    const long = try calendarGridTestEvent(scratch, "long", "Long timed thing", base + 2 * 86400000 + 10 * 3600000, base + 4 * 86400000 + 9 * 3600000);
+    try calendarGridTestAgenda(&app, &.{long}, .week, day);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 200, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+    try std.testing.expect(calendarGridTestRowOf(&screen, "Long timed thing · 10:00 → Fri 09:00") != null);
+    const line_text = try app.calendarEventLine(long, false);
+    try std.testing.expect(std.mem.indexOf(u8, line_text, "10:00 – Fri 23 Oct 09:00") != null);
+}
+
+test "calendar grid: the footer row is taken only when it names another event" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    const day = try timezone.dateDay("2026-10-19");
+    const base = day * 86400000;
+    // A 09:00–18:00 day and a 17:00 call that only the last grid row shows.
+    const events = [_]Value{
+        try calendarGridTestEvent(scratch, "long", "Long day", base + 9 * 3600000, base + 18 * 3600000),
+        try calendarGridTestEvent(scratch, "call", "Late call", base + 17 * 3600000, base + (17 * 60 + 30) * 60000),
+    };
+    try calendarGridTestAgenda(&app, &events, .day, day);
+    app.calendar.selected = 0;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+    try std.testing.expectEqual(@as(u16, 9), try calendarWeekTestHourRow(&screen, 17));
+    try std.testing.expect(calendarGridTestFind(&screen, 9, "Late call") != null);
+    try std.testing.expect(calendarGridTestRowOf(&screen, "[Space Show all") == null);
+    try std.testing.expect(app.calendar_week_related <= 1);
+    // One row more: the footer has something to name, and names it.
+    var taller = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
+    defer taller.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&taller), base - 86400000);
+    try std.testing.expectEqual(@as(?u16, 11), calendarGridTestRowOf(&taller, "Also here: 17:00"));
+}
+
+test "calendar grid: Space brings back a selection scrolled out of view and the pin survives a resize" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    const day = try timezone.dateDay("2026-10-19");
+    const base = day * 86400000;
+    const events = [_]Value{
+        try calendarGridTestEvent(scratch, "morning", "Morning", base + 9 * 3600000, base + 10 * 3600000),
+        try calendarGridTestEvent(scratch, "beside", "Beside", base + 9 * 3600000, base + 10 * 3600000),
+    };
+    try calendarGridTestAgenda(&app, &events, .week, day);
+    app.calendar.open = true;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+    for (0..10) |_| try app.onCalendarKey(.{ .codepoint = 'e', .mods = .{ .ctrl = true } });
+    screen.clear();
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&screen), base - 86400000);
+    const pinned_hour = app.calendar_week_viewport.?.first_hour;
+    try std.testing.expect(pinned_hour > 10);
+    // A resize keeps the pinned position.
+    var resized = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 22, .x_pixel = 0, .y_pixel = 0 });
+    defer resized.deinit(a);
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&resized), base - 86400000);
+    try std.testing.expectEqual(pinned_hour, app.calendar_week_viewport.?.first_hour);
+    // Space lists the events beside the selection although it is out of
+    // view, and the next frame scrolls back to it.
+    try app.onCalendarKey(.{ .codepoint = ' ' });
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    try std.testing.expectEqual(@as(usize, 2), app.calendar_slots.events.len);
+    app.calendarSlotsClose();
+    resized.clear();
+    try app.drawCalendarWeekAt(calendarGridTestWindow(&resized), base - 86400000);
+    try std.testing.expect(app.calendar_week_viewport.?.first_hour <= 9);
+}
+
+test "calendar grid: the all-day band keeps bounded rows, a counted overflow row and ordered hour labels" {
     const a = std.testing.allocator;
     const first = try timezone.dateDay("2026-10-19");
-    for (0..5) |all_day_count| for ([_]u16{ 12, 20, 30, 45 }) |height| {
+    for (0..5) |all_day_count| for ([_]u16{ 6, 10, 11, 12, 13, 14, 20, 30, 45 }) |height| {
         var factory: CacheTestClient = .{};
         var app = factory.app(a);
         defer app.deinit();
@@ -33490,20 +33741,28 @@ test "calendar grid: the all-day band keeps bounded rows, a counted overflow bad
         var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = height, .x_pixel = 0, .y_pixel = 0 });
         defer screen.deinit(a);
         try app.drawCalendarWeekAt(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = height, .screen = &screen }, first * 86400000);
+        // Every grid is dated, however short.
+        try std.testing.expectEqual(@as(?u16, 6), calendarGridTestFind(&screen, 0, "Mon 19 Oct"));
+        // Bars: up to the height's cap, never none while there are events,
+        // with one less only when the overflow row would leave no grid.
         const cap: usize = if (height >= 40) 3 else if (height >= 14) 2 else 1;
+        const bars: usize = if (height < 6) 0 else @min(all_day_count, cap);
         var titles: usize = 0;
         for (app.calendar_week_title_hits[0..app.calendar_week_title_count]) |hit| {
             if (hit.bucket.hour == null) titles += 1;
         }
-        try std.testing.expectEqual(@min(all_day_count, cap), titles);
+        try std.testing.expectEqual(bars, titles);
+        if (all_day_count > 0) try std.testing.expect(titles > 0);
         const overflow = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
             if (hit.kind == .dialog_action and hit.index == 424) break hit;
         } else null;
-        try std.testing.expectEqual(all_day_count > cap, overflow != null);
+        try std.testing.expectEqual(all_day_count > bars, overflow != null);
         if (overflow) |badge| {
+            // Its own row below the bars, so it never reads as part of one.
+            try std.testing.expectEqual(@as(u16, @intCast(1 + bars)), badge.rect.y);
             var label: [4]u8 = undefined;
-            const expected = try std.fmt.bufPrint(&label, "+{d}", .{all_day_count - cap});
-            for (expected, 0..) |character, offset| try std.testing.expectEqualStrings(&.{character}, screen.readCell(@intCast(badge.rect.x + offset), badge.rect.y).?.char.grapheme);
+            const expected = try std.fmt.bufPrint(&label, "+{d}", .{all_day_count - bars});
+            try std.testing.expectEqual(@as(?u16, 6), calendarGridTestFind(&screen, badge.rect.y, expected));
         }
         // Hour labels run in order and the selected 02:00 event is in view.
         var previous: ?u16 = null;
@@ -33514,7 +33773,7 @@ test "calendar grid: the all-day band keeps bounded rows, a counted overflow bad
             previous = row;
             labels += 1;
         }
-        try std.testing.expect(labels >= 3);
+        try std.testing.expect(labels >= 2);
         _ = try calendarWeekTestHourRow(&screen, 2);
     };
 }
@@ -33804,7 +34063,10 @@ test "calendar grid: a passive selection never displaces a block and an explicit
     try app.drawCalendarWeek(win);
     try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(half)).?.index].index);
     try std.testing.expectEqual(@as(usize, 0), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&screen, 9))).?.index].index);
-    try std.testing.expect(calendarGridTestFind(&screen, ten, "+1") != null);
+    // The 10:05 check-in (no lane) and the routine's 10:30 row (drawn over
+    // by the visit) are both counted at 10:00.
+    try std.testing.expect(calendarGridTestFind(&screen, ten, "+2") != null);
+    try std.testing.expectEqual(@as(usize, 0), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(half + 1)).?.index].index);
     // Revealing the routine from 11:00 pins that hour in view.
     try app.calendarSlotsOpen(.{ .day = app.calendar.day, .hour = 11 });
     app.calendar_slots_selected = 0;

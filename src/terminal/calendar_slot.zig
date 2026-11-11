@@ -495,7 +495,7 @@ test "calendar slots: fixture day lays every overlapping event out side by side 
     const day = try tz.dateDay(j.text(data, "day"));
     // Routine 09:00–12:00, check-in 10:05–10:20, visit 10:30–11:00,
     // next-hour call 11:00–11:30 and the 23:30 overnight start.
-    const placements = try grid.place(a, try gridItems(a, values, day, &zone), 2, 3, null);
+    const placements = try grid.place(a, try gridItems(a, values, day, &zone), 2, 3 * grid.min_lane_cells, null);
     try std.testing.expectEqual(@as(usize, 5), placements.len);
     for (placements) |placement| try std.testing.expect(!placement.hidden);
     try std.testing.expectEqual(@as(u8, 0), placements[0].lane);
@@ -519,7 +519,7 @@ test "calendar slots: two-hour rollback keeps the actual start bucket and its wh
     const day = try tz.dateDay("2026-10-25");
     try std.testing.expectEqual(@as(u8, 2), try startHour(projected[0].identity.start, &zone));
     // 02:45 DST until 01:15 standard time: civil rows 01:14 to 02:46.
-    const placement = (try grid.place(a, try gridItems(a, projected, day, &zone), 1, 1, null))[0];
+    const placement = (try grid.place(a, try gridItems(a, projected, day, &zone), 1, grid.min_lane_cells, null))[0];
     try std.testing.expectEqual(@as(usize, 1), placement.top);
     try std.testing.expectEqual(@as(usize, 3), placement.bottom);
     const viewport: Viewport = .{ .first_day = day, .days = 1, .first_hour = 0, .hours = 24 };
@@ -535,7 +535,7 @@ test "calendar slots: zero-duration event exactly on the hour has a block, a buc
     const projected = try project(a, values.array.items, "");
     const zone: tz.Zone = .{};
     const viewport: Viewport = .{ .first_day = 0, .days = 1, .first_hour = 10, .hours = 1 };
-    const placement = (try grid.place(a, try gridItems(a, projected, 0, &zone), 2, 2, null))[0];
+    const placement = (try grid.place(a, try gridItems(a, projected, 0, &zone), 2, 2 * grid.min_lane_cells, null))[0];
     try std.testing.expect(!placement.hidden and placement.top == 20 and placement.bottom == 21);
     var snapshot = try Snapshot.init(std.testing.allocator, values.array.items, .{ .bucket = .{ .day = 0, .hour = 10 } }, "", &zone, null);
     defer snapshot.deinit();
