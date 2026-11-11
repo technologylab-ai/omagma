@@ -247,6 +247,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
             // An answer belongs only to an RSVP review: a usage error elsewhere.
             if (eq(arg, "--response") and !eq(j.text(req, "cmd"), "calendar.event-respond-review")) return unknownOption(arg);
+            if (eq(arg, "--series-event-id") and !eq(j.text(req, "cmd"), "calendar.event-pending")) return unknownOption(arg);
             try req.object.put(sa, key, .{ .string = v });
         } else if (eq(arg, "--name") or eq(arg, "--label-id") or eq(arg, "--confirm-name")) {
             const key = if (eq(arg, "--label-id")) "labelId" else if (eq(arg, "--confirm-name")) "confirmName" else "name";
@@ -582,6 +583,8 @@ fn outcomeStatus(command: []const u8, data: j.Value) u8 {
         const state = j.text(data, "state");
         if (eq(state, "unknown")) return 6;
         if (eq(state, "rejected")) return 3;
+        // Not sent is not applied, except as the plan of a dry run.
+        if (eq(state, "not_sent") and !(j.boolean(data, "dryRun", false) catch false)) return 3;
         return 0;
     }
     if (!sendCommand(command) or data != .object) return 0;
@@ -650,7 +653,7 @@ fn unknownOption(arg: []const u8) error{UnknownOption} {
 pub fn nearestOption(arg: []const u8) ?[]const u8 {
     var candidates: [160][]const u8 = undefined;
     var count: usize = 0;
-    for (value_options ++ boolean_options ++ [_][]const u8{ "--help", "--help-all", "--help-options", "--schema", "--manifest", "--compact", "--strict", "--calendar-id", "--event-id", "--date", "--view", "--time-zone", "--review-hash", "--send-updates", "--meet-ai-notes", "--response" }) |candidate| {
+    for (value_options ++ boolean_options ++ [_][]const u8{ "--help", "--help-all", "--help-options", "--schema", "--manifest", "--compact", "--strict", "--calendar-id", "--event-id", "--date", "--view", "--time-zone", "--review-hash", "--send-updates", "--meet-ai-notes", "--response", "--series-event-id" }) |candidate| {
         if (count == candidates.len) break;
         candidates[count] = candidate;
         count += 1;
@@ -787,6 +790,7 @@ fn calendarField(arg: []const u8) ?[]const u8 {
         .{ .flag = "--send-updates", .key = "sendUpdates" },
         .{ .flag = "--meet-ai-notes", .key = "meetAiNotes" },
         .{ .flag = "--response", .key = "response" },
+        .{ .flag = "--series-event-id", .key = "seriesEventId" },
     };
     for (fields) |field| if (eq(arg, field.flag)) return field.key;
     return null;
@@ -933,6 +937,11 @@ test "cli process: every documented exit status row is derived from the reply" {
         .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\"}}", .status = 6 },
         .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"rejected\"}}", .status = 3 },
         .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"partial\"}}", .status = 0 },
+        .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"not_sent\"}}", .status = 3 },
+        // A failed retry: unknown (6) unless refused for authorization (4),
+        // a missing saved write (5) or a malformed request (3).
+        .{ .command = "calendar.event-retry", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarReviewNotFound\"}}", .status = 5 },
+        .{ .command = "calendar.event-retry", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarWritePermissionRequired\"}}", .status = 4 },
         .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarWritePermissionRequired\"}}", .status = 4 },
         .{ .command = "calendar.event-respond-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarOrganizerCannotRespond\"}}", .status = 3 },
         .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarNotFound\"}}", .status = 5 },

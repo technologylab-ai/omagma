@@ -973,7 +973,7 @@
     },
     {
       "cmd": "calendar.event-pending",
-      "summary": "Resume a saved uncertain event write (edit, delete or response; found from the event, its series or an occurrence) after restart without provider traffic.",
+      "summary": "Resume a saved uncertain Calendar write by operation ID, or the one that blocks changes to an event (its own, its series', or for a series an occurrence's).",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -986,15 +986,23 @@
         },
         "eventId": {
           "type": "string",
-          "description": "Omit for pending creation; provide exact provider event ID for a pending edit."
+          "description": "Omit for pending creation; otherwise the event whose blocking write to find."
+        },
+        "seriesEventId": {
+          "type": "string",
+          "description": "The event's recurring_event_id from calendar.agenda or calendar.event (\"\" when it does not repeat). Without it the event is read once to learn its series."
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId",
+          "description": "Exact lookup, e.g. the blockingOperationId of a CalendarOperationPending refusal."
         }
       },
       "required": [
         "calendarId"
       ],
       "notes": [
-        "Returns pending:null or {pending:{review,state,attempt,nextAttempt,retryPossible,recoveryReason}}. Review is the complete event-review result.",
-        "Read-only private local state; no provider request or credentials. Exact selected account/calendar binding is checked.",
+        "Returns {pending:null|{review,relation,state,attempt,nextAttempt,retryPossible,recoveryReason},seriesChecked}. Review is the complete review result; relation is operation, creation, event (a write to this event or its whole series) or series (a write to another occurrence, which blocks a series action here). An invitation's own unknown update is reported as blockedBy {kind:invitation,operationId} and is checked with calendar.reconcile.",
+        "Series membership is the provider's recurringEventId (seriesEventId or one events.get), never guessed from ID text; seriesChecked:false with readError means the event could not be read, so only writes to the exact event were checked. With operationId, seriesEventId, or no eventId it reads only local state, without provider traffic or credentials. Exact selected account/calendar binding is checked.",
         "The current local grant must retain mail-read and one of the Calendar capability alternatives; this check reads grant metadata without opening credentials."
       ],
       "examples": [

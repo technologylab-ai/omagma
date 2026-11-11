@@ -37,12 +37,26 @@ pub const Dialog = struct {
     account: b.Text(254) = .{},
     calendar_id: b.Text(1024) = .{},
     event_id: b.Text(1024) = .{},
+    /// The selected event's provider series (its recurring_event_id from
+    /// the agenda; "" when it does not repeat). Pending lookups pass it so
+    /// series membership is never guessed from the ID text.
+    series_event_id: b.Text(1024) = .{},
+    /// The unconfirmed write that refused the last plan or review, as
+    /// CalendarOperationPending reported it (blockingOperationId).
+    blocking: b.Text(128) = .{},
+    /// A pending lookup that found nothing re-plans at most once; a second
+    /// refusal stops with an honest message instead of reading again.
+    replanned_after_pending: bool = false,
+    /// Increases with every new plan or restored review.
+    generation: u32 = 0,
     /// Shown while the plan loads; replaced by the plan's own summary.
     title: b.Text(512) = .{},
     when: b.Text(256) = .{},
     /// The focus whose row the content was last scrolled to; Ctrl+D/U
     /// scroll freely until the focus moves again.
     scrolled_focus: ?Control = null,
+    /// The dialog layout the content was last scrolled for.
+    scrolled_layout: usize = 0,
     /// The dry-run review: role, guests, current answer, series and options.
     plan: ui.Document = .{},
     series: bool = false,
@@ -69,15 +83,28 @@ pub const Dialog = struct {
     /// button together. A confirm acts only on a dialog the user can see.
     frame: u64 = 0,
     visible_frame: u64 = 0,
-    /// The step (phase and scope) shown, and when a confirm for it is
-    /// accepted: a moment after it became visible, so a double click or a
-    /// key typed ahead never confirms a new step.
+    /// What the dialog showed (phase, plan, scope, answer and email), and
+    /// when a confirm for it is accepted: a moment after it became visible,
+    /// so a double click, a key typed ahead or a changed choice never
+    /// confirms what was not on screen for that moment.
     drawn: ?Shown = null,
     armed_at_ms: i64 = std.math.maxInt(i64),
+    /// The frame's candidate verdict, recorded by the dialog's own drawing
+    /// and settled once every later layer of that frame is drawn: the
+    /// dialog's screen rectangle and a hash of its cells then.
+    candidate: bool = false,
+    candidate_frame: u64 = 0,
+    area: Rect = .{},
+    area_hash: u64 = 0,
 
-    pub const Shown = struct { phase: Phase, series: bool };
+    pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16 = 0, height: u16 = 0 };
+    /// Every displayed fact that changes the write.
+    pub const Shown = struct { phase: Phase, generation: u32, series: bool, response: ?action.Response, notify: ?bool };
     /// The settle interval after a step becomes visible.
     pub const settle_ms: i64 = 600;
+    fn shownNow(self: *const Dialog) Shown {
+        return .{ .phase = self.phase, .generation = self.generation, .series = self.series, .response = self.response, .notify = self.notify };
+    }
 
     pub fn close(self: *Dialog) void {
         self.plan.deinit();
@@ -92,10 +119,10 @@ pub const Dialog = struct {
     /// only after the settle time.
     pub fn markDrawn(self: *Dialog, now_ms: i64, visible: bool) void {
         if (!visible) return;
-        const shown: Shown = .{ .phase = self.phase, .series = self.series };
-        const continuous = self.drawn != null and std.meta.eql(self.drawn.?, shown) and self.visible_frame +% 1 == self.frame;
+        const current = self.shownNow();
+        const continuous = self.drawn != null and std.meta.eql(self.drawn.?, current) and self.visible_frame +% 1 == self.frame;
         if (!continuous) {
-            self.drawn = shown;
+            self.drawn = current;
             self.armed_at_ms = now_ms +| settle_ms;
         }
         self.visible_frame = self.frame;
@@ -103,10 +130,16 @@ pub const Dialog = struct {
     pub const Readiness = enum { ready, hidden, settling };
     /// Whether a confirm (y, Enter or a click) may act now.
     pub fn readiness(self: *const Dialog, now_ms: i64) Readiness {
-        const shown = self.drawn orelse return .hidden;
-        if (self.visible_frame != self.frame or !std.meta.eql(shown, Shown{ .phase = self.phase, .series = self.series })) return .hidden;
+        const drawn = self.drawn orelse return .hidden;
+        if (self.visible_frame != self.frame or !std.meta.eql(drawn, self.shownNow())) return .hidden;
         if (now_ms < self.armed_at_ms) return .settling;
         return .ready;
+    }
+    /// A confirm key during the settle time restarts it: a held key (or a
+    /// burst typed ahead) never confirms; one deliberate press after the
+    /// screen has been still for a moment does.
+    pub fn restartSettle(self: *Dialog, now_ms: i64) void {
+        self.armed_at_ms = now_ms +| settle_ms;
     }
     pub fn begin(self: *Dialog, kind: Kind, account: []const u8, calendar_id: []const u8, event_id: []const u8, title: []const u8, when: []const u8) !void {
         self.close();
@@ -124,6 +157,7 @@ pub const Dialog = struct {
     /// answer starts unchosen.
     pub fn setPlan(self: *Dialog, a: std.mem.Allocator, value: j.Value) !void {
         try self.plan.replace(a, value);
+        self.generation +%= 1;
         self.restored = false;
         self.series = false;
         self.response = null;
@@ -137,6 +171,7 @@ pub const Dialog = struct {
     /// A saved (pending) review restores exactly what was chosen then.
     pub fn restore(self: *Dialog, a: std.mem.Allocator, review: j.Value) !void {
         try self.plan.replace(a, review);
+        self.generation +%= 1;
         self.restored = true;
         self.series = std.mem.eql(u8, j.text(review, "scope"), "series");
         self.notify = std.mem.eql(u8, j.text(review, "sendUpdates"), "all");
@@ -362,6 +397,12 @@ pub const Dialog = struct {
         };
     }
 
+    /// The lookup of the unconfirmed write that blocks this dialog: exactly
+    /// the one a refusal named, else this event with its provider series.
+    pub fn pendingRequest(self: *const Dialog, a: std.mem.Allocator) !j.Value {
+        if (self.blocking.len > 0) return j.value(a, .{ .cmd = "calendar.event-pending", .account = self.account.slice(), .calendarId = self.calendar_id.slice(), .operationId = self.blocking.slice() });
+        return j.value(a, .{ .cmd = "calendar.event-pending", .account = self.account.slice(), .calendarId = self.calendar_id.slice(), .eventId = self.event_id.slice(), .seriesEventId = self.series_event_id.slice() });
+    }
     pub fn planRequest(self: *const Dialog, a: std.mem.Allocator, operation_id: []const u8) !j.Value {
         return j.value(a, .{ .cmd = self.reviewCommand(), .account = self.account.slice(), .calendarId = self.calendar_id.slice(), .eventId = self.event_id.slice(), .scope = "event", .sendUpdates = "none", .operationId = operation_id, .dryRun = true });
     }

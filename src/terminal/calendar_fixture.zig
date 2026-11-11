@@ -34,6 +34,9 @@ const State = struct {
     dispatch_attempts: u64 = 0,
     events: []StoredEvent = &.{},
     requests: []Sent = &.{},
+    /// Provider reads (event and calendar GETs, agenda pages), counted only
+    /// in the delete/RSVP scenarios so acceptance can bound re-reads.
+    reads: u64 = 0,
 };
 
 pub const Provider = struct {
@@ -69,6 +72,10 @@ pub const Provider = struct {
             try save(&store, a, value);
             break :initial value;
         };
+        if (!request.kind.mutating() and actionsScenario(self.config.options.fixture_scenario)) {
+            state.reads +|= 1;
+            try save(&store, a, state);
+        }
         if (request.kind == .calendar_list) {
             const listing = try calendars(a, self.config.account, self.config.options.fixture_scenario);
             if (std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList?")) return response(out, self.config.account, 200, listing);
@@ -467,8 +474,11 @@ fn agendaItems(a: std.mem.Allocator, state: State, target: t.Target, window: t.W
     var items: std.ArrayList(j.Value) = .empty;
     for (state.events) |stored| {
         if (!std.mem.eql(u8, stored.calendar_id, target.calendar_id) or std.mem.eql(u8, j.text(stored.value, "status"), "cancelled")) continue;
-        // A changed occurrence is listed in place of its expansion below.
-        if (j.text(stored.value, "recurringEventId").len != 0) continue;
+        // A changed occurrence of a stored series is listed in place of its
+        // expansion below. An occurrence whose series is not stored here
+        // (as acceptance documents publish them) is listed as it is.
+        const series = j.text(stored.value, "recurringEventId");
+        if (series.len != 0 and seriesStored(state, stored.calendar_id, series)) continue;
         const event = (try provider.decodeDocument(a, target, try std.json.Stringify.valueAlloc(a, stored.value, .{}))).event;
         if (j.get(stored.value, "recurrence") != null) {
             const begin = event.start.?.value;
@@ -527,14 +537,21 @@ fn expandedInstance(a: std.mem.Allocator, value: j.Value, event: t.Event, first:
 fn findInstance(a: std.mem.Allocator, state: State, target: t.Target, id: []const u8) !?j.Value {
     for (state.events) |stored| {
         if (!std.mem.eql(u8, stored.calendar_id, target.calendar_id) or j.get(stored.value, "recurrence") == null or std.mem.eql(u8, j.text(stored.value, "status"), "cancelled")) continue;
+        // Occurrence IDs are `<series ID>_<start>`; a series ID can itself
+        // contain `_` (Google's split series `abc_R…`), so a non-matching
+        // series is skipped rather than ending the search.
         const prefix = try std.fmt.allocPrint(a, "{s}_", .{j.text(stored.value, "id")});
         if (!std.mem.startsWith(u8, id, prefix)) continue;
-        const first = std.fmt.parseInt(i64, id[prefix.len..], 10) catch return null;
+        const first = std.fmt.parseInt(i64, id[prefix.len..], 10) catch continue;
         const event = (try provider.decodeDocument(a, target, try std.json.Stringify.valueAlloc(a, stored.value, .{}))).event;
-        if (first < event.start.?.value or first > 253402214400000 or @mod(first - event.start.?.value, 86400000) != 0) return null;
+        if (first < event.start.?.value or first > 253402214400000 or @mod(first - event.start.?.value, 86400000) != 0) continue;
         return try expandedInstance(a, stored.value, event, first);
     }
     return null;
+}
+fn seriesStored(state: State, calendar_id: []const u8, series: []const u8) bool {
+    for (state.events) |stored| if (std.mem.eql(u8, stored.calendar_id, calendar_id) and std.mem.eql(u8, j.text(stored.value, "id"), series) and j.get(stored.value, "recurrence") != null) return true;
+    return false;
 }
 fn freeBusy(a: std.mem.Allocator, state: State, request: provider.Request) !j.Value {
     const body = try parse(a, request.body.?);

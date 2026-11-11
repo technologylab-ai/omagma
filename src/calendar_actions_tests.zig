@@ -34,13 +34,16 @@ const Harness = struct {
     a: std.mem.Allocator,
     root: []const u8,
     options: mail.Options = .{ .fixtures = true, .fixture_scenario = "calendar-actions" },
+    /// The operation behind the last CalendarOperationPending refusal.
+    blocked: service.Blocked = .{},
 
     fn run(self: *Harness, request: j.Value) !j.Value {
+        self.blocked.clear();
         var backend = try fixture.Provider.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .root = self.root, .account = account, .options = self.options, .now_ms = now });
         var local: persistence.Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .result_allocator = self.a, .root = self.root, .account = account, .options = self.options };
         var env: std.process.Environ.Map = .init(self.a);
         defer env.deinit();
-        const instance: service.Service = .{ .a = self.a, .grants = backend.grants(), .transport = backend.transport(), .persistence = local.persistence(), .cache = local.cache(), .now_ms = now };
+        const instance: service.Service = .{ .a = self.a, .grants = backend.grants(), .transport = backend.transport(), .persistence = local.persistence(), .cache = local.cache(), .now_ms = now, .blocked = &self.blocked };
         return commands.dispatch(instance, request, .{ .io = std.testing.io, .env = &env, .context = &local, .loadReviewFn = review, .loadReceiptFn = receipt, .loadPendingFn = pending });
     }
     fn review(context: *anyopaque, a: std.mem.Allocator, requested: t.Target, operation_id: []const u8) anyerror!service.Review {
@@ -83,6 +86,39 @@ const Harness = struct {
             if (std.mem.eql(u8, j.text(value, "id"), id)) return value;
         }
         return null;
+    }
+    /// Adds a synthetic event to the seeded provider document.
+    fn inject(self: *Harness, value: j.Value) !void {
+        const document = try self.provider();
+        const entry = try j.value(self.a, .{ .calendar_id = account, .value = value });
+        try document.object.getPtr("events").?.array.append(entry);
+        var store = try storage.Store.open(std.testing.io, self.a, self.root, account, self.options);
+        defer store.close();
+        try store.writeDocument(fixture.document_name, try std.json.Stringify.valueAlloc(self.a, document, .{}));
+    }
+    /// A daily series organized here with one guest, starting today at `hour`.
+    fn injectSeries(self: *Harness, id: []const u8, hour: i64) !void {
+        const first = @divFloor(now, 86400000) * 86400000 + hour * 3600000;
+        const Point = struct { dateTime: []const u8 };
+        const Guest = struct { email: []const u8, self: bool = false, organizer: bool = false, responseStatus: []const u8 = "needsAction" };
+        try self.inject(try j.value(self.a, .{ .id = id, .iCalUID = try std.fmt.allocPrint(self.a, "{s}@example.test", .{id}), .etag = try std.fmt.allocPrint(self.a, "\"seed-{s}\"", .{id}), .status = "confirmed", .organizer = .{ .email = account, .self = true }, .summary = id, .start = Point{ .dateTime = try t.time.format(self.a, .{ .kind = .instant, .value = first }) }, .end = Point{ .dateTime = try t.time.format(self.a, .{ .kind = .instant, .value = first + 1800000 }) }, .sequence = 0, .attendees = [_]Guest{ .{ .email = account, .self = true, .organizer = true, .responseStatus = "accepted" }, .{ .email = "guest-one@example.test" } }, .recurrence = [_][]const u8{"RRULE:FREQ=DAILY"} }));
+    }
+    fn occurrence(self: *Harness, series: []const u8, hour: i64, day: i64) ![]const u8 {
+        return std.fmt.allocPrint(self.a, "{s}_{d}", .{ series, @divFloor(now, 86400000) * 86400000 + hour * 3600000 + day * 86400000 });
+    }
+    fn pendingFor(self: *Harness, fields: anytype) !j.Value {
+        var request = try j.value(self.a, fields);
+        try request.object.put(self.a, "cmd", .{ .string = "calendar.event-pending" });
+        try request.object.put(self.a, "account", .{ .string = account });
+        try request.object.put(self.a, "calendarId", .{ .string = account });
+        return self.run(request);
+    }
+    /// An edit review of an existing event from its own editor draft.
+    fn editReview(self: *Harness, operation: []const u8, id: []const u8, summary: []const u8) !j.Value {
+        const detail = try self.run(try j.value(self.a, .{ .cmd = "calendar.event", .account = account, .calendarId = account, .eventId = id }));
+        var draft = try j.copyObject(self.a, j.get(detail, "eventDraft").?);
+        try draft.object.put(self.a, "summary", .{ .string = summary });
+        return self.run(try j.value(self.a, .{ .cmd = "calendar.event-review", .account = account, .calendarId = account, .eventId = id, .expectedEtag = j.text(j.get(detail, "event").?, "etag"), .sendUpdates = "none", .operationId = operation, .event = draft }));
     }
     fn event(self: *Harness, id: []const u8) !j.Value {
         return j.get(try self.run(try j.value(self.a, .{ .cmd = "calendar.event", .account = account, .calendarId = account, .eventId = id })), "event").?;
@@ -461,6 +497,146 @@ test "calendar actions: a write whose journal record fails after dispatch is an 
     try std.testing.expectEqualStrings("applied", j.text(checked, "state"));
     try std.testing.expect(try j.boolean(checked, "reconciled", false));
     try std.testing.expectEqual(@as(i64, 1), try h.writes());
+}
+
+test "calendar actions: series membership comes from the provider, also for `_`-leading and `_R` split series IDs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    _ = try h.agendaIds("day");
+    const split = "abc_R20261111T150000";
+    try h.injectSeries("abc", 15);
+    try h.injectSeries(split, 18);
+    try h.injectSeries("_xyzseries", 20);
+    const plain_one = try h.occurrence("abc", 15, 0);
+    const split_one = try h.occurrence(split, 18, 0);
+    const split_two = try h.occurrence(split, 18, 1);
+    const leading_one = try h.occurrence("_xyzseries", 20, 0);
+    const leading_two = try h.occurrence("_xyzseries", 20, 1);
+    const week = try h.agendaIds("week");
+    try std.testing.expect(contains(week, plain_one) and contains(week, split_two) and contains(week, leading_two));
+    // An unconfirmed write to the series "abc" leaves the split series
+    // "abc_R…" alone: they share an ID prefix, not a series.
+    const plain = try h.event(plain_one);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const plain_series = try h.deleteReview("plain-series", plain_one, j.text(plain, "etag"), "series", "none", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", plain_series), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    _ = try h.deleteReview("plan-split", split_two, null, "event", "none", true);
+    try std.testing.expect(j.get(try h.pendingFor(.{ .eventId = split_two }), "pending").? == .null);
+    // A whole split series: its other occurrences are held back and the
+    // refusal names that write; the lookup finds it with or without the
+    // caller's series ID (one read of the event otherwise), and by ID.
+    const seen = try h.event(split_one);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const split_series = try h.deleteReview("split-series", split_one, j.text(seen, "etag"), "series", "none", false);
+    try std.testing.expectEqualStrings(split, j.text(split_series, "targetEventId"));
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", split_series), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("plan-two", split_two, null, "event", "none", true));
+    try std.testing.expectEqualStrings("split-series", h.blocked.slice());
+    try std.testing.expect(h.blocked.journaled);
+    for ([_]?[]const u8{ null, split }) |series_id| {
+        const found = try h.pendingFor(.{ .eventId = split_two, .seriesEventId = series_id });
+        try std.testing.expectEqualStrings("split-series", j.text(j.get(j.get(found, "pending").?, "review").?, "operationId"));
+        try std.testing.expect(try j.boolean(found, "seriesChecked", false));
+    }
+    try std.testing.expectEqualStrings("split-series", j.text(j.get(j.get(try h.pendingFor(.{ .operationId = "split-series" }), "pending").?, "review").?, "operationId"));
+    // A series ID that begins with `_`.
+    const leading = try h.event(leading_one);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const leading_series = try h.deleteReview("leading-series", leading_one, j.text(leading, "etag"), "series", "none", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", leading_series), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("plan-leading", leading_two, null, "event", "none", true));
+    try std.testing.expectEqualStrings("leading-series", j.text(j.get(j.get(try h.pendingFor(.{ .eventId = leading_two }), "pending").?, "review").?, "operationId"));
+    // A lookup with the series supplied reads nothing from the provider.
+    const reads = try j.integer(try h.provider(), "reads", -1);
+    _ = try h.pendingFor(.{ .eventId = leading_two, .seriesEventId = "_xyzseries" });
+    try std.testing.expectEqual(reads, try j.integer(try h.provider(), "reads", -1));
+}
+
+test "calendar actions: an edit never overtakes an unconfirmed series write, and the reverse is found" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    // An edit reviewed first, then an unconfirmed delete of its series.
+    const edit = try h.editReview("edit-second", standup_second, "Standup moved");
+    const first = try h.event(standup_first);
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const series = try h.deleteReview("delete-series", standup_first, j.text(first, "etag"), "series", "none", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", series), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    try std.testing.expectError(error.CalendarOperationPending, h.execute("calendar.event-apply", edit));
+    try std.testing.expectEqualStrings("delete-series", h.blocked.slice());
+    try std.testing.expectError(error.CalendarOperationPending, h.editReview("edit-again", standup_second, "Standup moved again"));
+    try std.testing.expectEqual(@as(usize, 1), (try h.sent()).len);
+    try std.testing.expectEqualStrings("archived", j.text(try h.execute("calendar.event-abandon", series), "state"));
+    // The reverse: an unconfirmed edit of one occurrence holds back a series
+    // delete, and is found from another occurrence (relation series).
+    const office_edit = try h.editReview("edit-office", standup_second, "Standup moved");
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", office_edit), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    const fresh = try h.event(standup_first);
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("delete-series-2", standup_first, j.text(fresh, "etag"), "series", "none", false));
+    try std.testing.expectEqualStrings("edit-office", h.blocked.slice());
+    const found = try h.pendingFor(.{ .eventId = standup_first });
+    try std.testing.expectEqualStrings("edit-office", j.text(j.get(j.get(found, "pending").?, "review").?, "operationId"));
+    try std.testing.expectEqualStrings("series", j.text(j.get(found, "pending").?, "relation"));
+    // Its own occurrence and the series ID find it as a write to the event.
+    try std.testing.expectEqualStrings("event", j.text(j.get(try h.pendingFor(.{ .eventId = standup_second }), "pending").?, "relation"));
+    try std.testing.expectEqualStrings("edit-office", j.text(j.get(j.get(try h.pendingFor(.{ .eventId = "fixture-standup" }), "pending").?, "review").?, "operationId"));
+    // An action on that very occurrence waits too; this-event actions on
+    // other occurrences do not.
+    try std.testing.expectError(error.CalendarOperationPending, h.deleteReview("delete-second", standup_second, null, "event", "none", true));
+    _ = try h.deleteReview("delete-first", standup_first, null, "event", "none", true);
+}
+
+test "calendar actions: an identical RSVP retry sends the same conditional answer on the wire" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    const seen = try h.event("fixture-invite");
+    h.options.fixture_scenario = "calendar-prewrite-unavailable";
+    const reviewed = try h.respondReview("retry-answer", "fixture-invite", j.text(seen, "etag"), "event", "tentative", "all", false);
+    try std.testing.expectEqualStrings("unknown", j.text(try h.execute("calendar.event-apply", reviewed), "state"));
+    h.options.fixture_scenario = "calendar-actions";
+    const checked = try h.execute("calendar.event-reconcile", reviewed);
+    try std.testing.expect(try j.boolean(checked, "retryPossible", false));
+    const retried = try h.run(try j.value(a, .{ .cmd = "calendar.event-retry", .account = account, .calendarId = account, .operationId = "retry-answer", .reviewHash = j.text(reviewed, "reviewHash"), .nextAttempt = @as(i64, 1) }));
+    try std.testing.expectEqualStrings("applied", j.text(retried, "state"));
+    const requests = try h.sent();
+    try std.testing.expectEqual(@as(usize, 2), requests.len);
+    for (0..2) |index| try h.expectSent(index, "PATCH", "fixture-invite", "\"fixture-seed-fixture-invite\"", "all");
+    try std.testing.expectEqualStrings(j.text(requests[0], "body"), j.text(requests[1], "body"));
+    try std.testing.expectEqualStrings("tentative", j.text(try h.event("fixture-invite"), "response"));
+}
+
+test "calendar actions: an occurrence stored without its series is listed as it is" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h = try harness(a, tmp);
+    _ = try h.agendaIds("day");
+    const start = @divFloor(now, 86400000) * 86400000 + 12 * 3600000;
+    const Point = struct { dateTime: []const u8 };
+    const at = try t.time.format(a, .{ .kind = .instant, .value = start });
+    try h.inject(try j.value(a, .{ .id = "orphan-series_1", .iCalUID = "orphan@example.test", .etag = "\"orphan-1\"", .status = "confirmed", .organizer = .{ .email = "host@example.test" }, .summary = "Orphan occurrence", .start = Point{ .dateTime = at }, .end = Point{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = start + 1800000 }) }, .sequence = 0, .recurringEventId = "orphan-series", .originalStartTime = Point{ .dateTime = at } }));
+    try std.testing.expect(contains(try h.agendaIds("day"), "orphan-series_1"));
+    // A changed occurrence of a stored series still replaces its expansion.
+    try std.testing.expect(contains(try h.agendaIds("week"), standup_exception));
 }
 
 test "calendar actions: a 0.2.18 reader refuses a journal with a saved action instead of misreading it" {

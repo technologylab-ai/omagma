@@ -114,6 +114,9 @@ pub const Session = struct {
     meter: ?*@import("capped_allocator.zig").CappedAllocator = null,
     progress_sink: ?t.ProgressSink = null,
     vault_owner: ?*@import("vault_owner.zig").Owner = null,
+    /// The unconfirmed write behind the current request's
+    /// CalendarOperationPending refusal, reported as blockingOperationId.
+    calendar_blocked: @import("calendar_service.zig").Blocked = .{},
     fn storeAccessOpen(context: *anyopaque, a: std.mem.Allocator, account: []const u8, readonly: bool) anyerror!storage.Store {
         const self: *Session = @ptrCast(@alignCast(context));
         return self.openStore(a, account, readonly);
@@ -281,6 +284,7 @@ pub const Session = struct {
             const active = @import("vault_activation.zig").load(s.io, a, s.env) catch |err| return failureForError(out_allocator, id, account, err);
             if (active != null) return failureForError(out_allocator, id, account, error.BackendRequired);
         }
+        s.calendar_blocked.clear();
         const data = s.dispatch(a, req) catch |err| {
             // Internal cached callers own a cancelable lifetime. Keep the
             // cancellation signal out of protocol normalization for that path.
@@ -307,7 +311,13 @@ pub const Session = struct {
             configured[count] = entry.address.slice();
             count += 1;
         };
-        const detail = @import("cli_contract.zig").explain(a, req, code, message, configured[0..count]) catch return failure(out, id, account, code, message);
+        var detail = @import("cli_contract.zig").explain(a, req, code, message, configured[0..count]) catch return failure(out, id, account, code, message);
+        // Name the exact unconfirmed write that refused this request, so a
+        // client opens that one (event-pending operationId) without guessing.
+        if (std.mem.eql(u8, code, "CalendarOperationPending") and s.calendar_blocked.len != 0 and detail == .object) {
+            detail.object.put(a, "blockingOperationId", .{ .string = try a.dupe(u8, s.calendar_blocked.slice()) }) catch {};
+            detail.object.put(a, "blockingKind", .{ .string = if (s.calendar_blocked.journaled) "event" else "invitation" }) catch {};
+        }
         return failureDetail(out, id, account, detail);
     }
     fn failureDetail(a: std.mem.Allocator, id: Value, account: []const u8, detail: Value) ![]const u8 {
@@ -1216,7 +1226,7 @@ pub const Session = struct {
         return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .url = target.url.slice(), .profile = target.profile_arg.slice(), .cached = try j.boolean(data, "cached", false), .stale = try j.boolean(data, "stale", false), .refreshError = j.text(data, "refreshError") });
     }
     fn calendarHost(s: *Session, a: std.mem.Allocator) @import("calendar_host.zig").Host {
-        return .{ .io = s.io, .allocator = a, .backing_allocator = s.allocator, .env = s.env, .config = &s.config, .options = s.options, .cache_root = s.cache_root, .source_context = s, .loadSourceFn = calendarSource, .access = .{ .context = s, .openFn = storeAccessOpen } };
+        return .{ .io = s.io, .allocator = a, .backing_allocator = s.allocator, .env = s.env, .config = &s.config, .options = s.options, .cache_root = s.cache_root, .source_context = s, .loadSourceFn = calendarSource, .access = .{ .context = s, .openFn = storeAccessOpen }, .blocked = &s.calendar_blocked };
     }
     fn syncInvitationCalendar(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value, receipt: Value) !Value {
         const sync = @import("calendar_rsvp.zig");

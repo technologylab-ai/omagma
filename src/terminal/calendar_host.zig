@@ -23,6 +23,8 @@ pub const Host = struct {
     access: @import("store_access.zig").Access = .{},
     source_context: *anyopaque,
     loadSourceFn: *const fn (*anyopaque, std.mem.Allocator, []const u8, j.Value) anyerror!commands.InvitationInput,
+    /// Receives the operation behind a CalendarOperationPending refusal.
+    blocked: ?*service.Blocked = null,
 
     /// Mail has already been sent and its durable receipt is independent of
     /// this continuation. Its source is supplied before the Calendar client
@@ -85,16 +87,20 @@ pub const Host = struct {
         const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadInvitationFn = Inputs.sourceInput, .loadReviewFn = Inputs.reviewInput, .loadReceiptFn = Inputs.receiptInput, .loadPendingFn = Inputs.pendingInput };
         const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         if (self.options.fixtures) return self.fixtureRun(request, &store, callbacks, now);
-        if (commands.localCommand(command)) return commands.dispatch(.{ .a = self.allocator, .grants = local_grants.?, .transport = .{ .context = &inputs, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, callbacks);
+        const local: service.Service = .{ .a = self.allocator, .grants = local_grants.?, .transport = .{ .context = &inputs, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now, .blocked = self.blocked };
+        if (commands.localRequest(request)) return commands.dispatch(local, request, callbacks);
         if (try j.boolean(request, "cacheOnly", false)) return cached.dispatch(self.allocator, local_grants.?, &store, request, callbacks, "");
         const transport = try self.backing_allocator.create(native.Native);
         defer self.backing_allocator.destroy(transport);
         transport.* = .{};
         transport.init(self.io, self.allocator, self.backing_allocator, self.config, account, command, request) catch |err| {
+            // A pending lookup that could not read the event's series still
+            // answers from the local journal, saying the series is unchecked.
+            if (std.mem.eql(u8, command, "calendar.event-pending")) return commands.dispatch(local, request, callbacks);
             return self.offlineFallback(request, local_grants.?, &store, callbacks, err);
         };
         defer transport.close();
-        const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants, .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+        const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants, .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now, .blocked = self.blocked };
         return commands.dispatch(instance, request, callbacks) catch |err| {
             return self.offlineFallback(request, local_grants.?, &store, callbacks, err);
         };
@@ -166,10 +172,14 @@ pub const Host = struct {
 
     fn fixtureRun(self: Host, request: j.Value, store: *persistence.Host, inputs: commands.HostInputs, now: i64) !j.Value {
         var transport = try @import("calendar_fixture.zig").Provider.init(.{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = store.account, .options = self.options, .now_ms = now, .access = self.access });
-        if (commands.localCommand(j.text(request, "cmd"))) return commands.dispatch(.{ .a = self.allocator, .grants = transport.grants(), .transport = .{ .context = store, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, inputs);
+        const local: service.Service = .{ .a = self.allocator, .grants = transport.grants(), .transport = .{ .context = store, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now, .blocked = self.blocked };
+        if (commands.localRequest(request)) return commands.dispatch(local, request, inputs);
         if (try j.boolean(request, "cacheOnly", false)) return cached.dispatch(self.allocator, transport.grants(), store, request, inputs, "");
-        if (std.mem.eql(u8, self.options.fixture_scenario, "calendar-offline")) return self.offlineFallback(request, transport.grants(), store, inputs, error.ConnectionRefused);
-        const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants(), .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+        if (std.mem.eql(u8, self.options.fixture_scenario, "calendar-offline")) {
+            if (std.mem.eql(u8, j.text(request, "cmd"), "calendar.event-pending")) return commands.dispatch(local, request, inputs);
+            return self.offlineFallback(request, transport.grants(), store, inputs, error.ConnectionRefused);
+        }
+        const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants(), .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now, .blocked = self.blocked };
         return commands.dispatch(instance, request, inputs);
     }
 };
