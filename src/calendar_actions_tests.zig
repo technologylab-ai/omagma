@@ -13,6 +13,7 @@ const j = @import("terminal/json.zig");
 
 test {
     std.testing.refAllDecls(@import("terminal/calendar_event_action.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_action_ui.zig"));
 }
 
 const account = "self@example.test";

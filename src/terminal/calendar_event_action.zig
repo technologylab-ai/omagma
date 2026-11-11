@@ -225,7 +225,8 @@ pub fn consequence(a: std.mem.Allocator, prepared: Prepared, calendar_name: []co
     const what: []const u8 = if (prepared.scope == .series) "every event in this series" else if (prepared.recurring) "this occurrence only" else "this event";
     switch (prepared.action) {
         .delete => {
-            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event and other guests are not changed, and no email is sent.{s}", .{ what, calendar_name, if (prepared.role == .attendee) @as([]const u8, " To tell the organizer you won't attend, decline it instead.") else "" });
+            const removed: []const u8 = if (prepared.scope == .series) "every event in this series" else if (prepared.recurring) "this occurrence" else "this event";
+            if (prepared.role != .organizer) return std.fmt.allocPrint(a, "Removes {s} from {s} only. The organizer's event and other guests are not changed, and no email is sent.{s}", .{ removed, calendar_name, if (prepared.role == .attendee) @as([]const u8, " To tell the organizer you won't attend, decline it instead.") else "" });
             if (prepared.guest_count == 0 and !prepared.guests_omitted) return std.fmt.allocPrint(a, "Deletes {s} from {s}. It has no guests, so no email is sent.", .{ what, calendar_name });
             const guests = if (prepared.guests_omitted) try a.dupe(u8, "its guests") else try std.fmt.allocPrint(a, "{d} guest{s}", .{ prepared.guest_count, plural(prepared.guest_count) });
             if (prepared.send_updates == .all) return std.fmt.allocPrint(a, "Deletes {s} from {s} and emails {s} a cancellation.", .{ what, calendar_name, guests });
