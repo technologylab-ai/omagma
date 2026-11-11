@@ -190,11 +190,30 @@ def chooser(binary, directory, captures):
         terminal.until(lambda: "Calendar · Week" in terminal.text())
         terminal.resize(140, 38)
         terminal.until(lambda: "│Sun " in terminal.text())
+        # A timed +N lists its exact hour; choosing an event it counted
+        # reveals that event in the grid, drawn over the lane it lacked.
+        select_week_event(terminal, "Weekly studio block")
+        lines = terminal.screen.lines()
+        row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
+        require("Notes" not in lines[row10][6:24], "fixture no longer hides Notes check at 140 columns")
+        click(terminal, lines[row10].find("+", 6, 24), row10)
+        terminal.until(lambda: "Calendar · Events here" in terminal.text() and "7 events" in terminal.text())
+        terminal.send(b"jj")  # Routine, early check-in, then Notes check.
+        terminal.until(lambda: "Notes check" in terminal.text())
+        click(terminal, *point(terminal, "[Enter Select]"))
+        terminal.until(lambda: "Calendar · Week" in terminal.text() and selected(terminal, "Notes check"))
+        lines = terminal.screen.lines()
+        row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
+        # Narrow lanes name the 10:10 start before the shortened title.
+        require(":10 No" in lines[row10][6:24], "the chosen hidden event was not revealed in its hour")
+        require("+" in lines[row10][6:24], "events drawn over by the reveal are not counted")
+        capture(terminal, captures, "week-timed-badge-reveal")
         # All-day disclosure is separate from timed rows and uses civil ends:
-        # the band's +1 sits at the end of Monday's last band row.
+        # the band's +1 has its own row below Monday's bars.
         lines = terminal.screen.lines()
         day_header = next(index for index, line in enumerate(lines) if "│Mon 19 Oct" in line)
-        band_row = next(row for row in (day_header + 2, day_header + 1) if "+1" in lines[row][6:24])
+        band_row = next(row for row in (day_header + 3, day_header + 2, day_header + 1) if "+1" in lines[row][6:24])
+        require(band_row == day_header + 3, "all-day +N is drawn inside a bar row")
         click(terminal, lines[band_row].find("+1", 6, 24), band_row)
         terminal.until(lambda: "3 events" in terminal.text() and "All day" in terminal.text())
         require("Weekly studio block" not in terminal.text(), "all-day chooser included a timed event")
@@ -246,6 +265,16 @@ def expansion(binary, directory, captures):
         capture(terminal, captures, "week-passive-priority-color")
         select_week_event(terminal, "Weekly studio block")
         capture(terminal, captures, "week-crowded-140x38")
+        # At 38 rows the axis scrolls: moving to events already in view keeps
+        # it, while a far event moves it, so the check is not vacuous.
+        before = hour_gutter(terminal)
+        require(len(before) < 24, "38 rows unexpectedly hold the whole day")
+        terminal.send(b"jj")
+        terminal.gap(.2)
+        require(hour_gutter(terminal) == before, "selecting a visible event moved the time axis")
+        select_week_event(terminal, "Overnight handover")
+        require(hour_gutter(terminal) != before, "a far selection did not scroll into view")
+        select_week_event(terminal, "Weekly studio block")
         expected_hours = [f"{hour:02}:00" for hour in range(24)]
         before_frame = terminal.screen.completed_frames
         terminal.resize(140, 62)
@@ -256,7 +285,8 @@ def expansion(binary, directory, captures):
         # The routine, the earliest start and the preferred 10:30 start are
         # drawn; the hour's four other events are counted by its badge.
         require(any("+4" in part for part in actual), "badge count is not the hour's hidden events")
-        require(any("Early" in part for part in actual) and "Spe" in actual[1], "free lanes do not show the starts beside the routine")
+        # The 10:05 check-in names its start inside the 10:00 row.
+        require(any(":05 Ea" in part for part in actual) and "Spe" in actual[1], "free lanes do not show the starts beside the routine")
         require("overlapping" not in terminal.text(), "Week falsely labels same-hour appointments as conflicts")
         capture(terminal, captures, "week-expanded-140x62")
         # Layout geometry is independent of selection.

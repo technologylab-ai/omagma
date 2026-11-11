@@ -573,7 +573,7 @@ def browsing(binary, directory, captures):
         terminal.until(lambda: "│Sun " in terminal.text())
         capture(terminal, captures, "calendar-week-medium")
         terminal.resize(82, 28)
-        terminal.until(lambda: "Week needs 104 cols" in terminal.text())
+        terminal.until(lambda: "104 cols show 7 days" in terminal.text())
         capture(terminal, captures, "calendar-week-three-days")
         terminal.resize(48, 22)
         terminal.until(lambda: "more event" in terminal.text())
@@ -894,7 +894,7 @@ def grid_coverage(binary, directory, captures):
         terminal.until(lambda: terminal.screen.completed_frames > before and "│Sun " in terminal.text())
         require(any("+1" in row for row in hour_band(terminal, 9)), "short grid hid the overlap without its +1 count")
         terminal.resize(82, 28)
-        terminal.until(lambda: "Week needs 104 cols" in terminal.text())
+        terminal.until(lambda: "104 cols show 7 days" in terminal.text())
         terminal.send(b"kkkk")
         terminal.gap(.15)
         heading = next(line for line in terminal.screen.lines() if "│Mon 19 Oct" in line)
@@ -1072,6 +1072,30 @@ def grid_blocks(binary, directory, captures):
             terminal.until(lambda: "Calendar · Event" in terminal.text() and "Lunch" in terminal.text())
             terminal.send(b"q")
             terminal.until(lambda: "Calendar · Week" in terminal.text())
+            # 110 columns leave Monday one lane (40 rows: two rows an hour).
+            # Revealing the tentative review
+            # draws it over the planning block; the rows it takes from
+            # planning and the hidden vendor sync are counted at 10:00.
+            before = terminal.screen.completed_frames
+            terminal.resize(110, 40)
+            terminal.until(lambda: terminal.screen.completed_frames > before and "│Sun 25 Oct" in terminal.text())
+            select_event(terminal, "Design review")
+            pitch = (110 - 6) // 7
+            monday = (6, 6 + pitch - 1)
+            terminal.until(lambda: cell_at(terminal, "~ Desig", monday) is not None)
+            row10 = gutter_rows(terminal)["10:00"]
+            require("+2" in "".join(terminal.screen.cells[row10][monday[0]:monday[1]]), "covered and hidden events are not counted")
+            require(cell_at(terminal, "Quarte", monday), "the covered planning block vanished entirely")
+            capture(terminal, captures, "calendar-grid-reveal-110x40" + suffix)
+            # 12 rows: a dated header and the band (with its +N row) remain.
+            before = terminal.screen.completed_frames
+            terminal.resize(110, 12)
+            terminal.until(lambda: terminal.screen.completed_frames > before and not terminal.screen.frame_open
+                           and "│Mon 19" in terminal.text() and "more" in terminal.text())
+            require(cell_at(terminal, "◂On-call", (6, 110)) or cell_at(terminal, "Company", (6, 110)) or cell_at(terminal, "Conference", (6, 110)),
+                    "the all-day band vanished on a short terminal")
+            require(len(terminal.screen.lines()) == 12, "the 110x12 frame was not drawn")
+            capture(terminal, captures, "calendar-grid-week-110x12" + suffix)
             # Narrower terminals keep readable columns: 3 days, then the list.
             for columns, rows_count in ((120, 40), (80, 24), (40, 12)):
                 terminal.resize(columns, rows_count)
@@ -1080,7 +1104,7 @@ def grid_blocks(binary, directory, captures):
                 if columns >= 104:
                     terminal.until(lambda: "│Sun 25 Oct" in terminal.text())
                 elif columns >= 60:
-                    terminal.until(lambda: "Week needs 104 cols" in terminal.text() and "│Tue 20 Oct" in terminal.text())
+                    terminal.until(lambda: "104 cols show 7 days" in terminal.text() and "│Tue 20 Oct" in terminal.text())
                     require("│Thu 22 Oct" not in terminal.text(), "compact Week shows unreadable slivers")
                 else:
                     terminal.until(lambda: "Week needs 60 cols" in terminal.text())
