@@ -49,7 +49,7 @@ account. Google Console lists these registrations under **Clients**.
 
 The requested `gmail.readonly` scope is a restricted Gmail scope. Although the bar fetches only a bounded Inbox page and metadata, the permission itself allows broader mailbox reading. Terminal read-only commands can use that grant to fetch full bodies, threads and attachments within their separate limits. [Gmail scope definitions](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
-External applications in **Testing** receive refresh tokens that expire after seven days for these Gmail/contact permissions. This applies to both the bar and terminal grants: reconnect an expired bar grant with `auth`, and an expired terminal grant with `terminal-auth authorize` using its terminal registration and complete capability set. Production removes that Testing-specific expiry; tokens can still expire or be revoked for other reasons. Public availability and verification are separate decisions governed by Google’s requirements. [Token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [distribution](DISTRIBUTION.md).
+External applications in **Testing** receive refresh tokens that expire after seven days for these Gmail/contact permissions. This applies to both the bar and terminal grants: reconnect an expired bar grant with `auth`, and an expired terminal grant with **Ctrl+O** in the TUI ([reconnect](#reconnect-an-expired-sign-in-from-the-tui)) or `terminal-auth authorize` using its terminal registration and complete capability set. Production removes that Testing-specific expiry; tokens can still expire or be revoked for other reasons. Public availability and verification are separate decisions governed by Google’s requirements. [Token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [distribution](DISTRIBUTION.md).
 
 ## Configuration
 
@@ -278,6 +278,50 @@ for interactive terminal use. Mac installation does not install the supplied
 Linux systemd units or create a Mac background service.
 
 ## Reconnect or change permissions
+
+### Reconnect an expired sign-in from the TUI
+
+Google can refuse a stored terminal sign-in (`InvalidGrant`): a Workspace
+re-authentication policy, a password change, revoked access, or the seven-day
+limit of a project still in **Testing**. The TUI says so in the account's status
+row (`Google sign-in expired · Ctrl+O Reconnect`) and in Calendar's
+`Not shown: <account> · Google sign-in expired · Ctrl+O Reconnect` row.
+
+Press **Ctrl+O** there, or run `:reconnect` (`:reconnect <account>` for another
+configured account; also in the Ctrl+P actions). The dialog shows Google's
+reason and the permissions that will be kept. Nothing happens until you press
+**Enter** on **Reconnect**: Omagma then opens Google consent in that account's
+configured Chrome profile — sign in as that account and allow every requested
+permission — and shows `Waiting for Google consent in Chrome · Esc Cancel`.
+Esc cancels while the dialog waits for Google and closes the local callback
+listener; the consent wait ends after three minutes. Once Google has answered,
+the dialog says `Google approved · storing the renewed sign-in…` and closes
+once it is stored; that step cannot be cancelled. Declining, closing Chrome,
+signing in as another Google account or unchecking a permission stores
+nothing, and **Try again** starts a new consent. On success the new refresh token is stored in your
+selected credential store (Secret Service, Keychain, private files or the
+encrypted vault, unchanged), and that account's mail and calendars refresh in
+the same TUI; no restart is needed.
+
+Reconnect renews exactly the account's recorded terminal grant: the same
+capabilities, scopes and OAuth registration. It never adds or removes access;
+to change permissions use `terminal-auth authorize` below. An account without
+a recorded terminal grant (bar-only read-only setups) cannot be reconnected
+here; the dialog says so.
+
+`terminal-auth status --account <account>` (and JSONL `auth.status`) reports
+`lastRefreshError` with Google's `error`, `subtype` (for example
+`invalid_rapt`, a re-authentication policy), a sanitized `description` and a
+`kind`: `reauthenticationRequired`, `expiredOrRevoked` (Google uses the same
+words for revoked access, password changes and a Testing-mode expiry) or
+`invalidGrant`. It never contains token material. It describes only the
+current terminal grant, never the bar's read-only credential, and the grant's
+next verified refresh, a new authorization or `terminal-auth revoke` clears
+it. Plaintext credential stores keep it in a private
+`terminal-auth-diagnostics.json` beside the grant registry; the encrypted vault
+keeps it only in the running backend.
+
+### Change permissions
 
 For the bar, repeat its `auth` command. For the terminal, repeat
 `terminal-auth authorize` with the terminal registration JSON and the **complete**

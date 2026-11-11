@@ -265,9 +265,10 @@ pub fn disconnectRequestError(meta: Metadata) anyerror {
     return if (@import("client_contract.zig").readOnlyEnvelope(meta.command, meta.reconcile)) error.BackendStopped else error.UnknownOutcome;
 }
 pub fn executionSeconds(command: []const u8) i64 {
-    // OAuth owns a180-second consent deadline inside auth.run, followed by a
-    // durable identity commit. Lock interrupts this class explicitly.
-    return if (std.mem.eql(u8, command, "auth.authorize")) 190 else @import("send_memory.zig").seconds(command);
+    // OAuth owns a 180-second consent deadline inside auth.run, followed by
+    // an uncancellable exchange and durable identity commit whose steps have
+    // their own deadlines (HTTP job, keyring/vault); this budget covers both.
+    return if (std.mem.eql(u8, command, "auth.authorize")) 240 else @import("send_memory.zig").seconds(command);
 }
 pub const Metadata = struct { id: std.json.Value = .null, account: []const u8 = "", command: []const u8 = "", vault_id: []const u8 = "", secret_field: bool = false, reconcile: bool = false, progress: bool = false, cancel_disconnect: bool = false };
 /// Read only the envelope with fixed scratch. Large body/recipient arrays are
@@ -649,7 +650,7 @@ test "vault transport: envelope metadata uses bounded scratch for large escaped 
 }
 
 test "vault transport: secret controls are bounded and generic nested secret fields never route" {
-    try std.testing.expectEqual(@as(i64, 190), executionSeconds("auth.authorize"));
+    try std.testing.expectEqual(@as(i64, 240), executionSeconds("auth.authorize"));
     try std.testing.expectEqual(@as(i64, 30), executionSeconds("mail.refresh"));
     for ([_]Kind{ .unlock, .password_change }) |kind| {
         try std.testing.expectError(error.InvalidVaultPassword, decodeHeader(&(try encodeHeader(kind, 0, request_limit)), request_limit));

@@ -90,6 +90,46 @@ mail/contact data. Verification uses reads and needs no test send or mutation.
 For Interactive setup, verify in the user's local unlocked terminal and state
 when agent subprocess access has not been checked.
 
+### Expired sign-in (`InvalidGrant`)
+
+`InvalidGrant` means Google refused the account's stored refresh token; a retry
+fails the same way. `auth.status` then reports `lastRefreshError`, for example
+`{"error":"invalid_grant","subtype":"invalid_rapt","description":"reauth related error (invalid_rapt)","kind":"reauthenticationRequired","at":1762851600000}`.
+`kind` is `reauthenticationRequired` (a Workspace re-authentication policy),
+`expiredOrRevoked` (revoked access, a password change or a Testing-mode
+project's seven-day limit, which Google words identically) or
+`invalidGrant`; `null` means no refusal of the recorded terminal grant is
+known. The description is sanitized, printable ASCII of at most 160 bytes with
+token-like runs replaced by `[redacted]`; no field contains token material.
+Only refusals of the current terminal grant (by `grant.grantId`) are reported,
+never the bar's read-only credential. Plaintext credential stores keep the last
+refusal beside the grant registry for later processes; the encrypted vault
+keeps it in the running backend only. The grant's next verified refresh,
+authorization or `auth.revoke` clears it.
+
+Reconnecting needs the user's browser consent, so ask the user first. The user
+can press Ctrl+O in the TUI. From an agent context, read `auth.status`, then
+send `auth.authorize` with `reconnect:true`, exactly `grant.capabilities` and
+`expectedGrantId` set to `grant.grantId`:
+
+```json
+{"id":"renew","cmd":"auth.authorize","account":"personal@example.com","capabilities":["mail-read","mail-send"],"reconnect":true,"expectedGrantId":"<grant.grantId>"}
+```
+
+A different capability set fails with `ReconnectCapabilitiesChanged`, a grant
+changed since the read with `GrantChanged`, a malformed `expectedGrantId` with
+`InvalidRequest`, a `clientFile` other than the recorded registration with
+`ReconnectRegistrationChanged`, a disabled grant with `GrantDisabled` and an
+account without a recorded terminal grant with `ReconnectRequiresGrant`, all
+before consent. Consent then
+fails with `AuthorizationDenied`, `WrongAccount` (another Google account signed
+in), `UnexpectedScope` (a requested permission was unchecked) or `Timeout`
+after 180 seconds, storing nothing. Once Google's callback has arrived, the
+exchange and storage complete even if the request is cancelled. Success
+returns `reconnected:true` and
+clears `lastRefreshError`; an already open session uses the renewed credential
+for its next request without a restart.
+
 ## CLI and TUI coverage
 
 The JSONL agent CLI and TUI share the same backend operations, terminal grant,
@@ -311,7 +351,7 @@ empty `mail.mark` (`EmptyMutation`), conflicting labels or an invalid `scope`.
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
 | cache.refresh-status | refreshInProgress for this account; no mail or token data |
 | cache.activity | local-only inboxArrivalCount, generation, lastSyncAt; arrival serial advances on successful incoming Inbox history checkpoints |
-| auth.status / authorize / revoke | terminal grant; prefer one-shot terminal-auth for consent |
+| auth.status / authorize / revoke | terminal grant; prefer one-shot terminal-auth for consent; status adds lastRefreshError (null or Google's sanitized refusal: error, subtype, description, kind, at); authorize accepts reconnect:true with the recorded capabilities and expectedGrantId |
 | browser.open | explicit url; HTTP(S) destination opened in this account's configured Chrome profile |
 | attachment.open | explicit path to an already saved private file; invokes the desktop handler after file/path checks |
 

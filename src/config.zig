@@ -8,6 +8,9 @@ pub const Config = struct {
     client_file: b.Text(4096) = .{},
     chrome: b.Text(4096) = .{},
     chrome_data: b.Text(4096) = .{},
+    /// Synthetic consent page for --fixtures reconnect tests only. Fixture
+    /// consent opens this program and never the configured browser.
+    fixture_consent_page: b.Text(1024) = .{},
     refresh_seconds: u32 = 0,
     credential_store: @import("keyring.zig").Kind = .keyring,
     credential_directory: b.Text(4096) = .{},
@@ -16,9 +19,10 @@ pub const Config = struct {
     pub fn credentials(self: *const Config) @import("keyring.zig").Settings {
         return .{ .kind = self.credential_store, .directory = self.credential_directory.slice(), .provider = self.runtime_provider };
     }
+    pub const default_chrome = if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable";
     pub fn defaults(self: *Config, home: []const u8) !void {
         self.* = .{};
-        try self.chrome.set(if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable");
+        try self.chrome.set(default_chrome);
         var path: [4096]u8 = undefined;
         try self.chrome_data.set(try std.fmt.bufPrint(&path, if (@import("builtin").os.tag == .macos) "{s}/Library/Application Support/Google/Chrome" else "{s}/.config/google-chrome", .{home}));
         const defs = .{ .{ "personal@example.com", "Profile 3", true }, .{ "work@example.com", "Profile 1", true }, .{ "optional@example.com", "Profile 2", false } };
@@ -58,6 +62,11 @@ pub const Config = struct {
             const s = try b.string(v);
             if (!std.mem.startsWith(u8, s, "/")) return error.InvalidChromePath;
             try self.chrome.set(s);
+        }
+        if (b.optional(root, "fixtureConsentPage")) |v| {
+            const s = try b.string(v);
+            if (!std.mem.startsWith(u8, s, "/")) return error.InvalidFixtureConsentPage;
+            try self.fixture_consent_page.set(s);
         }
         if (b.optional(root, "chromeUserData")) |v| {
             const s = try b.string(v);

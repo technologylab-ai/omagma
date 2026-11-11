@@ -69,7 +69,9 @@ pub const Options = struct {
     /// printed authorization commands. Never set for an auto-activated vault.
     backend_socket: ?[]const u8 = null,
 };
-pub const FetchPhase = enum(u8) { metadata, bodies, drive_reserving, drive_uploading, drive_sharing, mail_submitting };
+/// authorizing: a consent callback arrived; the authorization is storing its
+/// result and can no longer be cancelled.
+pub const FetchPhase = enum(u8) { metadata, bodies, drive_reserving, drive_uploading, drive_sharing, mail_submitting, authorizing };
 pub const FetchProgress = struct { phase: FetchPhase, completed: usize, total: usize, fileIndex: ?usize = null, fileCount: ?usize = null };
 /// Borrowed only for the synchronous callback. Consumers copy a bounded
 /// preview; neither these slices nor provider response storage may escape it.

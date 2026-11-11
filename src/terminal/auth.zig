@@ -6,6 +6,9 @@ const platform = @import("../platform.zig");
 const Config = @import("../config.zig").Config;
 const j = @import("json.zig");
 const calendar_permissions = @import("calendar_permissions.zig");
+const auth_diagnostic = @import("auth_diagnostic.zig");
+const fixture_auth = @import("fixture_auth.zig");
+const types = @import("types.zig");
 
 pub const allowed_capabilities = [_][]const u8{
     "mail-read",     "mail-drafts",          "mail-send",             "mail-modify",       "contacts-read", "contacts-write", "calendar-rsvp",
@@ -194,7 +197,52 @@ fn authorizationClient(request: j.Value, current: ?*const Grant, configured: []c
     return selected;
 }
 
+/// Reconnect renews this account's existing grant and nothing else: the
+/// request must name exactly the recorded capability set (and, when given,
+/// the recorded grant identity and registration), so consent can neither
+/// broaden nor narrow it, nor move it to another OAuth registration.
+fn authorizationCapabilities(a: std.mem.Allocator, request: j.Value, current: ?*const Grant) ![]const []const u8 {
+    const requested = try requestCapabilities(a, request);
+    const expected = if (j.get(request, "expectedGrantId")) |value| try j.string(value) else null;
+    if (expected) |id| if (!auth_diagnostic.validGrant(id)) return error.InvalidRequest;
+    if (!try j.boolean(request, "reconnect", false)) {
+        if (expected != null) return error.ExpectedGrantRequiresReconnect;
+        return requested;
+    }
+    const grant = current orelse return error.ReconnectRequiresGrant;
+    if (!grant.enabled) return error.GrantDisabled;
+    if (expected) |id| if (!std.mem.eql(u8, id, grant.grantId)) return error.GrantChanged;
+    if (j.get(request, "clientFile")) |value| if (!std.mem.eql(u8, try j.string(value), grant.clientFile)) return error.ReconnectRegistrationChanged;
+    if (requested.len != grant.capabilities.len) return error.ReconnectCapabilitiesChanged;
+    for (requested) |capability| if (!grant.permits(capability)) return error.ReconnectCapabilitiesChanged;
+    return grant.capabilities;
+}
+
+/// Always present in auth.status: an object, or an explicit null.
+fn lastRefreshValue(a: std.mem.Allocator, last: ?auth_diagnostic.Report) !j.Value {
+    return if (last) |value| try j.value(a, value) else .null;
+}
+
+fn diagnosticSidecar(a: std.mem.Allocator, config: *const Config, path: []const u8) !?[]const u8 {
+    if (config.credential_store == .vault) return null;
+    return try auth_diagnostic.sidecarPath(a, path);
+}
+
+/// The callback has arrived: tell a progress-aware caller (the TUI) that the
+/// authorization is finishing and can no longer be cancelled.
+const CommitProgress = struct {
+    sink: types.ProgressSink,
+    fn notify(context: *anyopaque) void {
+        const self: *CommitProgress = @ptrCast(@alignCast(context));
+        self.sink.report(.{ .phase = .authorizing, .completed = 1, .total = 1 });
+    }
+};
+
 pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const std.process.Environ.Map, request: j.Value) !j.Value {
+    return runWithProgress(io, a, config, env, request, null);
+}
+
+pub fn runWithProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const std.process.Environ.Map, request: j.Value, sink: ?types.ProgressSink) !j.Value {
     const command = try j.required(request, "cmd");
     const account = try j.required(request, "account");
     const index = config.index(account) orelse return error.UnknownAccount;
@@ -202,7 +250,10 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     const path = if (config.credential_store == .vault) "" else if (j.get(request, "grantFile")) |v| try j.string(v) else try defaultFile(a, env);
     var registry = try loadConfigured(io, a, config, path);
     const current = find(&registry, account);
-    if (std.mem.eql(u8, command, "auth.status")) return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = current != null, .grant = current, .credentialStore = @tagName(config.credential_store), .credentialDirectory = config.credential_directory.slice() });
+    if (std.mem.eql(u8, command, "auth.status")) {
+        const last = try auth_diagnostic.status(io, a, try diagnosticSidecar(a, config, path), account, if (current) |grant| grant.grantId else null);
+        return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = current != null, .grant = current, .credentialStore = @tagName(config.credential_store), .credentialDirectory = config.credential_directory.slice(), .lastRefreshError = try lastRefreshValue(a, last) });
+    }
     if (std.mem.eql(u8, command, "auth.revoke")) {
         if (config.credential_store != .vault) try keyring.clearTerminal(io, config.credentials(), account);
         var accounts: std.ArrayList(Grant) = .empty;
@@ -212,10 +263,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
             const bytes = try j.encodeAlloc(a, registry, .{});
             try (config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = account }, .value = null }, .{ .kind = .grants, .value = bytes } });
         } else try save(io, a, path, registry);
+        // No grant, no refusal to describe: memory and sidecar alike.
+        auth_diagnostic.forget(account);
+        if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.clearPersisted(io, a, sidecar, account) catch {};
         return j.value(a, .{ .account = account, .cleared = true, .namespace = keyring.terminal_service });
     }
     if (!std.mem.eql(u8, command, "auth.authorize")) return error.UnsupportedCommand;
-    const caps = try requestCapabilities(a, request);
+    const reconnect = try j.boolean(request, "reconnect", false);
+    const caps = try authorizationCapabilities(a, request, current);
     const scopes = try scopesFor(a, caps);
     const client_file = try authorizationClient(request, current, config.client_file.slice());
     var desktop: oauth.DesktopClient = .{};
@@ -234,7 +289,18 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     var captured: b.Text(@import("../limits.zig").secret) = .{};
     defer captured.wipe();
     const identity = grantIdentity(scopes);
-    try platform.deadline(io, platform.seconds(180), oauth.authorizeScoped, .{ io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, @as(?oauth.TerminalCredential, .{ .grant_id = &identity, .capture = if (config.credential_store == .vault) &captured else null }), config.credentials() });
+    // Consent waits at most auth_seconds; every later step has its own
+    // deadline. From Google's callback until the registry/vault commit below,
+    // the work is uncancellable so a stored credential is never reported as
+    // cancelled, timed out or unchanged.
+    var progress: CommitProgress = undefined;
+    var commit: oauth.Commit = .{};
+    if (sink) |value| {
+        progress = .{ .sink = value };
+        commit.notify = .{ .context = &progress, .callFn = CommitProgress.notify };
+    }
+    defer commit.end(io);
+    try oauth.authorizeScoped(io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, .{ .grant_id = &identity, .capture = if (config.credential_store == .vault) &captured else null, .commit = &commit }, config.credentials());
     const grant: Grant = .{ .account = try a.dupe(u8, account), .clientFile = try a.dupe(u8, client_file), .clientId = try a.dupe(u8, desktop.client_id.slice()), .grantId = try a.dupe(u8, &identity), .capabilities = caps, .scopes = scopes };
     var accounts: std.ArrayList(Grant) = .empty;
     for (registry.accounts) |old| if (!std.mem.eql(u8, old.account, account)) try accounts.append(a, old);
@@ -245,7 +311,50 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
         const bytes = try j.encodeAlloc(a, registry, .{});
         try (config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = account }, .value = null }, .{ .kind = .grants, .value = bytes }, .{ .kind = .terminal_token, .key = .{ .account = account, .client = desktop.client_id.slice(), .grant = &identity }, .value = captured.slice() } });
     } else try save(io, a, path, registry);
-    return j.value(a, .{ .account = account, .authorized = true, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
+    // The verified credential is stored; an obsolete refusal must not linger.
+    auth_diagnostic.recordSuccess(account, &identity);
+    if (try diagnosticSidecar(a, config, path)) |sidecar| auth_diagnostic.clearPersisted(io, a, sidecar, account) catch {};
+    return j.value(a, .{ .account = account, .authorized = true, .reconnected = reconnect, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
+}
+
+/// --fixtures: a synthetic status everywhere; consent only in the
+/// sign-in-expired scenario, through the shared loopback/PKCE/callback flow,
+/// and only to the config's explicit `fixtureConsentPage`: synthetic consent
+/// never launches the configured browser, whatever its path.
+pub fn runFixture(io: std.Io, a: std.mem.Allocator, config: *const Config, options: types.Options, cache_root: []const u8, request: j.Value, sink: ?types.ProgressSink) !j.Value {
+    const command = try j.required(request, "cmd");
+    const account = try j.required(request, "account");
+    const index = config.index(account) orelse return error.UnknownAccount;
+    if (!fixture_auth.active(options)) {
+        if (!std.mem.eql(u8, command, "auth.status")) return error.FixtureOnly;
+        return j.value(a, .{ .configured = true, .fixture = true });
+    }
+    const scopes = try scopesFor(a, &fixture_auth.capabilities);
+    const identity = grantIdentity(scopes);
+    const grant: Grant = .{ .account = account, .clientFile = "fixture", .clientId = oauth.fixture_client_id, .grantId = &identity, .capabilities = &fixture_auth.capabilities, .scopes = scopes };
+    if (std.mem.eql(u8, command, "auth.status")) {
+        const last = try auth_diagnostic.status(io, a, null, account, &identity);
+        return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = true, .fixture = true, .grant = grant, .credentialStore = "fixture", .credentialDirectory = "", .lastRefreshError = try lastRefreshValue(a, last) });
+    }
+    if (!std.mem.eql(u8, command, "auth.authorize")) return error.FixtureOnly;
+    const reconnect = try j.boolean(request, "reconnect", false);
+    const caps = try authorizationCapabilities(a, request, &grant);
+    if (config.fixture_consent_page.len == 0) return error.FixtureConsentPageRequired;
+    var progress: CommitProgress = undefined;
+    var commit: oauth.Commit = .{};
+    if (sink) |value| {
+        progress = .{ .sink = value };
+        commit.notify = .{ .context = &progress, .callFn = CommitProgress.notify };
+    }
+    defer commit.end(io);
+    try oauth.authorizeFixture(io, account, config.accounts[index].profile.slice(), config.fixture_consent_page.slice(), try scopesFor(a, caps), platform.seconds(@import("../limits.zig").auth_seconds), &commit);
+    try fixture_auth.markReconnected(io, a, options, cache_root, account);
+    auth_diagnostic.recordSuccess(account, &identity);
+    return j.value(a, .{ .account = account, .authorized = true, .reconnected = reconnect, .fixture = true, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
+}
+
+test {
+    _ = @import("reconnect_auth_test.zig");
 }
 
 test "terminal scopes are minimal canonical and identity-bound" {

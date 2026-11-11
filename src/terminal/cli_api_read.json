@@ -1061,9 +1061,11 @@
       "properties": {},
       "required": [],
       "notes": [
-        "Reads the private grant registry and config only; it does not contact Google or verify token usability. Returns account, namespace, configured, optional grant, credentialStore and credentialDirectory without token contents.",
+        "Reads the private grant registry and config only; it does not contact Google or verify token usability. Returns account, namespace, configured, optional grant, credentialStore, credentialDirectory and lastRefreshError without token contents.",
         "The recorded grant includes registration identity, scope/capability set and enabled state. Configured:true alone is not proof of live access; validate actual authorized account/mail/contact reads from the intended execution context.",
-        "Fixture status is a synthetic configured/fixture response. No Google consent or grant change occurs."
+        "lastRefreshError is null or Google's most recent refusal of this account's stored sign-in: error (e.g. invalid_grant), subtype (e.g. invalid_rapt), a sanitized description of at most 160 printable ASCII bytes with token-like runs replaced by [redacted], kind (reauthenticationRequired, expiredOrRevoked or invalidGrant) and at (Unix milliseconds). reauthenticationRequired is a Workspace re-authentication policy; expiredOrRevoked covers revoked access, password changes and a Testing-mode project's 7-day limit, which Google words identically. It never contains token material.",
+        "Only Google's refusal of this account's recorded terminal grant is reported, keyed by grant.grantId: a refusal of the bar's read-only credential, an older grant or a revoked grant is never shown. A process reports what it observed itself first. Plaintext credential stores also keep the last refusal in a private owner-only terminal-auth-diagnostics.json beside the grant registry for later processes; the encrypted vault keeps it only in the running backend's memory. The first verified refresh of that grant, a successful authorization and auth.revoke clear it, including the persisted copy.",
+        "Fixture status is a synthetic configured/fixture response; the sign-in-expired scenario adds a synthetic grant and the synthetic invalid_rapt refusal for the second configured account until it is reconnected. No Google consent or grant change occurs."
       ],
       "examples": [
         {
@@ -1084,6 +1086,17 @@
           "type": "string",
           "description": "Private Desktop OAuth registration JSON path. Defaults to this account’s existing terminal registration, then config.oauthClientFile. Required for fresh terminal-only setup. Use an absolute expanded private path, not file contents. Broader-than-mail-read access must use a different Client ID from an existing read-only/bar registration.",
           "minLength": 1
+        },
+        "reconnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Renew this account's recorded terminal grant after Google refused its sign-in (InvalidGrant). capabilities must then name exactly the recorded set from auth.status grant.capabilities (any order); a narrower, broader or different set fails with ReconnectCapabilitiesChanged before consent. An account without a recorded grant fails with ReconnectRequiresGrant, a disabled grant with GrantDisabled, and a clientFile other than the grant's recorded registration with ReconnectRegistrationChanged; omit clientFile to keep the recorded one."
+        },
+        "expectedGrantId": {
+          "type": "string",
+          "description": "With reconnect:true only (otherwise ExpectedGrantRequiresReconnect): the grant.grantId read from auth.status, 64 lowercase hexadecimal characters; any other value fails with InvalidRequest. A grant changed since that read fails with GrantChanged before consent.",
+          "minLength": 64,
+          "maxLength": 64
         }
       },
       "required": [
@@ -1096,7 +1109,8 @@
         "Local capabilities remain distinct even where Google scopes overlap. Request mail-send for ordinary sending, contacts-read for browsing, and calendar-rsvp for RSVP emails. Calendar API/scope is unnecessary for RSVP email. Optional calendar-read, calendar-write-owned, calendar-write-shared and calendar-freebusy select Calendar API access; see docs/CALENDAR-PERMISSIONS.md. Shared writes subsume event-read/owned scopes, while freebusy uses a separate scope.",
         "For fresh terminal-only setup, one registration and clientFile is enough with config.oauthClientFile omitted. Alongside a read-only/bar setup, broader terminal authorization requires a different Desktop Client ID in the same project; copying/renaming its JSON does not create another registration.",
         "Stores the verified refresh token in the selected keyring/file backend, then persists the terminal grant registry. The file backend is private owner-only unencrypted storage. Does not send mail or modify contacts; later writes still require the user's task authorization.",
-        "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow.",
+        "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes; a reconnect that renews the same grant needs no restart. Fixtures refuse authorization except in the sign-in-expired scenario, whose synthetic consent stores nothing and opens only the synthetic consent page named by config fixtureConsentPage (FixtureConsentPageRequired otherwise); it never launches the configured Chrome. Prefer one-shot terminal-auth authorize for an interactive consent workflow.",
+        "Reconnect after InvalidGrant: read auth.status (grant.capabilities, grant.grantId and lastRefreshError), then send auth.authorize with reconnect:true, the same capabilities and expectedGrantId. It runs the same consent, refuses a different signed-in Google account (WrongAccount) and stores nothing on AuthorizationDenied, Timeout or a narrower returned scope set (UnexpectedScope). Once Google's callback has arrived the token exchange and storage finish even if the client disconnects or cancels. A successful reply has reconnected:true and clears lastRefreshError.",
         "Optional drive-upload adds Google drive.file for app-created attachment uploads and viewer sharing at confirmed send. Request the complete existing capability set plus drive-upload; no broad Drive scope is required.",
         "Optional meet-settings selects https://www.googleapis.com/auth/meetings.space.settings for automatic Meet AI notes and transcription settings. Request the complete existing capability set plus meet-settings. The Google Meet REST API must be enabled for the current Cloud project."
       ],
@@ -1121,6 +1135,17 @@
           "capabilities": [
             "mail-read"
           ]
+        },
+        {
+          "cmd": "auth.authorize",
+          "account": "personal@example.com",
+          "capabilities": [
+            "mail-read",
+            "mail-send",
+            "calendar-read"
+          ],
+          "reconnect": true,
+          "expectedGrantId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
       ]
     },
