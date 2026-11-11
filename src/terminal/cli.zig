@@ -49,7 +49,7 @@ fn attachmentScopeBeforeRouting(command: []const u8, args: *std.process.Args.Ite
             if (!scan.skip()) return error.ValueRequired;
             if ((eq(arg, "--attach-file") or eq(arg, "--upload-file") or eq(arg, "--file") or eq(arg, "--attachment-mode")) and !draftSourceCommand(command)) return error.AttachmentsRequireDraftSource;
         } else if (eq(arg, "--dry-run")) {
-            if (!draftSourceCommand(command) and !plannedCommand(command)) return error.DryRunRequiresDraftSource;
+            if (!draftSourceCommand(command) and !plannedCommand(command)) return if (std.mem.startsWith(u8, command, "calendar.")) error.DryRunUnsupported else error.DryRunRequiresDraftSource;
         } else if (!booleanOption(arg)) return;
     }
 }
@@ -157,6 +157,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
                 try req.object.put(sa, "dryRun", .{ .bool = true });
                 continue;
             }
+            // Calendar dry runs exist for the delete/RSVP reviews and
+            // event-apply; other Calendar commands have none (not a draft issue).
+            if (std.mem.startsWith(u8, command, "calendar.")) return error.DryRunUnsupported;
             if (!draftSourceCommand(command)) return error.DryRunRequiresDraftSource;
             dry_run = true;
             continue;
@@ -242,6 +245,8 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "nextAttempt", .{ .integer = attempt });
         } else if (calendarField(arg)) |key| {
             if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
+            // An answer belongs only to an RSVP review: a usage error elsewhere.
+            if (eq(arg, "--response") and !eq(j.text(req, "cmd"), "calendar.event-respond-review")) return unknownOption(arg);
             try req.object.put(sa, key, .{ .string = v });
         } else if (eq(arg, "--name") or eq(arg, "--label-id") or eq(arg, "--confirm-name")) {
             const key = if (eq(arg, "--label-id")) "labelId" else if (eq(arg, "--confirm-name")) "confirmName" else "name";
@@ -255,6 +260,8 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             // Calendar actions choose one event or its series; mail triage a
             // message or its conversation.
             if (eq(arg, "--scope") and eq(mode, "calendar")) {
+                // Only a delete or an answer chooses one event or its series.
+                if (!@import("calendar_commands.zig").actionCommand(j.text(req, "cmd"))) return unknownOption(arg);
                 if (!eq(v, "event") and !eq(v, "series")) return error.InvalidCalendarScope;
             } else if (eq(arg, "--scope") and !eq(v, "message") and !eq(v, "conversation")) return error.InvalidTriageScope;
             try req.object.put(sa, key, .{ .string = v });
@@ -561,6 +568,9 @@ fn errorStatus(command: []const u8, failure: j.Value) u8 {
     if (eq(code, "UnknownOutcome")) return 6;
     for (authorization_codes) |auth| if (eq(code, auth)) return 4;
     if (eq(code, "UnknownAccount") or eq(code, "CacheMiss") or std.mem.endsWith(u8, code, "NotFound")) return 5;
+    // A retry exists only for an unknown write: when it fails (other than a
+    // malformed request), that earlier write stays unknown.
+    if (eq(command, "calendar.event-retry") and !std.mem.startsWith(u8, code, "Invalid")) return 6;
     if (j.boolean(failure, "retryable", false) catch false) return 7;
     // The executor withholds retryable from an interrupted write that has no
     // operationId/undoToken: it may have been applied.
@@ -640,7 +650,7 @@ fn unknownOption(arg: []const u8) error{UnknownOption} {
 pub fn nearestOption(arg: []const u8) ?[]const u8 {
     var candidates: [160][]const u8 = undefined;
     var count: usize = 0;
-    for (value_options ++ boolean_options ++ [_][]const u8{ "--help", "--help-all", "--help-options", "--schema", "--manifest", "--compact", "--strict", "--calendar-id", "--event-id", "--date", "--view", "--time-zone", "--review-hash", "--send-updates", "--meet-ai-notes" }) |candidate| {
+    for (value_options ++ boolean_options ++ [_][]const u8{ "--help", "--help-all", "--help-options", "--schema", "--manifest", "--compact", "--strict", "--calendar-id", "--event-id", "--date", "--view", "--time-zone", "--review-hash", "--send-updates", "--meet-ai-notes", "--response" }) |candidate| {
         if (count == candidates.len) break;
         candidates[count] = candidate;
         count += 1;
@@ -732,7 +742,7 @@ fn plannedCommand(command: []const u8) bool {
 /// Calendar writes whose ok:true reply carries a durable state that decides
 /// the exit status (unknown 6, rejected 3), as for sends.
 fn calendarWriteCommand(command: []const u8) bool {
-    for ([_][]const u8{ "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry" }) |name| if (eq(command, name)) return true;
+    for ([_][]const u8{ "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.reconcile", "calendar.event-apply", "calendar.event-reconcile", "calendar.event-retry", "calendar.meet-event-apply", "calendar.meet-event-reconcile" }) |name| if (eq(command, name)) return true;
     return false;
 }
 fn eq(a: []const u8, b: []const u8) bool {
@@ -915,6 +925,14 @@ test "cli process: every documented exit status row is derived from the reply" {
         .{ .command = "calendar.event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\"}}", .status = 6 },
         .{ .command = "calendar.event-reconcile", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\",\"retryPossible\":true}}", .status = 6 },
         .{ .command = "calendar.event-abandon", .reply = "{\"ok\":true,\"data\":{\"state\":\"archived\"}}", .status = 0 },
+        // A failed identical retry leaves the earlier write unknown.
+        .{ .command = "calendar.event-retry", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarRetryUnavailable\"}}", .status = 6 },
+        .{ .command = "calendar.event-retry", .reply = "{\"ok\":false,\"error\":{\"code\":\"InvalidCalendarRetry\"}}", .status = 3 },
+        .{ .command = "calendar.event-apply", .reply = "{\"ok\":false,\"error\":{\"code\":\"UnknownOutcome\"}}", .status = 6 },
+        // Meet notes report the same Calendar write states.
+        .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"unknown\"}}", .status = 6 },
+        .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"rejected\"}}", .status = 3 },
+        .{ .command = "calendar.meet-event-apply", .reply = "{\"ok\":true,\"data\":{\"state\":\"partial\"}}", .status = 0 },
         .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarWritePermissionRequired\"}}", .status = 4 },
         .{ .command = "calendar.event-respond-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarOrganizerCannotRespond\"}}", .status = 3 },
         .{ .command = "calendar.event-delete-review", .reply = "{\"ok\":false,\"error\":{\"code\":\"CalendarNotFound\"}}", .status = 5 },

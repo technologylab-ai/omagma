@@ -606,7 +606,7 @@
     },
     {
       "cmd": "calendar.event-apply",
-      "summary": "Apply one exact saved ordinary-event review, dispatching at most once.",
+      "summary": "Apply one exact saved event review (create, edit, delete or response), dispatching at most once.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -650,7 +650,7 @@
     },
     {
       "cmd": "calendar.event-reconcile",
-      "summary": "Resolve an unknown ordinary-event write by reading its exact provider event ID without resending it.",
+      "summary": "Resolve an unknown event write (create, edit, delete or response) by reading its exact provider event ID without resending it.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -674,7 +674,7 @@
         "reviewHash"
       ],
       "notes": [
-        "Loads the exact saved ordinary-event review and durable journal. Applied proof requires the bound account/calendar/event ID and immutable private operation/source markers, even after later content changes or cancellation. A missing event remains unknown and can offer explicit identical-request retry; an unchanged edit ETag also remains uncertain.",
+        "Loads the exact saved event review (create, edit, delete or response) and durable journal. A delete is proven by the exact event being cancelled; a response by the private markers together with the reviewed answer. Applied proof requires the bound account/calendar/event ID and immutable private operation/source markers, even after later content changes or cancellation. A missing event remains unknown and can offer explicit identical-request retry; an unchanged edit ETag also remains uncertain.",
         "Performs only reads. Never creates a second event, repeats a Meet request or resends attendee notifications."
       ]
     },
@@ -885,7 +885,7 @@
     },
     {
       "cmd": "calendar.event-retry",
-      "summary": "Explicitly retry an uncertain identical saved ordinary-event request once for this attempt token.",
+      "summary": "Explicitly retry an uncertain identical saved event request (edit, delete or response) once for this attempt token.",
       "capabilities": [
         "mail-read",
         "calendar-write-owned",
@@ -932,7 +932,7 @@
     },
     {
       "cmd": "calendar.event-abandon",
-      "summary": "Explicitly archive an uncertain ordinary-event outcome locally.",
+      "summary": "Explicitly archive an uncertain event write (create, edit, delete or response) locally.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -973,7 +973,7 @@
     },
     {
       "cmd": "calendar.event-pending",
-      "summary": "Resume a saved uncertain ordinary-event operation after restart without provider traffic.",
+      "summary": "Resume a saved uncertain event write (edit, delete or response; found from the event, its series or an occurrence) after restart without provider traffic.",
       "capabilities": [
         "mail-read",
         "calendar-read",

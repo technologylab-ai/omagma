@@ -148,6 +148,7 @@ const entries = [_]Entry{
     .{ .code = "CalendarExpectedEtagRequired", .text = "expectedEtag is required: pass the etag of the event as you last read it" },
     .{ .code = "CalendarResponseRequired", .text = "response is required: accepted, tentative or declined" },
     .{ .code = "CalendarResponseUnchanged", .text = "The event already has this response; nothing to send" },
+    .{ .code = "CalendarRetryUnavailable", .text = "Calendar no longer shows the saved version unchanged, so the identical request is not sent again; the earlier outcome stays unknown" },
     .{ .code = "CalendarSeriesScopeRequired", .text = "This ID is a whole recurring series; use scope series, or choose one occurrence" },
     .{ .code = "CalendarNotRecurring", .text = "This event is not part of a recurring series; use scope event" },
     .{ .code = "CalendarNotificationUnavailable", .text = "Nobody can be notified: only the organizer of an event with guests can email them; use sendUpdates none" },

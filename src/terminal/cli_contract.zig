@@ -690,7 +690,15 @@ pub fn diagnose(a: A, catalogue: *Catalogue, request: Value, code: []const u8) !
             path = try join(a, "draft", field);
         };
         if (schemas.len == 0) return null;
-        const value = (if (eq(path, field)) j.get(request, field) else j.get(j.get(request, "draft") orelse .null, field)) orelse .null;
+        const present = if (eq(path, field)) j.get(request, field) else j.get(j.get(request, "draft") orelse .null, field);
+        // An absent field is missing, not of the wrong type.
+        if (present == null) {
+            var detail = j.object(a);
+            try detail.object.put(a, "field", .{ .string = path });
+            try detail.object.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "{s} requires '{s}' here", .{ command, path }) });
+            return detail;
+        }
+        const value = present.?;
         if (try inspect(a, catalogue, command, path, value, schemas, 1)) |detail| return detail;
         // Describe the accepted shape even when the executor's rule is narrower.
         var detail = j.object(a);
@@ -739,6 +747,8 @@ const hints = [_]Hint{
     .{ .code = "CalendarSeriesScopeRequired", .text = "Pass scope series to change the whole series, or an occurrence id from calendar.agenda with scope event" },
     .{ .code = "CalendarNotificationUnavailable", .text = "Use sendUpdates none; to tell an organizer you will not attend, use calendar.event-respond-review with response declined" },
     .{ .code = "CalendarOrganizerCannotRespond", .text = "Organizers change or delete their event instead: calendar.event-review or calendar.event-delete-review" },
+    .{ .code = "NotAnAttendee", .text = "Only an invitation that lists this account (or, in Calendar, this calendar) as a guest can be answered; an event without that guest entry can only be removed from the calendar" },
+    .{ .code = "CalendarRetryUnavailable", .text = "Run calendar.event-reconcile first; an identical retry is allowed only while it reports retryPossible:true" },
     .{ .code = "CalendarPrivateCopy", .text = "Answer the invitation email with invitation.reply" },
     .{ .code = "CalendarResponseUnchanged", .text = "Choose a different response, or leave the event as it is" },
 };
