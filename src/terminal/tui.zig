@@ -7475,8 +7475,12 @@ const App = struct {
         if (secondary.len > 0) {
             if (one_row) _ = try self.actionButtonCells(inner, row, x, secondary, secondary_cells, self.reconnect.focus == 1 or primary.len == 0, true, .dialog_action, 951) else _ = try self.actionButtonCells(inner, row + 1, 0, secondary, secondary_cells, self.reconnect.focus == 1, true, .dialog_action, 951);
         }
-        // Calendar draws its own footer; the dialog's keys replace it.
-        if (self.calendar.open and bottom > 0) {
+        // The dialog's keys replace the footer, here, after this frame's
+        // progress sync above: the mail footer was drawn earlier in the frame
+        // (Calendar draws its own), so it could still show the previous phase
+        // (Waiting… after Google's callback, j/k without scroll) until some
+        // unrelated event redrew the screen.
+        if (bottom > 0) {
             win.child(.{ .y_off = win.height - 2, .height = 1 }).fill(.{ .style = self.style(.text) });
             try self.drawHints(win, win.height - 2, self.reconnect.hints(self.reconnect_scroll_max > 0));
         }
@@ -41097,6 +41101,11 @@ test "local UI: reconnect after Google's callback ignores Esc and keeps the rene
     var client: ReconnectTestClient = .{ .finishing_gate = true };
     var app = try reconnectTestApp(&client, a, loop);
     defer app.deinit();
+    // Runs before deinit: a failed check must not leave the worker held or running.
+    defer {
+        client.released.store(true, .release);
+        reconnectSettle(&app) catch {};
+    }
     try app.openReconnect(null);
     try reconnectSettle(&app);
     try app.onKey(.{ .codepoint = Key.enter });
@@ -41319,6 +41328,11 @@ test "local UI: finishing past its bound can be closed, and the late result is s
     var client: ReconnectTestClient = .{ .finishing_gate = true };
     var app = try reconnectTestApp(&client, a, loop);
     defer app.deinit();
+    // Runs before deinit: a failed check must not leave the worker held or running.
+    defer {
+        client.released.store(true, .release);
+        reconnectSettle(&app) catch {};
+    }
     app.reconnect_watchdog_ms = 20;
     try app.openReconnect(null);
     try reconnectSettle(&app);
@@ -41353,6 +41367,11 @@ test "local UI: a cancel that loses the gate to Google's callback returns at onc
     var client: ReconnectTestClient = .{ .finishing_gate = true };
     var app = try reconnectTestApp(&client, a, loop);
     defer app.deinit();
+    // Runs before deinit: a failed check must not leave the worker held or running.
+    defer {
+        client.released.store(true, .release);
+        reconnectSettle(&app) catch {};
+    }
     try app.openReconnect(null);
     try reconnectSettle(&app);
     try app.onKey(.{ .codepoint = Key.enter });
@@ -41469,6 +41488,11 @@ test "local UI: the mailbox status never counts an authorization as mail bodies"
     var client: ReconnectTestClient = .{ .finishing_gate = true };
     var app = try reconnectTestApp(&client, a, loop);
     defer app.deinit();
+    // Runs before deinit: a failed check must not leave the worker held or running.
+    defer {
+        client.released.store(true, .release);
+        reconnectSettle(&app) catch {};
+    }
     try app.openReconnect(null);
     try reconnectSettle(&app);
     try app.onKey(.{ .codepoint = Key.enter });
@@ -41528,4 +41552,43 @@ test "local UI: Calendar offers Reconnect only for a refused sign-in, never for 
     try mail.calendar.list_errors[0].set("GrantClientMismatch");
     try mail.calendar.list_errors[1].set("InvalidGrantRegistry");
     try std.testing.expectEqual(@as(usize, 2), mail.reconnectAccountFor());
+}
+
+test "local UI: the one frame drawn for Google's callback shows the finishing footer, not the consent wait" {
+    const a = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    var vx = try vaxis.init(std.testing.io, a, &env, .{});
+    var buffer: [1024]u8 = undefined;
+    var tty = try vaxis.Tty.init(std.testing.io, &buffer);
+    defer tty.deinit();
+    defer vx.deinit(a, tty.writer());
+    const loop = try reconnectTestLoop(a, &tty, &vx);
+    defer a.destroy(loop);
+    defer loop.deinit();
+    var client: ReconnectTestClient = .{ .finishing_gate = true };
+    var app = try reconnectTestApp(&client, a, loop);
+    defer app.deinit();
+    // Runs before deinit: a failed check must not leave the worker held or running.
+    defer {
+        client.released.store(true, .release);
+        reconnectSettle(&app) catch {};
+    }
+    app.vx = &vx;
+    app.tty = &tty;
+    try app.resize(.{ .cols = 120, .rows = 36, .x_pixel = 0, .y_pixel = 0 });
+    try app.openReconnect(null);
+    try reconnectSettle(&app);
+    try app.onKey(.{ .codepoint = Key.enter });
+    while (app.reconnect_gate.load(.acquire) != commit_gate_committing) try std.testing.io.sleep(.fromMilliseconds(2), .awake);
+    // The callback's progress event causes exactly one redraw; nothing else
+    // need follow it, so that frame must already be consistent.
+    try app.draw();
+    const shown = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(shown);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Google approved. Storing the renewed sign-in") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "storing the renewed sign-in… · q twice quits anyway") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Waiting for Google consent in Chrome") == null);
+    client.released.store(true, .release);
+    try reconnectSettle(&app);
 }
