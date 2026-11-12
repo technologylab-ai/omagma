@@ -99,10 +99,11 @@ def preference(path, expected):
             "saved reader layout disagrees with rendered layout/schema")
     # Private working-context persistence now deliberately remembers account
     # and message IDs. It must remain bounded UI state, not mail or credentials.
-    require(set(data) == {"schema", "theme", "readerLayout", "density", "listWidthPercent", "listHeightPercent",
+    require(set(data) == {"schema", "theme", "calendarLook", "readerLayout", "density", "listWidthPercent", "listHeightPercent",
                           "lastAccount", "contexts", "bindings", "sendGraceSeconds",
                           "searchHistory", "savedSearches"}, "UI preferences contain undocumented fields")
     require(data["theme"] in {"follow_omarchy", "omagma"}, "unknown private theme choice")
+    require(data["calendarLook"] in {"orange_blue", "classic_pastel"}, "unknown private Calendar look")
     require(data["density"] in {"comfortable", "compact"}, "unknown private density choice")
     require(type(data["sendGraceSeconds"]) is int and 0 <= data["sendGraceSeconds"] <= 30,
             "send grace exceeded its explicit zero-to-thirty-second bound")

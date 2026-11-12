@@ -1112,7 +1112,7 @@ editing (`Ctrl+A/E` for line start/end), list navigation and review controls.
 Shortcuts are scoped to their view: printable letters remain data during text
 entry, and preview scrolling uses normal compose mode.
 
-Reader layout, split proportions, theme, key remaps, search history/named
+Reader layout, split proportions, theme, Calendar look, key remaps, search history/named
 searches, send grace and per-account mailbox/selected-mail/reader position live
 in private `omagma/ui.json`; `--ui-file FILE` chooses another file.
 `:split right 60` or `:split below 40` chooses a 25–75% split;
