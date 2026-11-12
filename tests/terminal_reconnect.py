@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import termios
@@ -238,7 +239,11 @@ def no_secrets(terminal, consent):
     the PTY transcript or the TUI's argv."""
     transcript = bytes(terminal.output)
     proc = Path(f"/proc/{terminal.process.pid}/cmdline")
-    argv = proc.read_bytes() if proc.exists() else b" ".join(str(part).encode() for part in terminal.process.args)
+    require(terminal.process.poll() is None, "argv privacy check requires the owned TUI to be alive")
+    argv = proc.read_bytes() if proc.exists() else subprocess.check_output(
+        ["ps", "-ww", "-p", str(terminal.process.pid), "-o", "command="], timeout=5)
+    require(bool(argv.strip()), "could not inspect the owned TUI's actual argv")
+    require(os.fsencode(str(terminal.binary)) in argv, "argv snapshot does not identify the owned TUI executable")
     for entry in consent.entries():
         for secret in (entry.get("code"), entry.get("state"), entry.get("challenge")):
             if not secret:

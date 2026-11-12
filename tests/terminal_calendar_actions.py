@@ -565,9 +565,15 @@ def guards(binary, directory, frames):
         terminal.until(lambda: "Enlarge the terminal" in terminal.text())
         frame(frames, terminal, "delete-short-refused")
         require(writes(owned) == 0, "a confirm on a dialog shown only in part wrote Calendar")
+        cancelled = lambda: "Delete event?" not in terminal.text() and "Nothing was changed" in terminal.text()
+        require(not cancelled(), "cancel wait would not observe the Escape")
         terminal.send(b"\x1b")
+        # The Agenda header is also visible behind the modal. Observe the
+        # cancellation before resizing or typing another terminal key.
+        terminal.until(cancelled)
         terminal.resize(140, 38)
-        terminal.until(lambda: "Calendar · Agenda" in terminal.text())
+        terminal.until(lambda: "Calendar · Agenda" in terminal.text()
+                       and "Delete event?" not in terminal.text())
         # Ctrl+P away from an event offers no Delete/RSVP.
         terminal.send(b"g")
         terminal.until(lambda: "Calendar · Calendars" in terminal.text())
