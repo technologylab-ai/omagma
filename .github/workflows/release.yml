@@ -46,6 +46,7 @@ jobs:
           python3 tests/terminal_pty_send.py
           python3 tests/release_binary.py
           python3 tests/publication_privacy.py
+          python3 tests/publication_check.py
           python3 tests/release_notes.py
           python3 tests/terminal_compose_screen.py
           node tests/ui_model.mjs
@@ -448,6 +449,7 @@ jobs:
         run: |
           python3 tests/terminal_compose_actions.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_draft_conflict.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_draft_discard.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_draft_paging.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_quote_policy.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_reply_boundaries.py --binary dist/omagma-macos-${{ matrix.arch }}

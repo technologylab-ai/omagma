@@ -30,6 +30,22 @@ This is cooperative exclusion, not CPU isolation or proof of a quiet host. Reche
 
 ## Calendar attachment and parser whitespace checks
 
+`python3 tests/terminal_emoji_repaint.py --binary /path/to/omagma` models
+emoji presentation and cursor reports independently of the application's
+width calculation. Mail/Calendar/Mail round trips must match a clean physical
+repaint, including plain and empty-formatted-view fallback mail, with and
+without an advertised Unicode width capability. All fixtures are synthetic.
+
+`python3 tests/terminal_calendar_suggestions.py --binary /path/to/omagma`
+checks automatic local guest suggestions in wide and narrow owned PTYs,
+explicit keyboard/mouse acceptance, stale cursor selection, dismissal, paste,
+duplicate exclusion and replacement through the full picker. Typing must not
+contact a provider; choosing a suggestion must neither save an event nor send
+mail. `terminal_calendar_palette.py` checks the reversible persisted Calendar
+look in Agenda, Day and Week, failed saves, restart, theme/monochrome boundaries
+and unchanged Mail colours. Both suites are included in the canonical workflow
+runner. `--captures /private/directory` records synthetic cell/style snapshots.
+
 `python3 tests/terminal_subject_newlines.py --binary /path/to/omagma`
 checks decoded newlines in Gmail Subject fields, recovery of persisted decoder
 refusals, unchanged structured-header validation, reply preparation and the

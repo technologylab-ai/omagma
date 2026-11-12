@@ -16,6 +16,9 @@ import re
 import sys
 import tempfile
 import time
+from unittest.mock import patch
+
+import terminal_pty
 
 from build_info import build_mode, read_build_info
 from terminal_integration import Client, require
@@ -95,12 +98,16 @@ def ready(terminal, text="Alpha"):
 
 
 def start(binary, directory, extra, text="Alpha", columns=160, rows=42, environment=None, no_mouse=False):
-    terminal = MouseTerminal(binary, directory, extra=(*extra, *(("--no-mouse",) if no_mouse else ())),
-        columns=columns, rows=rows, screen_type=ReaderScreen,
-        environment={"NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0", **(environment or {})})
-    terminal.until(lambda: ready(terminal, text))
-    terminal.send(b"\r")
-    terminal.until(lambda: ready(terminal, text) and "V Select" in terminal.text())
+    # This physical oracle joins ZWJ emoji. Advertise its width convention
+    # instead of claiming legacy wcwidth while painting a two-cell cluster.
+    # The independent emoji suite retains real CPR/fallback coverage.
+    with patch.dict(terminal_pty.QUERIES, {b"\x1b[?2027$p": b"\x1b[?2027;1$y"}):
+        terminal = MouseTerminal(binary, directory, extra=(*extra, *(("--no-mouse",) if no_mouse else ())),
+            columns=columns, rows=rows, screen_type=ReaderScreen,
+            environment={"NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0", **(environment or {})})
+        terminal.until(lambda: ready(terminal, text))
+        terminal.send(b"\r")
+        terminal.until(lambda: ready(terminal, text) and "V Select" in terminal.text())
     return terminal
 
 

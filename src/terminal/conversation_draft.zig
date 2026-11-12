@@ -241,7 +241,7 @@ test "conversation draft: reply quote names its sender and date above readable q
         try std.testing.expectEqual(@as(usize, "FYI below".len), at);
     }
     // A reply's own attribution still wins over a quote in the author's note.
-    try std.testing.expectEqual(@as(?usize, 12), quoteStart("Note\n\n> mine\n\nOn Mon, A <a@x.test> wrote:\n> theirs\n"));
+    try std.testing.expectEqual(@as(?usize, 12), quoteStart("Note\n\n> mine\n\nOn Mon, A <author@example.test> wrote:\n> theirs\n"));
     // Without a Date header the received instant is shown in UTC; header
     // text never adds lines to the body.
     const received: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "line@example.test", .name = "Two\nLines" }, .bodyText = "Body", .receivedAt = 1794047760000 };

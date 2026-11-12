@@ -575,7 +575,9 @@ def browsing(binary, directory, captures):
         terminal.resize(82, 28)
         terminal.until(lambda: "104 cols show 7 days" in terminal.text())
         capture(terminal, captures, "calendar-week-three-days")
-        terminal.resize(48, 22)
+        # Force overflow even late in the week, when this dynamic fixture has
+        # fewer remaining daily events. Retain the hidden-event/orphan guards.
+        terminal.resize(48, 14)
         terminal.until(lambda: "more event" in terminal.text())
         require("Week needs 60 cols" in terminal.text(), "narrow Week omitted fallback explanation")
         require("more event" in terminal.text(), "narrow agenda hides later events without an indication")

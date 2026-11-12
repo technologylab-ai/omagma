@@ -2,6 +2,7 @@ const std = @import("std");
 const files = @import("files.zig");
 const layout = @import("layout.zig");
 const theme = @import("theme.zig");
+const calendar_palette = @import("calendar_palette.zig");
 const b = @import("../bounded.zig");
 const calendar_sources = @import("calendar_sources.zig");
 
@@ -14,6 +15,7 @@ pub const Search = struct { account: b.Text(254) = .{}, name: b.Text(96) = .{}, 
 pub const Preferences = struct {
     schema: u8 = 1,
     theme: theme.Mode = .follow_omarchy,
+    calendarLook: calendar_palette.Mode = .orange_blue,
     sendGraceSeconds: u8 = 10,
     readerLayout: layout.ReaderLayout = .right,
     density: Density = .comfortable,
@@ -30,7 +32,7 @@ const max_bytes = 256 * 1024;
 const ContextWire = struct { account: []const u8, folder: u8 = 0, label: []const u8 = "", message: []const u8 = "", selected: u32 = 0, readerScroll: u32 = 0 };
 const BindingWire = struct { key: []const u8, action: Action };
 const SearchWire = struct { account: []const u8, name: []const u8 = "", query: []const u8, mode: SearchMode = .cache };
-const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, density: Density = .comfortable, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{}, calendar: ?calendar_sources.Wire = null };
+const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, calendarLook: calendar_palette.Mode = .orange_blue, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, density: Density = .comfortable, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{}, calendar: ?calendar_sources.Wire = null };
 
 pub fn rememberSearch(value: *Preferences, account: []const u8, query: []const u8, mode: SearchMode, name: ?[]const u8) !void {
     try b.address(account);
@@ -110,6 +112,7 @@ pub fn parseInto(result: *Preferences, allocator: std.mem.Allocator, bytes: []co
         std.crypto.secureZero(u8, std.mem.asBytes(result));
     }
     result.theme = wire.theme;
+    result.calendarLook = wire.calendarLook;
     result.sendGraceSeconds = wire.sendGraceSeconds;
     result.readerLayout = wire.readerLayout;
     result.density = wire.density;
@@ -166,7 +169,7 @@ pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const 
     };
     const calendar_wire = try calendar_sources.toWire(allocator, &value.calendar);
     defer allocator.free(calendar_wire.sources);
-    const bytes = try std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count], .calendar = if (calendar_wire.scope == .account and calendar_wire.sources.len == 0 and calendar_wire.preferred == null) null else calendar_wire }, .{ .emit_null_optional_fields = false });
+    const bytes = try std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .calendarLook = value.calendarLook, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count], .calendar = if (calendar_wire.scope == .account and calendar_wire.sources.len == 0 and calendar_wire.preferred == null) null else calendar_wire }, .{ .emit_null_optional_fields = false });
     if (bytes.len > max_bytes) {
         allocator.free(bytes);
         return error.UiPreferencesTooLarge;
@@ -317,6 +320,31 @@ test "local UI: theme choice survives private preference encoding and old settin
     try std.testing.expectEqual(theme.Mode.omagma, restored.theme);
     try std.testing.expectEqual(@as(u8, 60), restored.listWidthPercent);
     try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"theme\":\"not-a-theme\"}"));
+}
+
+test "calendar palette: reversible look survives preferences without changing source choices" {
+    const allocator = std.testing.allocator;
+    var old = try parse(allocator, "{\"schema\":1,\"theme\":\"omagma\"}");
+    defer old.calendar.deinit();
+    try std.testing.expectEqual(calendar_palette.Mode.orange_blue, old.calendarLook);
+    for ([_]calendar_palette.Mode{ .classic_pastel, .orange_blue }) |look| {
+        var chosen = try parse(allocator, "{\"theme\":\"omagma\",\"calendar\":{\"sources\":[{\"account\":\"personal@example.test\",\"calendarId\":\"work\",\"visible\":false,\"color\":\"blue\"}]}}");
+        defer chosen.calendar.deinit();
+        chosen.calendarLook = look;
+        const encoded = try encode(allocator, &chosen);
+        defer allocator.free(encoded);
+        var restored = try parse(allocator, encoded);
+        defer restored.calendar.deinit();
+        try std.testing.expectEqual(look, restored.calendarLook);
+        try std.testing.expectEqual(theme.Mode.omagma, restored.theme);
+        try std.testing.expectEqual(@as(usize, 1), restored.calendar.choices.items.len);
+        const source = restored.calendar.choices.items[0];
+        try std.testing.expectEqualStrings("personal@example.test", source.account);
+        try std.testing.expectEqualStrings("work", source.calendar_id);
+        try std.testing.expect(!source.visible);
+        try std.testing.expectEqual(calendar_sources.Color.blue, source.color.?);
+    }
+    try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"calendarLook\":\"unknown\"}"));
 }
 
 test "local reader: compact density persists and legacy settings stay comfortable" {

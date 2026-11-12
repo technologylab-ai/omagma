@@ -104,6 +104,9 @@ def fill(terminal, label, value):
 def toggle(terminal, literal, expected):
     for _ in range(40):
         if terminal.screen.locate(literal) is not None:
+            # Fields are visible during pending-operation discovery, while
+            # their controls remain disabled until the Working footer clears.
+            terminal.until(lambda: "[Working…]" not in terminal.text())
             click(terminal, *point(terminal, literal))
             terminal.until(lambda: expected in terminal.text())
             return
@@ -862,9 +865,9 @@ def open_guest_contacts(terminal, keyboard=True):
     if keyboard:
         terminal.send(b"\x00")  # Actual legacy Ctrl+Space -> vaxis Ctrl+@.
     else:
-        if terminal.screen.locate("[Ctrl+Space Contacts · recent mail]") is None:
+        if terminal.screen.locate("[Ctrl+Space Browse all]") is None:
             next_control(terminal)
-        click(terminal, *point(terminal, "[Ctrl+Space Contacts · recent mail]"))
+        click(terminal, *point(terminal, "[Ctrl+Space Browse all]"))
     terminal.until(lambda: "Add a guest from Contacts" in terminal.text())
 
 

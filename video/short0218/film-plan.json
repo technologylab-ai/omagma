@@ -1,0 +1,565 @@
+{
+  "schema": "omagma.video.film-plan.v2",
+  "title": "Heavy Lifting — What's new in Omagma v0.2.18",
+  "author": "Actual Claude Opus 5.5 at xhigh (creative direction, copy, timing, camera, design)",
+  "format": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "frames": 2527,
+    "duration": 84.233333
+  },
+  "music": {
+    "source": "Approved v0.2.7 final soundtrack (84.233333 s, 2527 frames; video/short027/soundtrack-aligned.json), packet-copied unchanged",
+    "edit": "none",
+    "landmarksFrames": {
+      "bass": 138,
+      "step": 268,
+      "drums": 1061,
+      "protectedPassage": 1590,
+      "closingAttack": 2114,
+      "lastPhrase": 2369,
+      "stop": 2442,
+      "end": 2527
+    }
+  },
+  "clockDecision": "Announce → read → demonstrate for six feature beats needs about 70 s before the climax. The 62 s launch cut cannot hold that without rushing actions or dropping results, so the film uses the approved 84.233 s v0.2.7 soundtrack unchanged. Drive completion lands on its closing-phrase attack (frame 2114); the recap spans the last phrase (2369) and the outro flare lands on the stop (2442).",
+  "narrationPolicy": [
+    "Each feature beat owns exactly one headline and one supporting line (Meet adds its eligibility footnote).",
+    "announceStart → textSettled (24 frames: kicker, headline words, typed supporting line) plays over the empty atmosphere; no UI is visible.",
+    "textSettled → demoStart is a 57-frame (1.9 s) reading gap with no UI and no text motion.",
+    "demoStart → demoEnd: the actual UI opens from its seam and acts; narration is fixed and fully settled. Only action keycaps appear, each 20 frames before its real press.",
+    "demoEnd → out: UI folds back into its seam (10 frames) while the narration fades, leaving an empty stage for the next announcement.",
+    "The send beat's fixed narration stays fully opaque through its actual result (the sent mail in Sent at 2114, held to demoEnd 2190); it fades only while the UI folds away (2190–2198).",
+    "No separate payoff stage: the folding result hands directly to the recap, whose kicker, title and rows rise from their own seams (2200 onward)."
+  ],
+  "decisions": [
+    "Order: paste → booking → now line → Meet → Drive (choice/sharing) → Drive (send, through its actual Sent result) → recap → outro. Calendar beats sit together; the completion and burst land on the music's strongest attack (2114) under the send beat's unchanged narration.",
+    "User-feedback revision: (1) booking says 'Booked a haircut?' and that the booking email becomes your own appointment — no marketing 'no reply' claim that could be read against meeting invitations; the native result pixels stay genuine. (2) The now beat uses calendar.clear, a genuine live week whose now row is empty in today's column between an earlier and a later event, so the red line itself is the subject. (3) The climax lands on the populated actual Sent result instead of a mostly empty Inbox; the text-only 'Too large? Sent anyway.' stage is removed and the recap starts at 2200 with more reading time. Outro stays at 2392 with its flare on the stop (2442).",
+    "Drive is two announced beats, not four changing sublines: first 'Too big to attach? Send it via Drive.' (choice + exact viewers), then 'Nothing uploads until you send.' (countdown, Send now, real upload).",
+    "The picker step is omitted; the actual too-large modal is the Drive demo's genuine starting state.",
+    "The now line is its own short announce/demo beat; its red underline is genuine UI and nothing editorial moves across it.",
+    "Ember fix: the old bead ended at the text's left edge on the text mid-line and, for the now row, ran horizontally across the glyphs with a glowing tail, which read as strike-through. The ember now travels only vertically in the editorial margin 30 px left of the frame edge, rests beside the target row and never crosses UI glyphs; the spotlight wash marks the row.",
+    "The Meet checkbox is guided by the real recorded pointer alone (no ember competing).",
+    "Native captures sit in a 14 px editorial matte; within-shot capture changes are atomic.",
+    "Poster is the film's own frame at 56.7 s: the Drive review with exact viewer recipients spotlit under its headline."
+  ],
+  "layout": {
+    "bug": "top-right, y 30–64",
+    "kicker": "x 120, y 66, JetBrainsMono 24 px",
+    "headline": "x 120, y 100, Adwaita Sans 800, 72 px (molten payoff 92 px)",
+    "subline": "x 120, y 200, 34 px, typed on once per beat",
+    "footnote": "x 120, y 254, 26 px (Meet only)",
+    "keyCue": "right-aligned at x 1800, y 182, 20 frames before the real press",
+    "frameBox": {
+      "default": [
+        120,
+        284,
+        1680,
+        760
+      ],
+      "meet": [
+        120,
+        300,
+        1680,
+        744
+      ]
+    },
+    "matte": "14 px around native captures; browser preview uses its own chrome",
+    "ember": "x = frame left − 30 px, vertical travel only, rest beside the target row"
+  },
+  "beats": [
+    {
+      "id": "intro",
+      "kind": "intro",
+      "in": 0,
+      "out": 135
+    },
+    {
+      "id": "paste",
+      "kind": "feature",
+      "in": 135,
+      "out": 522,
+      "announceStart": 135,
+      "textSettled": 159,
+      "demoStart": 216,
+      "demoEnd": 512,
+      "narration": {
+        "kicker": "01 · COMPOSE",
+        "headline": "Paste images straight into your mail.",
+        "sub": "Ctrl+V drops the image right where your cursor is.",
+        "footnote": null
+      },
+      "keys": [
+        {
+          "keys": [
+            "Ctrl",
+            "V"
+          ],
+          "label": "Paste image",
+          "cue": 248,
+          "press": 268
+        }
+      ],
+      "states": [
+        [
+          216,
+          "clipboard.before"
+        ],
+        [
+          269,
+          "clipboard.typing*"
+        ],
+        [
+          302,
+          "clipboard.after"
+        ],
+        [
+          362,
+          "browser.inline"
+        ]
+      ],
+      "results": [
+        [
+          302,
+          362
+        ],
+        [
+          362,
+          512
+        ]
+      ]
+    },
+    {
+      "id": "booking",
+      "kind": "feature",
+      "in": 522,
+      "out": 831,
+      "announceStart": 522,
+      "textSettled": 546,
+      "demoStart": 603,
+      "demoEnd": 821,
+      "narration": {
+        "kicker": "02 · MAIL → CALENDAR",
+        "headline": "Booked a haircut? Add it to your calendar.",
+        "sub": "Press A on the booking email. It becomes your own appointment.",
+        "footnote": null
+      },
+      "keys": [
+        {
+          "keys": [
+            "A"
+          ],
+          "label": "Add to calendar",
+          "cue": 641,
+          "press": 661
+        },
+        {
+          "keys": [
+            "y"
+          ],
+          "label": "Add appointment",
+          "cue": 721,
+          "press": 741
+        }
+      ],
+      "states": [
+        [
+          603,
+          "booking.mail"
+        ],
+        [
+          661,
+          "booking.review"
+        ],
+        [
+          741,
+          "booking.complete"
+        ]
+      ],
+      "results": [
+        [
+          741,
+          821
+        ]
+      ]
+    },
+    {
+      "id": "now",
+      "kind": "feature",
+      "in": 831,
+      "out": 1022,
+      "announceStart": 831,
+      "textSettled": 855,
+      "demoStart": 912,
+      "demoEnd": 1012,
+      "narration": {
+        "kicker": "03 · CALENDAR",
+        "headline": "Your week marks exactly where now is.",
+        "sub": "A red line across today, between what’s done and what’s next.",
+        "footnote": null
+      },
+      "keys": [],
+      "states": [
+        [
+          912,
+          "calendar.clear (genuine live week; now row empty in today's column)"
+        ]
+      ],
+      "results": [
+        [
+          926,
+          1012
+        ]
+      ]
+    },
+    {
+      "id": "meet",
+      "kind": "feature",
+      "in": 1022,
+      "out": 1406,
+      "announceStart": 1022,
+      "textSettled": 1046,
+      "demoStart": 1103,
+      "demoEnd": 1396,
+      "narration": {
+        "kicker": "04 · CALENDAR",
+        "headline": "New meeting? Switch on Meet AI notes.",
+        "sub": "Tick one box on a new event with a Meet link. Google confirms it.",
+        "footnote": "Eligible Google Workspace plans"
+      },
+      "keys": [
+        {
+          "keys": [
+            "Ctrl",
+            "S"
+          ],
+          "label": "Review",
+          "cue": 1212,
+          "press": 1232
+        },
+        {
+          "keys": [
+            "y"
+          ],
+          "label": "Create event",
+          "cue": 1292,
+          "press": 1312
+        }
+      ],
+      "pointer": {
+        "asset": "meet.unchecked",
+        "target": "targets.click (recorded)",
+        "appear": 1124,
+        "move": [
+          1130,
+          1158
+        ],
+        "press": 1170,
+        "hide": [
+          1194,
+          1204
+        ]
+      },
+      "states": [
+        [
+          1103,
+          "meet.unchecked"
+        ],
+        [
+          1172,
+          "meet.checked"
+        ],
+        [
+          1232,
+          "meet.review"
+        ],
+        [
+          1312,
+          "meet.complete"
+        ]
+      ],
+      "results": [
+        [
+          1172,
+          1232
+        ],
+        [
+          1312,
+          1396
+        ]
+      ]
+    },
+    {
+      "id": "drive",
+      "kind": "feature",
+      "in": 1406,
+      "out": 1770,
+      "announceStart": 1406,
+      "textSettled": 1430,
+      "demoStart": 1487,
+      "demoEnd": 1760,
+      "narration": {
+        "kicker": "05 · BIG FILES",
+        "headline": "Too big to attach? Send it via Drive.",
+        "sub": "Choose Drive for the file. Only your To and Cc can view it.",
+        "footnote": null
+      },
+      "keys": [
+        {
+          "keys": [
+            "d"
+          ],
+          "label": "Drive",
+          "cue": 1531,
+          "press": 1551
+        },
+        {
+          "keys": [
+            "Ctrl",
+            "S"
+          ],
+          "label": "Review",
+          "cue": 1597,
+          "press": 1617
+        }
+      ],
+      "states": [
+        [
+          1487,
+          "drive.choice"
+        ],
+        [
+          1551,
+          "drive.selected"
+        ],
+        [
+          1617,
+          "drive.review"
+        ],
+        [
+          1650,
+          "drive.access (actual scrolled review, 21-frame camera move)"
+        ]
+      ],
+      "results": [
+        [
+          1551,
+          1617
+        ],
+        [
+          1671,
+          1760
+        ]
+      ]
+    },
+    {
+      "id": "send",
+      "kind": "feature",
+      "in": 1770,
+      "out": 2200,
+      "announceStart": 1770,
+      "textSettled": 1794,
+      "demoStart": 1851,
+      "demoEnd": 2190,
+      "narration": {
+        "kicker": "05 · BIG FILES",
+        "headline": "Nothing uploads until you send.",
+        "sub": "Undo during the countdown, or send right away.",
+        "footnote": null
+      },
+      "keys": [
+        {
+          "keys": [
+            "y"
+          ],
+          "label": "Send",
+          "cue": 1898,
+          "press": 1918
+        },
+        {
+          "keys": [
+            "Ctrl",
+            "S"
+          ],
+          "label": "Send now",
+          "cue": 1964,
+          "press": 1984
+        }
+      ],
+      "states": [
+        [
+          1851,
+          "drive.access"
+        ],
+        [
+          1918,
+          "drive.countdown* (genuine 10s → 9s, 2.2 s visible)"
+        ],
+        [
+          1984,
+          "drive.progress* at 1984/2006/2028/2049/2071/2093"
+        ],
+        [
+          2114,
+          "drive.sent (actual Sent reader of the delivered mail: subject, From, To/Cc, Labels: SENT, body, 'Files shared via Google Drive', launch-film-master.mov (26.0 MiB) + Drive URL; camera 'reader' = cells [55,2,45,20] of 100×24; cut + burst on the closing-phrase attack; spotlight 'link' = cells [56.6,16.9,42.6,4.05] 2132–2184 with margin ember). No fallback"
+        ]
+      ],
+      "burst": [
+        2114,
+        2140
+      ],
+      "results": [
+        [
+          1918,
+          1984
+        ],
+        [
+          2114,
+          2190
+        ]
+      ]
+    },
+    {
+      "id": "recap",
+      "kind": "text",
+      "in": 2200,
+      "out": 2392,
+      "rows": [
+        [
+          2212,
+          "Link lists show each link’s title above its full address"
+        ],
+        [
+          2228,
+          "Calendar guests suggested from people you mail"
+        ],
+        [
+          2244,
+          "Move an event’s start, and its end follows"
+        ],
+        [
+          2260,
+          "Scroll the send review with your mouse wheel"
+        ]
+      ]
+    },
+    {
+      "id": "outro",
+      "kind": "outro",
+      "in": 2392,
+      "out": 2527,
+      "picture": "molten logo (2392) · Omagma v0.2.18 (2402) · Out now (2414) · technologylab-ai.github.io/omagma (2426) · Experimental TUI & CLI · Linux & macOS (2436) · ring 2436 · flare on stop 2442 · fade 2509–2526"
+    }
+  ],
+  "qaContract": {
+    "fields": "qa(t).beat = {id, kind, phase (announce/read/demo/exit/hold), announceStart, textSettled, demoStart, demoEnd, narration, keys}; qa(t).text; qa(t).textState = {opacity, settle} (actual rendered band); qa(t).textMoving; qa(t).cameras[].moving/wrapper{scale, clip, opacity}/exit; qa(t).guide.margin",
+    "assertions": [
+      "phase announce/read/hold ⇒ no visible UI frame",
+      "demoStart − textSettled ≥ 45 frames (1.5 s); all feature beats use 57",
+      "phase demo ⇒ narration equals the beat narration, band opacity 1 and settle 1 (actual rendered values) through demoEnd − 1",
+      "textMoving ⇒ no camera/wrapper motion (glide, seam clip, cut pop, fade) on a visible frame outside exit",
+      "recap/outro ⇒ text only, no UI",
+      "ember glow never reaches native pixels (rest x + 33 px ≤ frame left + matte)"
+    ]
+  },
+  "assetBinding": {
+    "revision": "revision-27",
+    "manifest": "video/cache/short0218/revision-27/assets-manifest.json",
+    "cameraRois": "entry.cameraRois[name] for cameras, entry.rois[name] for spotlights/targets",
+    "driveAccess": "actual scrolled drive.access bitmap from frame 1650 (drive beat) and as the opening state of the send beat",
+    "series": "deduplicated by tape/frame: clipboard.typing1..10, drive.countdown 10s→9s, drive.progress0/18/36/54/72/90",
+    "unused": "drive.picker remains captured but is editorially omitted",
+    "newCaptures": "Native capture revision-22, SGR58 whitespace-fidelity raster revision-26; exact previous assets reused; composite revision-27."
+  },
+  "newAssetContract": {
+    "calendar.clear": "Genuine live week view from the unchanged published binary and real OS clock (no fake clock). Seed fictional events so today's column has one event ending at least one row above now and one starting at least one row below now; the now row in today's column has NO event text, only the genuine red underline across blank cells plus the red 'now' gutter label. Tomorrow keeps the Haircut matching the booking. Short titles that fit their columns. rois.nowRow = gutter 'now' label through today's full column width on the now row; cameraRois.hero = gutter + today + two neighbouring days, from the day-header row to at least two rows below now, including both today events and the Haircut. Proof: underline columns/colours on the now row and absence of event glyphs there; capture UTC.",
+    "drive.sent": "Captured (revision-22, 100×24): actual Sent view after the genuine Drive send. Reader-only framing chosen by Opus: bind cameraRois.reader = normalized [0.55, 0.083333, 0.45, 0.833333] (cells [55,2,45,20]: reader top border/title through bottom border) and rois.link = normalized [0.566, 0.704167, 0.426, 0.16875] (cells [56.6,16.9,42.6,4.05]: 'Files shared via Google Drive:' through the Drive URL). film.js carries the identical cell values for this grid, so an unbound manifest still renders the same frame (reported as roi-fallback cells). The left Inbox list is deliberately excluded. Required; there is no Inbox fallback.",
+    "calendar.clear fidelity": "Captured 120×32, now row 24, blank underlined today cells 6..20 (SGR58 #ff7070), Focus above at 22, Call below at 26, tomorrow Haircut; camera [0,6,70,21]. Final stills must visibly show the genuine red underline across the blank today cells after the faithful blank-underline raster repair; a 'now' label without its line fails review."
+  },
+  "assetRequirements": {
+    "required": [
+      "clipboard.before",
+      "clipboard.after",
+      "browser.inline",
+      "booking.mail",
+      "booking.review",
+      "booking.complete",
+      "calendar.clear",
+      "drive.sent",
+      "drive.choice",
+      "drive.selected",
+      "drive.review",
+      "drive.access",
+      "drive.countdown* (≥2 genuine ticks)",
+      "drive.progress* (≥2, ideally 6)",
+      "meet.unchecked",
+      "meet.checked",
+      "meet.review",
+      "meet.complete"
+    ],
+    "optional": [
+      "clipboard.typing1..10"
+    ]
+  },
+  "posterTime": 56.7,
+  "reviewTimes": [
+    4.5,
+    5.3,
+    7.2,
+    8.27,
+    8.93,
+    10.07,
+    12.07,
+    15.0,
+    17.07,
+    17.4,
+    18.2,
+    20.1,
+    21.37,
+    22.03,
+    24.7,
+    27.37,
+    27.7,
+    28.5,
+    30.4,
+    32.0,
+    33.73,
+    34.07,
+    34.87,
+    36.77,
+    37.47,
+    39.0,
+    41.07,
+    43.73,
+    46.53,
+    46.87,
+    47.67,
+    49.57,
+    51.7,
+    53.9,
+    55.7,
+    56.7,
+    58.67,
+    59.0,
+    59.8,
+    61.7,
+    63.93,
+    66.13,
+    68.3,
+    70.37,
+    70.47,
+    70.63,
+    71.2,
+    72.7,
+    73.0,
+    73.33,
+    73.73,
+    75.4,
+    77.5,
+    79.33,
+    79.73,
+    81.4,
+    84.1
+  ]
+}

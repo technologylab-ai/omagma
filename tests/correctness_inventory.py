@@ -15,6 +15,7 @@ EXTRA_ROOTS = (
     "terminal_mail_acceptance_tests.zig",
     "terminal_ux_backend_tests.zig",
     "terminal_ux_helper_tests.zig",
+    "terminal_cli_contract_tests.zig",
     "platform_tests.zig",
     "updates_tests.zig",
     "calendar_tests.zig",
@@ -24,6 +25,7 @@ EXTRA_ROOTS = (
     "calendar_embedded_tests.zig",
     "calendar_duration_tests.zig",
     "calendar_fixture_tests.zig",
+    "calendar_actions_tests.zig",
     "calendar_store_tests.zig",
     "calendar_identity_history_tests.zig",
     "calendar_vault_grants_tests.zig",
@@ -53,10 +55,10 @@ HISTORY_CASES = {
 
 
 class CorrectnessInventory(unittest.TestCase):
-    def test_all_31_previous_extra_roots_are_imported_once(self):
+    def test_all_33_retained_extra_roots_are_imported_once(self):
         aggregate = (ROOT / "src/correctness_tests.zig").read_text()
         imports = re.findall(r'@import\("([^"\n]+)"\)', aggregate)
-        self.assertEqual(len(EXTRA_ROOTS), 31)
+        self.assertEqual(len(EXTRA_ROOTS), 33)
         self.assertEqual(Counter(imports), Counter(EXTRA_ROOTS))
         for name in imports:
             self.assertTrue((ROOT / "src" / name).is_file(), name)

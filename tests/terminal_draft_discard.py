@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 import signal
 import struct
+import sys
 import tempfile
 import termios
 import time
@@ -39,6 +40,14 @@ HINT = "Ctrl+X again discards"
 RESTORE_NOTICE = "1 discarded draft kept · :restore-draft"
 # A second Ctrl+X confirms only once the previous one has settled (1 s).
 SETTLE = 1.2
+
+
+def wait_child_exit(terminal):
+    """The Darwin guardian exposes child status without Popen.wait()."""
+    deadline = time.monotonic() + 5
+    while terminal.process.poll() is None:
+        require(time.monotonic() < deadline, "killed owned TUI did not exit")
+        terminal.pump(.02)
 
 
 def drafts(binary, directory, extra):
@@ -574,7 +583,7 @@ def undo_after_restart(binary, directory):
                 terminal.finish()
             else:
                 terminal.process.send_signal(signal.SIGKILL)
-                terminal.process.wait(timeout=5)
+                wait_child_exit(terminal)
         except Exception:
             diagnose(terminal)
             raise
@@ -617,7 +626,11 @@ def second_window(binary, directory):
             review(w1)
             confirm(w1)
             in_mailbox(w1, DISCARDED)
-            w2 = start(binary, directory, extra, first)
+            # Guardian control files belong to each window; application data
+            # still comes from the exact same explicitly shared cache/store.
+            second_directory = directory / "window-two" if sys.platform == "darwin" else directory
+            second_extra = (*extra, "--cache-dir", str(directory / "cache")) if sys.platform == "darwin" else extra
+            w2 = start(binary, second_directory, second_extra, first)
             w2.gap(1.0)
             if other == "quits":
                 w2.finish()
@@ -857,7 +870,7 @@ def paused_queue(binary, directory):
         terminal.send(b"y")
         terminal.until(lambda: "Undo" in terminal.text(), 5)
         terminal.process.send_signal(signal.SIGKILL)
-        terminal.process.wait(timeout=5)
+        wait_child_exit(terminal)
     finally:
         terminal.close()
     terminal = start(binary, directory, extra, first, send_grace=30)
@@ -881,7 +894,7 @@ def paused_queue(binary, directory):
             require(len(client.request("draft.list")["drafts"]) == 1, "a draft with a queued send was discarded")
             require(client.request("cache.stats")["fixtureSends"] == 0, "the queued send was sent")
         terminal.process.send_signal(signal.SIGKILL)
-        terminal.process.wait(timeout=5)
+        wait_child_exit(terminal)
     except Exception:
         diagnose(terminal)
         raise
@@ -993,6 +1006,14 @@ CASES = (("untouched-twenty", untouched_twenty), ("typed-kept", typed_kept),
 
 
 def main():
+    if sys.platform == "darwin":
+        from terminal_macos import DarwinTerminal
+        import terminal_ux_batch_support as support
+        if not issubclass(support.MouseTerminal, DarwinTerminal):
+            class GuardianMouseTerminal(DarwinTerminal, support.MouseTerminal):
+                pass
+            support.MouseTerminal = GuardianMouseTerminal
+        tempfile.tempdir = str(Path("/tmp").resolve())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--case", choices=[name for name, _ in CASES], action="append")

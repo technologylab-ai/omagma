@@ -474,7 +474,7 @@ test "reconnect diagnostics: Google's reason is kept bounded, sanitized and clas
     try std.testing.expectEqualStrings("", revoked.subtype.slice());
     try std.testing.expectEqualStrings("invalidGrant", (try googleRefusal(a, "{\"error\":\"invalid_grant\",\"error_description\":\"Bad Request\"}")).kind());
     // Echoed credentials, controls and an injected terminal escape never survive.
-    const hostile = try googleRefusal(a, "{\"error\":\"invalid_grant\",\"error_subtype\":\"Bad Value\\u001b[2J\",\"error_description\":\"Bad\\u001b]52;c;x\\u0007 token 1//0gSyntheticRefreshTokenMaterial-abc_DEF and code 4/0AeanS0aSyntheticAuthorizationCode\\n\\tend\"}");
+    const hostile = try googleRefusal(a, "{\"error\":\"invalid_grant\",\"error_subtype\":\"Bad Value\\u001b[2J\",\"error_description\":\"Bad\\u001b]52;c;x\\u0007 token 1/" ++ "/0gSyntheticRefreshTokenMaterial-abc_DEF and code 4/0AeanS0aSyntheticAuthorizationCode\\n\\tend\"}");
     try std.testing.expectEqualStrings("", hostile.subtype.slice());
     const text = hostile.description.slice();
     try std.testing.expect(std.mem.indexOf(u8, text, "Synthetic") == null);

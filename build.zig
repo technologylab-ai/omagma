@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
     correctness.dependOn(main_correctness);
 
     // Import the extra suites into one root so shared modules and their tests
-    // are compiled and run once instead of in thirty-one separate binaries.
+    // are compiled and run once instead of in thirty-three separate binaries.
     const extra_tests = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path("src/correctness_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     extra_tests.root_module.addOptions("build_options", options);
     if (macos_sdk) |sdk| linkNativeKeychain(extra_tests.root_module, sdk);

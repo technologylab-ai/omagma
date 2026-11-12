@@ -153,7 +153,7 @@ class Qualification(unittest.TestCase):
             self.assertEqual(len(prepared), 1)
             self.assertIn("-Dtest-watchdog=true", prepared[0])
             self.assertIn("-Doptimize=safe", prepared[0])
-            for script in ("terminal_compose_actions.py", "terminal_draft_conflict.py",
+            for script in ("terminal_compose_actions.py", "terminal_draft_conflict.py", "terminal_draft_discard.py",
                            "terminal_draft_paging.py", "terminal_quote_policy.py",
                            "terminal_reply_boundaries.py", "terminal_settled_recovery.py",
                            "terminal_workflow_regressions.py"):
