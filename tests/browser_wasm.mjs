@@ -183,7 +183,7 @@ try {
         const chars=rows[row][col].chars;if(chars!=='│')shifted.push({row,col,chars});
       }
       const glyphs=[];for(let row=0;row<rows.length;row++)for(let col=0;col<api.cols;col++){
-        if(['⭐','🚀','こ','ん','に','ち','は','日','本','語'].includes(rows[row][col].chars))
+        if(['★','⭐','🚀','こ','ん','に','ち','は','日','本','語'].includes(rows[row][col].chars))
           glyphs.push({row,col,...rows[row][col],next:rows[row][col+1],readerStatus:lines[row].includes('Starred')});
       }
       return {top,bottom,left,right,shifted,glyphs,unicodeVersion:api.unicodeVersion};
@@ -192,8 +192,9 @@ try {
   function assertGrid(value, label, readerVisible) {
     assert(value.top >= 0 && value.bottom > value.top && value.right.length > 0, `${label}: pane border corners are missing`);
     assert.deepEqual(value.shifted, [], `${label}: pane dividers shifted between native rows`);
-    const stars = value.glyphs.filter((glyph) => glyph.chars === "⭐");
+    const stars = value.glyphs.filter((glyph) => glyph.chars === "★");
     assert(stars.length > 0, `${label}: starred-row width regression has no fixture coverage`);
+    assert(!value.glyphs.some((glyph) => glyph.chars === "⭐"), `${label}: fixed flag column reverted to a wide emoji`);
     assertGlyphWidths(value.glyphs, label);
     if (readerVisible) {
       assert(stars.some((glyph) => glyph.readerStatus), `${label}: reader Starred status has no width coverage`);
@@ -201,6 +202,11 @@ try {
   }
   function assertGlyphWidths(glyphs, label) {
     for (const glyph of glyphs) {
+      if (glyph.chars === "★") {
+        assert.equal(glyph.width, 1, `${label}: fixed star flag is not one terminal column`);
+        assert.notEqual(glyph.next?.width, 0, `${label}: fixed star flag left a wide-cell continuation`);
+        continue;
+      }
       assert.equal(glyph.width, 2, `${label}: ${glyph.chars} occupies the wrong number of terminal columns`);
       assert.equal(glyph.next?.width, 0, `${label}: ${glyph.chars} has no wide-cell continuation`);
       assert.equal(glyph.next?.chars, "", `${label}: ${glyph.chars} overwrote its continuation cell`);

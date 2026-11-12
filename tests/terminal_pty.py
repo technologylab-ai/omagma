@@ -286,11 +286,31 @@ def open_composer(terminal):
 def saved_compose_frame(terminal, attachment_count=None):
     """Observable saved/available compose state, including the complete footer."""
     current = terminal.text()
+    # The narrow delivery summary omits the attachment count. Verify the
+    # numbered file rows themselves; persisted metadata and exact bytes are
+    # independently checked by the attach/detach workflow below.
+    lines = current.splitlines()
+    attachment_rows = None
+    for row, line in enumerate(lines):
+        if "[Add A]" not in line or not re.search(r"\bAtt \d", line):
+            continue
+        left = line.find("│")
+        right = line.find("│", left + 1)
+        if left < 0 or right < 0:
+            continue
+        attachment_rows = []
+        for file_line in lines[row + 1:]:
+            if file_line[left:left + 1] in {"╰", "└"}:
+                break
+            if match := re.match(r"^\s*(\d+)\. ", file_line[left + 1:right]):
+                attachment_rows.append(int(match[1]))
+        break
     return (''.join(terminal.screen.cells[1]).strip() == "Local draft · no mail sent"
             and "saved locally · not sent" in ''.join(terminal.screen.cells[2])
             and "Ctrl+S Review" in ''.join(terminal.screen.cells[-2])
             and "Attach file · local draft" not in current and "Path:" not in current
-            and (attachment_count is None or f"Attachments {attachment_count}" in current))
+            and (attachment_count is None or f"Attachments {attachment_count}" in current
+                 or (attachment_count == 1 and attachment_rows == [1])))
 
 
 def wait_saved_compose(terminal, attachment_count=None):
