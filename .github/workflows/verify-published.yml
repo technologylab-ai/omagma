@@ -1,0 +1,120 @@
+name: Verify published native downloads
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing stable release to verify without rebuilding
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omagma-published-downloads-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+          - runner: macos-15
+            os: macos
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Validate the immutable release reference
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          version = os.environ['VERSION']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('A stable release version is required')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag=v{version}\n')
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+      - name: Verify the public archive and execute its native bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_OS: ${{ matrix.os }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, sys
+          root = pathlib.Path.cwd()
+          sys.path.insert(0, str(root / 'scripts'))
+          from release import artifact_names, is_native, package_versions
+          version, compiler = package_versions()
+          tag, os_name, arch = (os.environ[key] for key in ('RELEASE_TAG', 'RELEASE_OS', 'RELEASE_ARCH'))
+          assert tag == 'v' + version and is_native(arch, os_name)
+          repo = os.environ['GITHUB_REPOSITORY']
+          release = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--repo', repo,
+              '--json', 'tagName,targetCommitish,isDraft,isPrerelease,publishedAt,url,assets'], text=True))
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert not release['isDraft'] and not release['isPrerelease'] and release['tagName'] == tag
+          reference = json.loads(subprocess.check_output(['gh', 'api',
+              f'repos/{repo}/git/ref/tags/{tag}'], text=True))['object']
+          for _ in range(4):
+              if reference['type'] != 'tag':
+                  break
+              reference = json.loads(subprocess.check_output(['gh', 'api',
+                  f'repos/{repo}/git/tags/{reference["sha"]}'], text=True))['object']
+          if reference['type'] != 'commit' or reference['sha'] != source:
+              raise SystemExit('Published tag does not resolve to the checked-out source')
+          raw, bundle, _ = artifact_names(version, arch, os_name)
+          out = root / 'published-download-checks'
+          out.mkdir(mode=0o700)
+          command = ['gh', 'release', 'download', tag, '--repo', repo, '--dir', str(out)]
+          for name in (raw, bundle, 'SHA256SUMS', 'LICENSES.txt'):
+              command += ['--pattern', name]
+          subprocess.run(command, check=True)
+          for name in (raw, bundle, 'SHA256SUMS', 'LICENSES.txt'):
+              if not (out / name).is_file():
+                  raise SystemExit('Missing published asset: ' + name)
+          binary = out / raw
+          binary.chmod(0o755)
+          runtime_env = {key: value for key, value in os.environ.items() if key != 'GH_TOKEN'}
+          subprocess.run(['python3', 'tests/release_check.py', '--os', os_name, '--arch', arch,
+              '--output-dir', str(out)], check=True, env=runtime_env)
+          info = json.loads(subprocess.check_output([str(binary), 'build-info'], text=True, env=runtime_env))
+          if info != {'version': version, 'zigVersion': compiler, 'optimizeMode': 'safe'}:
+              raise SystemExit('Published native build identity differs from the tagged package contract')
+          checks = []
+          for suite in ('terminal_integration', 'terminal_transport'):
+              command = ['python3', f'tests/{suite}.py', '--binary', str(binary), '--build-mode', 'safe',
+                  '--output', str(out / (suite + '.json'))]
+              result = subprocess.run(command, env=runtime_env)
+              checks.append({'suite': suite, 'exitCode': result.returncode})
+          receipt = {'release': release, 'source': source, 'platform': {'os': os_name, 'arch': arch},
+              'binarySha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+              'buildInfo': info,
+              'rebuilt': False, 'checks': checks, 'passed': all(check['exitCode'] == 0 for check in checks)}
+          (out / 'native-download-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          assert receipt['passed']
+          PY
+      - name: Preserve native download receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-downloads-${{ matrix.os }}-${{ matrix.arch }}
+          path: published-download-checks/*.json
+          if-no-files-found: warn
+          retention-days: 30

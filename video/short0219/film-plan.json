@@ -1,0 +1,338 @@
+{
+  "schema": "omagma.video.film-plan.v2",
+  "title": "In Good Time — What's new in Omagma v0.2.19",
+  "author": "Actual Claude Opus 5.5 at xhigh (creative direction, copy, timing, camera, design)",
+  "baseline": "Last user-approved film: v0.2.18 Heavy Lifting clarity cut (SHA256 aa431ff461eac89d368f7e97d8f5cbe7b18027d70113653544df02211c812ddf, 84.233333 s, 2527 frames, approved 2026-11-03). This film covers only changes since then.",
+  "format": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "frames": 2527,
+    "duration": 84.233333
+  },
+  "music": {
+    "source": "Approved v0.2.7 final soundtrack via video/cache/short0218/audio/approved-flow-84.m4a (SHA256 4f849b3de93b24d841a81baa3a96177ef40deaeefeaefa07db768438c3fa854e), packet-copied unchanged",
+    "edit": "none",
+    "landmarksFrames": {
+      "bass": 138,
+      "step": 268,
+      "drums": 1061,
+      "protectedPassage": 1590,
+      "closingAttack": 2114,
+      "lastPhrase": 2369,
+      "stop": 2442,
+      "end": 2527
+    }
+  },
+  "clockDecision": "Five announced stories at 81 frames of announce+read each plus a 10-frame fold leave 1,610 demo frames (avg 10.7 s) inside the approved 84.233 s soundtrack, so nothing is rushed. The calendar hero gets the longest demo (12.6 s). The restored draft lands on the closing-phrase attack (2114); the recap spans the last phrase (2369) and the outro flare lands on the stop (2442).",
+  "narrationPolicy": [
+    "Each feature beat owns exactly one kicker, one headline and one supporting line (the draft beat adds one footnote).",
+    "announceStart → textSettled (24 frames: kicker, headline words, typed supporting line) plays over the empty atmosphere; no UI is visible.",
+    "textSettled → demoStart is a 57-frame (1.9 s) reading gap with no UI and no text motion.",
+    "demoStart → demoEnd: the genuine UI opens from its seam and acts; narration stays fixed and fully settled. Only action keycaps appear, each 20 frames before its real press.",
+    "demoEnd → out: the UI folds back into its seam (10 frames) while the narration fades, leaving an empty stage for the next announcement.",
+    "Every demonstration ends on a populated result: Day grid in the new look, guest added, accepted invitation in the grid, the bill reminder in the due date's Day view, the restored words.",
+    "No separate payoff card: the restored draft folds directly into the recap (2200)."
+  ],
+  "decisions": [
+    "Order: Calendar grid & look (hero) → guest suggestions → RSVP → personal .ics reminder → discard & undo → recap → outro. Calendar stories sit together; the undo payoff takes the closing-phrase attack.",
+    "Calendar hero: genuine 104-column Week at full width (26.5 px), a contextual push into today's column of blocks with the genuine red now line in the blank row between earlier and later events (supporting context, not a repeated feature), then Day (2), where the overlapping pair genuinely splits into side-by-side lanes, then Ctrl+T Classic and Ctrl+T back, ending on the populated Orange & Blue Day.",
+    "Product constraint (current source, min_lane_cells = 8): a 104-column Week column is too narrow for two lanes, so its overlap is drawn as the genuine '+1' overflow; side-by-side overlap is shown only in Day. No wider, sub-26 px Week and no altered pixels.",
+    "Guests: the popup appears after two letters with nothing selected; the viewer reads 'Alex Example <alex@example.test>' before a deliberate ↓ and Enter add it. Copy says only your pick is added; no invitation is implied.",
+    "RSVP: one clean Accept. Copy claims nothing happens until y; the result shows the event still in the grid with its answer and the genuine status.",
+    "ICS: an everyday personal case ('Bill due?') from fictional Harbor Utilities, explicitly not a meeting invitation and not the v0.2.18 haircut. No 'no email' marketing claim. The populated due-date Day view is the result, reached by a hard cut.",
+    "Draft: typed words → Ctrl+X review → Ctrl+X discarded (populated mail with the genuine undo status) → Ctrl+Z restores the identical words. Footnote scopes :restore-draft to 7 days; no Gmail claim.",
+    "Ember: vertical travel only in the margin 30 px left of the frame, resting beside the spotlit row; it never crosses glyphs. No recorded pointer is used in this film.",
+    "Native states switch atomically on the press frame; camera glides only between identical-grid captures of one session (READY rejects mixed grids in a shot). Camera and spotlight rectangles stay separate.",
+    "Legibility: crops are bound by a 34 px ceiling as well as 1 image px per CSS px, so small dialogs never balloon; qa warns below 26 px.",
+    "Calendar frames carry a faint cool rim in their molten halo, a nod to the Orange & Blue look; everything else keeps the approved v0.2.18 magma design.",
+    "Poster is the film's own frame at 13.4 s: the Orange & Blue Day with its side-by-side lanes spotlit under the headline.",
+    "Composed-still review fixes (no timing, copy or music change): spotlight padding is 10 px horizontal / 3 px vertical so the wash edge stays in the inter-row gap and never slices glyphs; dialog/modal cameras are exact border boxes, so no partial background words show; all draft cameras use the full 96-column width below the header row; Day cameras are 23 rows so both lanes show entirely; the RSVP result spotlights only the genuine Accepted status for 2 s (1304–1366).",
+    "The restore is an atomic camera cut (camDur 0) together with the atomic state change on the closing-phrase attack. The camera never glides across the genuine recovery footer ('Message size unavailable: UnfinishedDraft', cleared only by Ctrl+S review). That footer stays outside the compose camera; no status retouch and no hidden post-restore key press.",
+    "RSVP dialog cameras are each state's exact native border box: review [9,4,78,13], accept [9,4,78,14], because the wrapped consequence adds one row. They are not identical cells, so rsvp.accept cuts the camera atomically (camDur 0) with its state. No fake border and no background fragments."
+  ],
+  "layout": {
+    "bug": "top-right, y 30–64",
+    "kicker": "x 120, y 66, JetBrainsMono 24 px",
+    "headline": "x 120, y 100, Adwaita Sans 800, 72 px",
+    "subline": "x 120, y 200, 34 px, typed on once per beat; ≤ 64 characters so it clears the key cue",
+    "footnote": "x 120, y 254, 26 px (draft only)",
+    "keyCue": "right-aligned at x 1800, y 182, 20 frames before the real press; chords use '+', typed sequences sit side by side",
+    "frameBox": {
+      "default": [120, 284, 1680, 760],
+      "foot": [120, 300, 1680, 744]
+    },
+    "matte": "14 px around native captures",
+    "spotlight": "warm wash on the bound ROI, padded 10 px horizontally and 3 px vertically",
+    "cameraCut": "a state with camDur 0 cuts the camera atomically with its state (rsvp.accept, draft.restored); all other state changes glide 18 frames",
+    "nativeScale": "k = min(box/ROI, 1 image px per CSS px, 34 px font ceiling)",
+    "ember": "x = frame left − 30 px, vertical travel only, rest beside the target row"
+  },
+  "beats": [
+    {
+      "id": "intro",
+      "kind": "intro",
+      "in": 0,
+      "out": 135
+    },
+    {
+      "id": "grid",
+      "kind": "feature",
+      "in": 135,
+      "out": 605,
+      "announceStart": 135,
+      "textSettled": 159,
+      "demoStart": 216,
+      "demoEnd": 595,
+      "narration": {
+        "kicker": "01 · CALENDAR",
+        "headline": "Your calendar, now a real grid.",
+        "sub": "Blocks on a time axis, in orange & blue. Ctrl+T for Classic.",
+        "footnote": null
+      },
+      "keys": [
+        {"keys": ["2"], "label": "Day view", "cue": 332, "press": 352},
+        {"keys": ["Ctrl", "T"], "label": "Classic look", "cue": 426, "press": 446},
+        {"keys": ["Ctrl", "T"], "label": "Orange & Blue", "cue": 490, "press": 510}
+      ],
+      "states": [
+        [216, "calendar.week (camera week; push to today 272–296)"],
+        [352, "calendar.day"],
+        [446, "calendar.day-classic"],
+        [510, "calendar.day-back"]
+      ],
+      "spots": [
+        [302, 346, "calendar.week:column"],
+        [376, 428, "calendar.day:lanes"],
+        [524, 588, "calendar.day-back:allday"]
+      ],
+      "results": [[352, 446], [510, 595]]
+    },
+    {
+      "id": "guests",
+      "kind": "feature",
+      "in": 605,
+      "out": 1005,
+      "announceStart": 605,
+      "textSettled": 629,
+      "demoStart": 686,
+      "demoEnd": 995,
+      "narration": {
+        "kicker": "02 · CALENDAR GUESTS",
+        "headline": "Type two letters. Pick your guest.",
+        "sub": "From your contacts and recent mail. Only your pick is added.",
+        "footnote": null
+      },
+      "keys": [
+        {"keys": ["a", "l"], "seq": true, "label": "Type", "cue": 726, "press": 746},
+        {"keys": ["↓"], "label": "Choose", "cue": 818, "press": 838},
+        {"keys": ["Enter"], "label": "Add guest", "cue": 880, "press": 900}
+      ],
+      "states": [
+        [686, "guest.empty"],
+        [746, "guest.typed (optional; if absent guest.suggest starts here)"],
+        [754, "guest.suggest (nothing selected)"],
+        [838, "guest.selected"],
+        [900, "guest.added"]
+      ],
+      "spots": [
+        [702, 742, "guest.empty:guests"],
+        [766, 832, "guest.suggest:suggest"],
+        [848, 892, "guest.selected:choice"],
+        [912, 988, "guest.added:field"]
+      ],
+      "results": [[900, 995]]
+    },
+    {
+      "id": "rsvp",
+      "kind": "feature",
+      "in": 1005,
+      "out": 1380,
+      "announceStart": 1005,
+      "textSettled": 1029,
+      "demoStart": 1086,
+      "demoEnd": 1370,
+      "narration": {
+        "kicker": "03 · CALENDAR",
+        "headline": "RSVP without leaving your calendar.",
+        "sub": "Press r to review your answer. Nothing changes until y.",
+        "footnote": null
+      },
+      "keys": [
+        {"keys": ["r"], "label": "Answer", "cue": 1136, "press": 1156},
+        {"keys": ["a"], "label": "Accept", "cue": 1200, "press": 1220},
+        {"keys": ["y"], "label": "Confirm", "cue": 1266, "press": 1286}
+      ],
+      "states": [
+        [1086, "rsvp.before"],
+        [1156, "rsvp.review"],
+        [1220, "rsvp.accept (own exact dialog border box, one row taller; atomic camera cut, camDur 0)"],
+        [1286, "rsvp.done"]
+      ],
+      "spots": [
+        [1100, 1146, "rsvp.before:event"],
+        [1176, 1212, "rsvp.review:choices"],
+        [1230, 1274, "rsvp.accept:confirm"],
+        [1304, 1366, "rsvp.done:status"]
+      ],
+      "results": [[1286, 1370]]
+    },
+    {
+      "id": "ics",
+      "kind": "feature",
+      "in": 1380,
+      "out": 1800,
+      "announceStart": 1380,
+      "textSettled": 1404,
+      "demoStart": 1461,
+      "demoEnd": 1790,
+      "narration": {
+        "kicker": "04 · MAIL → CALENDAR",
+        "headline": "Bill due? Put it on your calendar.",
+        "sub": "Press A on the attached .ics. Your own event, reminder included.",
+        "footnote": null
+      },
+      "keys": [
+        {"keys": ["A"], "label": "Add to calendar", "cue": 1508, "press": 1528},
+        {"keys": ["y"], "label": "Confirm", "cue": 1590, "press": 1610}
+      ],
+      "states": [
+        [1461, "ics.mail"],
+        [1528, "ics.review"],
+        [1610, "ics.saved"],
+        [1680, "ics.calendar (hard cut; populated due-date Day view)"]
+      ],
+      "spots": [
+        [1476, 1518, "ics.mail:card"],
+        [1548, 1602, "ics.review:details"],
+        [1620, 1674, "ics.saved:status"],
+        [1700, 1784, "ics.calendar:added"]
+      ],
+      "results": [[1610, 1680], [1680, 1790]]
+    },
+    {
+      "id": "draft",
+      "kind": "feature",
+      "in": 1800,
+      "out": 2200,
+      "announceStart": 1800,
+      "textSettled": 1824,
+      "demoStart": 1881,
+      "demoEnd": 2190,
+      "narration": {
+        "kicker": "05 · COMPOSE",
+        "headline": "Discarded too soon? Get it back.",
+        "sub": "Ctrl+X asks first. Ctrl+Z brings back every word.",
+        "footnote": "Later, even after a restart: :restore-draft (up to 7 days)"
+      },
+      "keys": [
+        {"keys": ["Ctrl", "X"], "label": "Discard", "cue": 1940, "press": 1960},
+        {"keys": ["Ctrl", "X"], "label": "Confirm discard", "cue": 2014, "press": 2034},
+        {"keys": ["Ctrl", "Z"], "label": "Undo", "cue": 2094, "press": 2114}
+      ],
+      "states": [
+        [1881, "draft.typing"],
+        [1960, "draft.review"],
+        [2034, "draft.discarded"],
+        [2114, "draft.restored (atomic state change and atomic camera cut, camDur 0; closing-phrase attack; burst 2114–2140 and border run)"]
+      ],
+      "spots": [
+        [1896, 1946, "draft.typing:body"],
+        [1980, 2028, "draft.review:prompt"],
+        [2056, 2100, "draft.discarded:status"],
+        [2134, 2184, "draft.restored:body"]
+      ],
+      "burst": [2114, 2140],
+      "results": [[2034, 2114], [2114, 2190]]
+    },
+    {
+      "id": "recap",
+      "kind": "text",
+      "in": 2200,
+      "out": 2392,
+      "rows": [
+        [2212, "Reconnect an expired account with Ctrl+O"],
+        [2226, "Delete Calendar events after one clear review"],
+        [2240, "Clearer Sent dates, names and label chips"],
+        [2254, "Jump between unread mail with n and N"],
+        [2268, "Unusual mail still opens, emoji stay aligned"]
+      ]
+    },
+    {
+      "id": "outro",
+      "kind": "outro",
+      "in": 2392,
+      "out": 2527,
+      "picture": "molten logo (2392) · Omagma v0.2.19 (2402) · Out now (2414) · technologylab-ai.github.io/omagma (2426) · Experimental TUI & CLI · Linux & macOS (2436) · ring 2436 · flare on stop 2442 · fade 2509–2526"
+    }
+  ],
+  "qaContract": {
+    "fields": "qa(t).beat = {id, kind, phase (announce/read/demo/exit/intro/text/outro), announceStart, textSettled, demoStart, demoEnd, narration, keys}; qa(t).text; qa(t).textState = {opacity, settle}; qa(t).textMoving; qa(t).native = {visible, shots, assets, opacity}; qa(t).cameras[] = {shot, asset, roi, frame, scale, fontPx, opacity, moving, wrapper{scale, clip, opacity}, window, spot, target, exit}; qa(t).guide.margin; window.FILM_PLAN beats mirror this file",
+    "assertions": [
+      "phase announce/read ⇒ no visible native frame",
+      "demoStart − textSettled = 57 frames (≥ 45 required)",
+      "phase demo ⇒ narration equals the beat narration, band opacity 1 and settle 1 through demoEnd − 1",
+      "textMoving ⇒ no camera/wrapper motion on a visible frame outside exit",
+      "intro/recap/outro ⇒ no native frame",
+      "settled native text ≥ 26 px; spotlight target inside its camera window",
+      "ember glow never reaches native pixels (rest x + 33 px ≤ frame left + matte)",
+      "any roi-fallback on a visible asset is a failure"
+    ]
+  },
+  "assetBinding": {
+    "revision": "revision-XX under video/cache/short0219 (first: revision-01)",
+    "manifest": "video/cache/short0219/<revision>/assets-manifest.json (schema omagma.video.assets.v1)",
+    "cameraRois": "entry.cameraRois[name] for cameras; entry.rois[name] for spotlights",
+    "sessions": "All states of one shot share one PTY grid and raster size; READY rejects a mixed shot",
+    "contract": "video/short0219/CAPTURE-CONTRACT.md"
+  },
+  "assetRequirements": {
+    "required": [
+      "calendar.week", "calendar.day", "calendar.day-classic", "calendar.day-back",
+      "guest.empty", "guest.suggest", "guest.selected", "guest.added",
+      "rsvp.before", "rsvp.review", "rsvp.accept", "rsvp.done",
+      "ics.mail", "ics.review", "ics.saved", "ics.calendar",
+      "draft.typing", "draft.review", "draft.discarded", "draft.restored"
+    ],
+    "optional": ["guest.typed"],
+    "namedRois": {
+      "calendar.week": {"cameraRois": ["week", "today"], "rois": ["column"]},
+      "calendar.day": {"cameraRois": ["day"], "rois": ["lanes"]},
+      "calendar.day-classic": {"cameraRois": ["day"], "rois": []},
+      "calendar.day-back": {"cameraRois": ["day"], "rois": ["allday"]},
+      "guest.empty": {"cameraRois": ["form"], "rois": ["guests"]},
+      "guest.typed": {"cameraRois": ["form"], "rois": []},
+      "guest.suggest": {"cameraRois": ["form"], "rois": ["suggest"]},
+      "guest.selected": {"cameraRois": ["form"], "rois": ["choice"]},
+      "guest.added": {"cameraRois": ["form"], "rois": ["field"]},
+      "rsvp.before": {"cameraRois": ["result"], "rois": ["event"]},
+      "rsvp.review": {"cameraRois": ["dialog"], "rois": ["choices"]},
+      "rsvp.accept": {"cameraRois": ["dialog"], "rois": ["confirm"]},
+      "rsvp.done": {"cameraRois": ["result"], "rois": ["status"]},
+      "ics.mail": {"cameraRois": ["reader"], "rois": ["card"]},
+      "ics.review": {"cameraRois": ["modal"], "rois": ["details"]},
+      "ics.saved": {"cameraRois": ["modal"], "rois": ["status"]},
+      "ics.calendar": {"cameraRois": ["day"], "rois": ["added"]},
+      "draft.typing": {"cameraRois": ["compose"], "rois": ["body"]},
+      "draft.review": {"cameraRois": ["review"], "rois": ["prompt"]},
+      "draft.discarded": {"cameraRois": ["mail"], "rois": ["status"]},
+      "draft.restored": {"cameraRois": ["compose"], "rois": ["body"]}
+    },
+    "identicalCameraCells": [
+      ["calendar.day", "calendar.day-classic", "calendar.day-back"],
+      ["guest.empty", "guest.typed", "guest.suggest", "guest.selected", "guest.added"],
+      ["rsvp.before", "rsvp.done"],
+      ["ics.review", "ics.saved"],
+      ["draft.typing", "draft.restored"]
+    ]
+  },
+  "posterTime": 13.4,
+  "reviewTimes": [
+    4.5, 5.3, 6.0, 7.2, 7.8, 9.0, 10.4, 11.73, 12.6, 14.0, 15.4, 16.6, 17.5, 18.9, 19.9,
+    20.3, 21.0, 22.87, 23.6, 24.9, 25.2, 26.3, 28.3, 29.5, 30.6, 32.4, 33.2,
+    33.6, 34.3, 36.2, 37.2, 39.4, 40.9, 42.2, 43.5, 44.8, 45.7,
+    46.1, 46.8, 48.7, 49.6, 51.8, 53.2, 54.4, 56.0, 57.0, 59.0, 59.7,
+    60.1, 60.8, 62.7, 63.6, 65.3, 66.3, 67.8, 68.9, 70.47, 70.8, 71.6, 72.8, 73.1,
+    73.6, 75.1, 76.5, 78.0, 79.3, 79.73, 81.4, 84.1
+  ]
+}
