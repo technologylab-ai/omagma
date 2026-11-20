@@ -1689,6 +1689,46 @@ test "browser provider: ID-only scoped rows survive account switches and partial
     try verifyHost();
 }
 
+test "legacy bodies: browser selection refreshes old accepted bodies and preserves them on transient failures" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    try provider.cache.restore(0, fixture_snapshot, false);
+    resetHost(&.{});
+    const cached = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, true));
+    try expect(try j.boolean(cached, "bodyNeedsRefresh", false));
+    try strings("An independently authored cached body", j.text(cached, "bodyText"));
+    const thread = try messages(try invoke(&provider, a, .{ .cmd = "mail.thread", .account = account, .threadId = "thread-old" }, true));
+    try expect(try j.boolean(thread[0], "bodyNeedsRefresh", false));
+    try equal(@as(usize, 0), host.requests);
+    try verifyHost();
+    const url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/old-inbox?format=full";
+    resetHost(&.{.{ .url = url, .status = 503 }});
+    const offline = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, false));
+    try strings("An independently authored cached body", j.text(offline, "bodyText"));
+    try expect(try j.boolean(offline, "bodyNeedsRefresh", false));
+    try verifyHost();
+    resetHost(&.{.{ .url = url, .status = 403 }});
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, false), "PermissionDenied");
+    try verifyHost();
+    const source = try std.json.Stringify.valueAlloc(a, try browserMailFixture(a, "old-inbox", "thread-old", "Fresh decoded body"), .{});
+    resetHost(&.{.{ .url = url, .body = source }});
+    const fresh = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, false));
+    try strings("Fresh decoded body", j.text(fresh, "bodyText"));
+    try expect(!try j.boolean(fresh, "bodyNeedsRefresh", false));
+    try verifyHost();
+    const persisted = try snapshot(&provider, a, 0);
+    try provider.cache.restore(0, persisted, false);
+    resetHost(&.{});
+    const warm = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, false));
+    try strings("Fresh decoded body", j.text(warm, "bodyText"));
+    try expect(!try j.boolean(warm, "bodyNeedsRefresh", false));
+    try verifyHost();
+}
+
 test "browser provider: decoder migration stays offline and a newly refused charset is fetched only once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1862,7 +1902,9 @@ test "browser provider: warm legacy header display is corrected without refetchi
     var provider = Provider.init(std.testing.allocator);
     defer provider.deinit();
     try actor(&provider, 0, account, false, false);
-    const old = snapshot_head ++ "\"messages\":[{\"id\":\"warm\",\"threadId\":\"thread\",\"from\":{\"address\":\"peer@example.test\",\"name\":\"Decoded\\tname\"},\"subject\":\"Warm\\nsubject\",\"bodyText\":\"Retained\\n\\tbody\",\"bodyCached\":true,\"labels\":[\"INBOX\"]}],\"contacts\":[],\"contactsLoaded\":false}";
+    // This regression isolates envelope sanitation, independently of body
+    // migrations. Legacy body receipts have their own live-refresh coverage.
+    const old = try std.mem.concat(a, u8, &.{ snapshot_head, "\"messages\":[{\"id\":\"warm\",\"threadId\":\"thread\",\"from\":{\"address\":\"peer@example.test\",\"name\":\"Decoded\\tname\"},\"subject\":\"Warm\\nsubject\",\"bodyText\":\"Retained\\n\\tbody\",\"bodyCached\":true,\"bodyDecoderRevision\":", try std.fmt.allocPrint(a, "{d}", .{decoder_policy.body_decoder_revision}), ",\"labels\":[\"INBOX\"]}],\"contacts\":[],\"contactsLoaded\":false}" });
     resetHost(&.{});
     try provider.cache.restore(0, old, false);
     for ([_]bool{ true, false }) |cached| {

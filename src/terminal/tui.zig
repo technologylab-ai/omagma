@@ -1855,6 +1855,7 @@ const App = struct {
     reader_message: Field = .{},
     reader_partial: bool = false,
     reader_cached_view: bool = false,
+    reader_body_refresh: bool = false,
     reader_omitted_messages: usize = 0,
     reader_is_thread: bool = false,
     reader_progressive: bool = false,
@@ -5905,7 +5906,7 @@ const App = struct {
     fn fetchReaderCard(self: *App) !void {
         if (!self.reader_progressive or self.reader_card >= self.thread.len) return;
         const message = self.thread[self.reader_card];
-        if (truth(get(message, "bodyCached")) or bodyRefusal(message) != null) return;
+        if ((truth(get(message, "bodyCached")) and !truth(get(message, "bodyNeedsRefresh"))) or bodyRefusal(message) != null) return;
         self.preemptReaderAction();
         if (self.job.future != null) {
             self.say(false, "Body on demand · wait for the current operation, then t to reopen", .{});
@@ -6230,6 +6231,7 @@ const App = struct {
         self.reader_height = 0;
         self.reader_partial = false;
         self.reader_cached_view = false;
+        self.reader_body_refresh = false;
         self.reader_omitted_messages = 0;
         self.reader_is_thread = false;
         self.reader_progressive = false;
@@ -6644,6 +6646,12 @@ const App = struct {
             if (same_reader) for (self.thread, 0..) |previous_message, previous_index| {
                 if (!same(id, text(get(previous_message, "id")))) continue;
                 cards[index] = self.reader_cards[previous_index];
+                // A cache commit still carries the old receipt after a
+                // provider fallback. Keep this owned reader's completed
+                // attempt settled; unopened stale cards keep their hint.
+                if (cached_view and truth(get(previous_message, "bodyCached")) and !truth(get(previous_message, "bodyNeedsRefresh"))) if (message == .object) {
+                    if (message.object.getPtr("bodyNeedsRefresh")) |hint| hint.* = .{ .bool = false };
+                };
                 if (previous_index < self.markup.len) {
                     markup[index].mode = self.markup[previous_index].mode;
                     markup[index].details = self.markup[previous_index].details;
@@ -6656,6 +6664,12 @@ const App = struct {
         // thread card. Preserve that card by identity even when the mailbox's
         // originally selected message occurs later in the replacement.
         const focused = preserved_focus orelse default_focus;
+        // The owned reader DTO settles a completed provider attempt even if
+        // that response kept the old offline body. Persisted receipts retain
+        // their original revision and remain eligible on a later selection.
+        if (!cached_view and messages.len > 0) if (messages[default_focus] == .object) {
+            if (messages[default_focus].object.getPtr("bodyNeedsRefresh")) |hint| hint.* = .{ .bool = false };
+        };
         const changed_window = preserved_focus == null and truth(get(result, "progressive"));
         if ((!same_reader or changed_window) and messages.len > 0) cards[focused] = true;
         try self.reader_account.set(self.allocator, self.account());
@@ -6670,6 +6684,9 @@ const App = struct {
         self.reader_card = focused;
         self.reader_partial = full_thread and truth(get(result, "partial"));
         self.reader_cached_view = cached_view;
+        // A provider attempt may return the retained offline body. Its
+        // compatibility hint must not queue another read of the same target.
+        self.reader_body_refresh = cached_view and messages.len > 0 and truth(get(messages[focused], "bodyNeedsRefresh"));
         self.reader_omitted_messages = if (full_thread) @intCast(@min(@max(integer(get(result, "omittedMessages")), 0), types.Limits.metadata_hard)) else 0;
         self.reader_is_thread = full_thread;
         self.reader_progressive = full_thread and truth(get(result, "progressive"));
@@ -6724,7 +6741,7 @@ const App = struct {
         const selected_value = self.selectedMessage() orelse return false;
         if (self.drafts_list) return false;
         const same_target = self.thread.len > 0 and same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId());
-        if (!refresh_retained and same_target and (!full_thread or (self.reader_is_thread and !self.reader_partial))) return true;
+        if (!refresh_retained and same_target and (!full_thread or (self.reader_is_thread and !self.reader_partial))) return !self.reader_body_refresh;
         if (refresh_retained) self.reader_cache_busy = false;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
@@ -6741,7 +6758,7 @@ const App = struct {
         };
         if (response) |bytes| {
             _ = try self.replaceReaderImpl(full_thread, bytes, true, refresh_retained);
-            return true;
+            return !self.reader_body_refresh;
         }
         if (refresh_retained) return same_target;
         if (same_target) {
@@ -25488,6 +25505,7 @@ const CacheTestClient = struct {
     response_bytes: usize = 0,
     cache_search_calls: usize = 0,
     body: []const u8 = "Local full body",
+    body_needs_refresh: bool = false,
 
     fn provider(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
         const self: *CacheTestClient = @ptrCast(@alignCast(ctx));
@@ -25517,7 +25535,7 @@ const CacheTestClient = struct {
             },
             .escaped_body => {},
         }
-        const response = try std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = .{ .id = "a", .bodyText = self.body, .bodyCached = true } }, .{});
+        const response = try std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = .{ .id = "a", .bodyText = self.body, .bodyCached = true, .bodyNeedsRefresh = self.body_needs_refresh } }, .{});
         self.response_bytes = response.len;
         return response;
     }
@@ -27005,6 +27023,115 @@ test "cache contention retries locally and exhausted busy never becomes a networ
     try std.testing.expect(!app.pending_cached_read);
     try std.testing.expect(!app.reader_cache_busy);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "legacy bodies: cached reader displays old content while requesting one provider attempt" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{ .behavior = .escaped_body, .body_needs_refresh = true };
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}],\"cached\":true,\"cacheReady\":true}}");
+    try std.testing.expect(!try app.cachedPreview(false));
+    try std.testing.expectEqualStrings("Local full body", text(get(app.thread[0], "bodyText")));
+    try std.testing.expect(app.reader_body_refresh);
+    try std.testing.expect(!try app.cachedPreview(false));
+    // The provider may return the same retained body after a transient
+    // failure. That completed attempt settles readiness for this target.
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"a\",\"bodyText\":\"Local full body\",\"bodyCached\":true,\"bodyNeedsRefresh\":true}}", false);
+    try std.testing.expect(!app.reader_body_refresh);
+    try std.testing.expect(try app.cachedPreview(false));
+    try std.testing.expectEqual(@as(usize, 1), client.local_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "legacy bodies: progressive neighbor fallback stays settled after passive cache commits" {
+    const a = std.testing.allocator;
+    const Observer = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        local_calls: usize = 0,
+        const retained = "{\"ok\":true,\"data\":{\"progressive\":true,\"focusMessageId\":\"a\",\"totalMessages\":3,\"partial\":true,\"messages\":[{\"id\":\"a\",\"threadId\":\"thread\",\"bodyText\":\"Current selected body\",\"bodyCached\":true},{\"id\":\"b\",\"threadId\":\"thread\",\"bodyText\":\"Retained stale neighbor\",\"bodyCached\":true,\"bodyNeedsRefresh\":true},{\"id\":\"c\",\"threadId\":\"thread\",\"bodyText\":\"Unopened stale neighbor\",\"bodyCached\":true,\"bodyNeedsRefresh\":true}]}}";
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("personal@example.com", text(get(request, "account")));
+            try std.testing.expectEqualStrings("mail.thread", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("thread", text(get(request, "threadId")));
+            try std.testing.expectEqualStrings("b", text(get(request, "focusMessageId")));
+            try std.testing.expectEqualStrings("a", text(get(request, "windowStartMessageId")));
+            try std.testing.expectEqualStrings("c", text(get(request, "windowEndMessageId")));
+            try std.testing.expect(truth(get(request, "progressive")));
+            try std.testing.expectEqual(@as(usize, 0), self.calls.fetchAdd(1, .release));
+            var response = try std.json.parseFromSliceLeaky(Value, allocator, retained, .{});
+            const data_value = response.object.getPtr("data").?;
+            try data_value.object.put(allocator, "focusMessageId", .{ .string = "b" });
+            return std.json.Stringify.valueAlloc(allocator, response, .{});
+        }
+        fn cached(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("mail.thread", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("personal@example.com", text(get(request, "account")));
+            self.local_calls += 1;
+            // Disk receipts remain stale after the provider fallback. Each
+            // cache commit returns those original hints in fresh owned JSON.
+            var response = try std.json.parseFromSliceLeaky(Value, allocator, retained, .{});
+            try response.object.getPtr("data").?.object.put(allocator, "focusMessageId", get(request, "focusMessageId"));
+            return std.json.Stringify.valueAlloc(allocator, response, .{});
+        }
+    };
+    {
+        var observer: Observer = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var dummy_tty: vaxis.Tty = undefined;
+        var dummy_vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &observer, .callFn = Observer.call, .cachedFn = Observer.cached };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+        app.update_loaded = true;
+        try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"threadId\":\"thread\"}],\"cached\":true,\"cacheReady\":true}}");
+        try app.replaceReader(true, Observer.retained, true);
+        app.focus = .reader;
+        try std.testing.expectEqual(@as(usize, 0), app.reader_card);
+        try std.testing.expect(try app.onReaderKey(.{ .codepoint = '}' }));
+        try std.testing.expectEqual(@as(usize, 1), app.reader_card);
+        try std.testing.expect(app.job.future != null);
+        try std.testing.expectEqualStrings("Retained stale neighbor", text(get(app.thread[1], "bodyText")));
+        // Navigation can change while the owned provider job is finishing.
+        // The receipt must settle b, not whichever card is now focused.
+        app.reader_card = 0;
+        app.job.future.?.await(app.io);
+        if (app.job.failure) |err| return err;
+        try app.finish();
+        try std.testing.expectEqual(@as(usize, 0), app.reader_card);
+        try std.testing.expect(!truth(get(app.thread[1], "bodyNeedsRefresh")));
+        try std.testing.expect(truth(get(app.thread[2], "bodyNeedsRefresh")));
+        try std.testing.expectEqualStrings("Retained stale neighbor", text(get(app.thread[1], "bodyText")));
+        for (0..2) |_| {
+            app.pending_cached_reader_refresh = true;
+            try app.refreshCachedReader();
+            try std.testing.expect(!app.pending_cached_reader_refresh);
+            try std.testing.expect(!truth(get(app.thread[1], "bodyNeedsRefresh")));
+            try std.testing.expect(truth(get(app.thread[2], "bodyNeedsRefresh")));
+            try std.testing.expect(!app.reader_body_refresh);
+            if (app.reader_card == 0) try std.testing.expect(try app.onReaderKey(.{ .codepoint = '}' }));
+            try std.testing.expectEqual(@as(usize, 1), app.reader_card);
+            try std.testing.expect(try app.onReaderKey(.{ .codepoint = '{' }));
+            try std.testing.expect(try app.onReaderKey(.{ .codepoint = '}' }));
+            try std.testing.expect(try app.onReaderKey(.{ .codepoint = 't' }));
+            try std.testing.expect(try app.onReaderKey(.{ .codepoint = 't' }));
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(@as(usize, 1), observer.calls.load(.acquire));
+        }
+        try std.testing.expectEqual(@as(usize, 1), observer.calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 2), observer.local_calls);
+    }
 }
 
 test "cached valid two MiB escaped body is not capped by outgoing request bytes" {

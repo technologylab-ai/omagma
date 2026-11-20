@@ -10,11 +10,19 @@ const scratch = @import("../mail_scratch.zig");
 /// Only message-local syntax/size failures may become partial rows. Identity,
 /// authorization, cancellation, transport failures and allocator exhaustion
 /// always retain their ordinary fatal behavior.
+const message_refusals = [_]anyerror{
+    error.MessageBudgetExceeded, error.ThreadBodyBudgetExceeded, error.BodyTooLarge, error.DecodedMessageTooLarge, error.MessageTooLarge, error.ResponseTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep, error.UnsupportedCharset, error.TooManyMimeParts, error.MimeTooDeep, error.BodySizeMismatch, error.AmbiguousCalendarPart, error.AmbiguousHeader, error.AmbiguousSender, error.AttachmentsTooLarge, error.CapacityExceeded, error.ExternalBodyRequired, error.FilenameTooLarge, error.HeaderInjection, error.HeaderTooLarge, error.HeadersTooLarge, error.IncompleteMultipart, error.InvalidAttachmentFilename, error.InvalidAttachmentId, error.InvalidBase64, error.InvalidBody, error.InvalidCharsetData, error.InvalidDate, error.InvalidEncodedWord, error.InvalidHeaders, error.InvalidLabels, error.InvalidMessageId, error.InvalidMimeBoundary, error.InvalidMimeType, error.InvalidQuotedPrintable, error.InvalidUtf8, error.MissingHeaderBoundary, error.MissingMimeBoundary, error.MissingMimeType, error.ReferencesTooLarge, error.TooManyAttachments, error.TooManyHeaders, error.TooManyReferences, error.UnsupportedTransferEncoding, error.InvalidAddress, error.InvalidRecipients, error.RecipientHeaderTooLarge, error.RecipientTooLarge, error.TooManyIncomingRecipients, error.MalformedMessage, error.InvalidJson, error.MissingField, error.InvalidEncoding, error.UnsupportedEncoding, error.SyntaxError, error.ValueTooLong, error.UnexpectedEndOfInput, error.DuplicateField, error.LengthMismatch,
+};
 pub fn messageRefusal(err: anyerror) bool {
-    return switch (err) {
-        error.MessageBudgetExceeded, error.ThreadBodyBudgetExceeded, error.BodyTooLarge, error.DecodedMessageTooLarge, error.MessageTooLarge, error.ResponseTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep, error.UnsupportedCharset, error.TooManyMimeParts, error.MimeTooDeep, error.BodySizeMismatch, error.AmbiguousCalendarPart, error.AmbiguousHeader, error.AmbiguousSender, error.AttachmentsTooLarge, error.CapacityExceeded, error.ExternalBodyRequired, error.FilenameTooLarge, error.HeaderInjection, error.HeaderTooLarge, error.HeadersTooLarge, error.IncompleteMultipart, error.InvalidAttachmentFilename, error.InvalidAttachmentId, error.InvalidBase64, error.InvalidBody, error.InvalidCharsetData, error.InvalidDate, error.InvalidEncodedWord, error.InvalidHeaders, error.InvalidLabels, error.InvalidMessageId, error.InvalidMimeBoundary, error.InvalidMimeType, error.InvalidQuotedPrintable, error.InvalidUtf8, error.MissingHeaderBoundary, error.MissingMimeBoundary, error.MissingMimeType, error.ReferencesTooLarge, error.TooManyAttachments, error.TooManyHeaders, error.TooManyReferences, error.UnsupportedTransferEncoding, error.InvalidAddress, error.InvalidRecipients, error.RecipientHeaderTooLarge, error.RecipientTooLarge, error.TooManyIncomingRecipients, error.MalformedMessage, error.InvalidJson, error.MissingField, error.InvalidEncoding, error.UnsupportedEncoding, error.SyntaxError, error.ValueTooLong, error.UnexpectedEndOfInput, error.DuplicateField, error.LengthMismatch => true,
-        else => false,
-    };
+    for (message_refusals) |refusal| if (err == refusal) return true;
+    return false;
+}
+
+/// DTO refusal codes use the same finite admission policy as actual decoder
+/// errors. A historical retry table describes a different compatibility policy.
+pub fn messageRefusalCode(code: []const u8) bool {
+    for (message_refusals) |refusal| if (std.mem.eql(u8, code, @errorName(refusal))) return true;
+    return false;
 }
 
 fn identity(value: j.Value) !void {
@@ -180,7 +188,23 @@ pub fn serializedBytes(value: anytype) usize {
     var buffer: [4096]u8 = undefined;
     var counter = std.Io.Writer.Discarding.init(&buffer);
     std.json.Stringify.value(value, .{}, &counter.writer) catch unreachable;
-    return @intCast(counter.fullCount());
+    // Native persistence omits the derived hint, while stale mail response
+    // DTOs include it. Account for its exact wire field without changing index,
+    // body-record or compose-source serialization.
+    const hint_bytes = if (@TypeOf(value) == types.Message) (if (value.bodyNeedsRefresh) ",\"bodyNeedsRefresh\":true".len else 0) else 0;
+    return @as(usize, @intCast(counter.fullCount())) + hint_bytes;
+}
+
+test "legacy bodies: response size includes the exact derived refresh hint" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |stale| {
+        const message: types.Message = .{ .id = "mail", .threadId = "thread", .bodyText = "Readable body", .bodyHtml = "<p>Readable body</p>", .sentDate = "Mon, 17 Nov 2026 12:00:00 +0000", .invitation = "Synthetic calendar source", .fixtureRaw = "Synthetic raw source", .bodyNeedsRefresh = stale };
+        const dto = try @import("mail_response_value.zig").borrowed(a, message);
+        const wire = try std.json.Stringify.valueAlloc(a, dto, .{});
+        try std.testing.expectEqual(wire.len, serializedBytes(message));
+    }
 }
 
 /// A thread's aggregate allowance is separate from the per-message reader.

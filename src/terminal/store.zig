@@ -81,9 +81,7 @@ pub const MigrationCapacity = struct {
     required_disk_bytes: usize,
     disk_limit: usize,
 };
-/// Revision 1 retains named zero-byte files in successful decoded bodies.
-/// This is separate from retrying historical decoder refusals.
-pub const body_decoder_revision: u32 = 1;
+pub const body_decoder_revision = @import("decoder_policy.zig").body_decoder_revision;
 /// Stored in place of a retained row's decode warning when a newer decoder
 /// may read that message cleanly. The next refresh or open re-reads it once
 /// and replaces the row's envelope; the marker never survives that attempt.
@@ -1355,6 +1353,7 @@ pub const Store = struct {
             return;
         };
         var metadata = message;
+        metadata.bodyNeedsRefresh = false;
         if (std.mem.eql(u8, metadata.bodyCacheError, "ThreadBodyBudgetExceeded")) metadata.bodyCacheError = "";
         metadata.bodyText = "";
         metadata.bodyHtml = null;
@@ -1432,6 +1431,9 @@ pub const Store = struct {
     /// remain immutable; a complete FULL read may atomically upgrade legacy
     /// decoding without changing membership, ordering or labels.
     pub fn putBody(s: *Store, message: t.Message) !bool {
+        // Progressive thread responses may borrow retained neighbors. Those
+        // bytes have not passed through the current decoder.
+        if (message.bodyNeedsRefresh) return false;
         if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         var e = s.find(message.id) orelse return false;
         const retry_pending = std.mem.eql(u8, e.message.decodeWarning, decoder_retry_pending);
@@ -1612,7 +1614,9 @@ pub const Store = struct {
             return null;
         }
         if (!expanded and exceedsOrdinaryBody(record.message)) return composeOnly(e.message);
-        return try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
+        var result = try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
+        result.bodyNeedsRefresh = !record.message.metadataPartial and e.bodyDecoderRevision < body_decoder_revision;
+        return result;
     }
     pub fn putOutbox(s: *Store, message: t.Message) !void {
         errdefer if (s.vault != null) {
@@ -2452,11 +2456,17 @@ test "legacy bodies: complete decoder upgrade is atomic and keeps membership and
         var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
         defer store.close();
         try store.put(old, true);
-        store.find(old.id).?.bodyDecoderRevision = 0;
+        store.find(old.id).?.bodyDecoderRevision = 1;
         try store.save();
     }
     var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
     defer store.close();
+    try std.testing.expect(store.bodyNeedsUpgrade(old.id));
+    const stale = (try store.read(old.id)).?;
+    try std.testing.expect(stale.bodyNeedsRefresh);
+    try std.testing.expectEqualStrings(old.bodyText, stale.bodyText);
+    // A progressive thread borrowing an old body cannot bless its bytes.
+    try std.testing.expect(!try store.putBody(stale));
     try std.testing.expect(store.bodyNeedsUpgrade(old.id));
     const original_hash = try a.dupe(u8, store.find(old.id).?.bodyHash);
     var fresh = old;
@@ -2488,10 +2498,18 @@ test "legacy bodies: complete decoder upgrade is atomic and keeps membership and
     var reopened = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
     defer reopened.close();
     const retained = (try reopened.read(old.id)).?;
+    try std.testing.expect(!retained.bodyNeedsRefresh);
+    const saved_body = try reopened.readRecord(a, try reopened.fileName("mail", old.id), mail_record_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, saved_body, "bodyNeedsRefresh") == null);
     try std.testing.expectEqualStrings(old.bodyText, retained.bodyText);
     try std.testing.expectEqualStrings("empty.bin", retained.attachments[0].filename);
     try std.testing.expectEqual(@as(usize, 0), retained.attachments[0].size);
     try std.testing.expect(!reopened.bodyNeedsUpgrade(old.id));
+    // Partial records use revision zero for compose-source recovery, even
+    // after the current decoder. Ordinary selection must not refetch them.
+    try reopened.put(.{ .id = "current-partial", .threadId = "partial-thread", .bodyText = "Readable current partial body", .metadataPartial = true, .decodeWarning = "UnsupportedCharset" }, true);
+    try std.testing.expect(reopened.bodyNeedsUpgrade("current-partial"));
+    try std.testing.expect(!(try reopened.read("current-partial")).?.bodyNeedsRefresh);
 }
 
 test "legacy invitations: fetched thread source upgrades only a complete matching calendar body" {

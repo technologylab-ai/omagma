@@ -636,7 +636,7 @@ const Context = struct {
 };
 
 const document_prefix = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"margin:0;padding:0;background:#ffffff;color:#262626\">";
-const note_prefix = "<div style=\"max-width:680px;margin:0 auto;padding:24px;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Arial,sans-serif;font-size:16px;line-height:1.65;overflow-wrap:anywhere\">";
+const note_prefix = "<div style=\"width:auto;margin:0;padding:24px 0;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Arial,sans-serif;font-size:16px;line-height:1.65;overflow-wrap:anywhere\">";
 const footer_prefix = "<div class=\"omagma-footer\" style=\"margin-top:24px;padding-top:14px;border-top:1px solid #e4e4e7;font-size:12px;line-height:1.5;color:#71717a\"><img src=\"cid:";
 const footer_suffix = "\" width=\"16\" height=\"16\" alt=\"\" style=\"width:16px;height:16px;vertical-align:-3px;border:0;margin-right:5px\">Sent with <a class=\"omagma-footer-link\" href=\"https://technologylab-ai.github.io/omagma/\" style=\"color:#b84a10;text-decoration:underline\">omagma</a> 🌋</div></div>";
 
@@ -760,7 +760,7 @@ fn protectNote(a: std.mem.Allocator, input: []const u8) ![]const u8 {
         var name_end: usize = 1;
         while (name_end < tag.len and std.ascii.isAlphanumeric(tag[name_end])) name_end += 1;
         const name = tag[1..name_end];
-        // The generated root supplies the card's padding. Only a heading that
+        // The generated root supplies the vertical spacing. Only a heading that
         // is its first content block needs its additional top margin removed.
         const leading_heading = !first and first_content and name.len == 2 and name[0] == 'h' and name[1] >= '1' and name[1] <= '6';
         const style_at = std.mem.indexOf(u8, tag, " style=\"");

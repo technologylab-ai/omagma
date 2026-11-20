@@ -178,6 +178,9 @@ pub const Message = struct {
     sentDate: ?[]const u8 = null,
     unread: bool = false,
     bodyCached: bool = false,
+    /// Read-only cache compatibility hint, derived from the body's receipt.
+    /// Native persistence and frozen compose sources never store this hint.
+    bodyNeedsRefresh: bool = false,
     bodyCacheError: []const u8 = "",
     /// A bounded decoder error code accompanies safe partial projections.
     /// Display-only envelope fallbacks never populate reply destinations.
@@ -190,6 +193,19 @@ pub const Message = struct {
     /// Independent wire oracle for synthetic fixture sends only. Production
     /// messages never populate or persist raw MIME through this field.
     fixtureRaw: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: @This(), out: *std.json.Stringify) std.json.Stringify.Error!void {
+        try out.beginObject();
+        inline for (@typeInfo(@This()).@"struct".field_names) |name| field: {
+            if (comptime std.mem.eql(u8, name, "bodyNeedsRefresh")) continue;
+            if (@typeInfo(@TypeOf(@field(self, name))) == .optional) {
+                if (@field(self, name) == null and !out.options.emit_null_optional_fields) break :field;
+            }
+            try out.objectField(name);
+            try out.write(@field(self, name));
+        }
+        try out.endObject();
+    }
 };
 /// Frozen source for an inline formatted reply/forward. bodyText in the draft
 /// remains the separately editable personal note.

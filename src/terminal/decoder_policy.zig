@@ -77,6 +77,41 @@ const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
 };
 pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
 
+/// Accepted body bytes have a separate compatibility history from refusals.
+/// Revision 1 retained empty files; revision 2 recognizes Gmail's already
+/// UTF-8 inline text even when its MIME charset still names a legacy encoding.
+pub const body_decoder_revision: u32 = 2;
+
+/// Keep a usable older body when a read-only refresh cannot reach or decode
+/// its replacement. Identity, authorization, cancellation and allocation
+/// failures must remain visible to the caller.
+pub fn retainedBodyFallback(err: anyerror) bool {
+    if (knownDecoderRefusal(@errorName(err))) return true;
+    return switch (err) {
+        error.NetworkFailure,
+        error.TransientFailure,
+        error.NetworkUnreachable,
+        error.HostUnreachable,
+        error.NetworkDown,
+        error.UnknownHostName,
+        error.NameServerFailure,
+        error.NoAddressReturned,
+        error.ConnectionRefused,
+        error.ConnectionTimedOut,
+        error.ConnectionResetByPeer,
+        error.SocketUnconnected,
+        error.HttpConnectionClosing,
+        error.HttpRequestTruncated,
+        error.HttpChunkTruncated,
+        error.Timeout,
+        error.DeadlineExceeded,
+        error.RateLimited,
+        error.LiveProviderNotReady,
+        => true,
+        else => false,
+    };
+}
+
 /// Refusals with a recorded decoder compatibility history. Browser snapshots
 /// predate revisions but must never turn auth, storage or unknown errors into
 /// a fetch merely because their recorded revision is absent.
@@ -96,7 +131,9 @@ pub fn retriedByNewerDecoder(code: []const u8, recorded: u32) bool {
     return false;
 }
 
-test "decoder policy: browser legacy eligibility excludes auth storage and unknown failures" {
+test "decoder policy: legacy eligibility permits native transport outages but excludes auth storage and unknown failures" {
+    for ([_]anyerror{ error.NetworkFailure, error.Timeout, error.TransientFailure, error.UnsupportedCharset, error.UnknownHostName, error.NameServerFailure, error.NoAddressReturned, error.HostUnreachable, error.NetworkDown, error.SocketUnconnected, error.HttpConnectionClosing, error.HttpRequestTruncated, error.HttpChunkTruncated }) |err| try std.testing.expect(retainedBodyFallback(err));
+    for ([_]anyerror{ error.PermissionDenied, error.NotConnected, error.WrongAccount, error.MessageIdentityMismatch, error.CacheIdentityMismatch, error.OutOfMemory, error.Canceled, error.ReadFailed, error.WriteFailed, error.CertificateBundleLoadFailure, error.AccessDenied, error.Unexpected }) |err| try std.testing.expect(!retainedBodyFallback(err));
     for ([_][]const u8{ "UnsupportedCharset", "HeaderTooLarge", "MimeTooDeep", "BodySizeMismatch", "TooManyAttachments", "TooManyMimeParts", "InvalidHeaders" }) |code| {
         try std.testing.expect(knownDecoderRefusal(code));
         try std.testing.expect(retriedByNewerDecoder(code, 0));

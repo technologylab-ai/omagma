@@ -139,6 +139,25 @@ pub fn supported(charset: []const u8) bool {
     };
 }
 
+/// Evidence for Gmail's UTF-8-transcoded inline text: every code point must
+/// map back to exactly one byte in the declared legacy charset, and that
+/// original byte count must match body.size. This does not repair strings or
+/// guess an encoding for raw MIME, unknown charsets or multi-byte charsets.
+pub fn matchesSingleByteSize(utf8: []const u8, charset: []const u8, expected: usize) bool {
+    const resolved = resolve(charset);
+    if (resolved.family != .single or expected == 0 or utf8.len <= expected) return false;
+    const view = std.unicode.Utf8View.init(utf8) catch return false;
+    var iter = view.iterator();
+    var count: usize = 0;
+    while (iter.nextCodepoint()) |cp| {
+        if (cp == 0xfffd or cp > 0xffff) return false;
+        if (cp >= 128 and std.mem.indexOfScalar(u16, resolved.table.?, @intCast(cp)) == null) return false;
+        count += 1;
+        if (count > expected) return false;
+    }
+    return count == expected;
+}
+
 const Writer = struct {
     allocator: std.mem.Allocator,
     out: std.ArrayList(u8) = .empty,
@@ -290,4 +309,23 @@ test "charsets: output limit truncates on a code-point boundary" {
     try std.testing.expect(result.truncated);
     try std.testing.expectEqualStrings("aü", clip("aüb", 3));
     try std.testing.expectEqualStrings("a", clip("aüb", 2));
+}
+
+test "Gmail charset: UTF-8 transcode evidence matches only an exact legacy byte count" {
+    try std.testing.expect(matchesSingleByteSize("fällt Grüße Öffnung", "ISO_8859-1", 19));
+    try std.testing.expect(matchesSingleByteSize("€ „Text“ –", "cp1252", 10));
+    try std.testing.expect(matchesSingleByteSize("Привет", "windows-1251", 6));
+    // A transcoded literal stays literal, rather than being repaired again.
+    try std.testing.expect(matchesSingleByteSize("Ã¤", "latin1", 2));
+    for ([_]usize{ 0, 1, 3, 4 }) |size| try std.testing.expect(!matchesSingleByteSize("Ã¤", "latin1", size));
+    try std.testing.expect(!matchesSingleByteSize("\xc3\xa4", "latin1", 2));
+    try std.testing.expect(!matchesSingleByteSize("\xe4", "latin1", 1));
+    try std.testing.expect(!matchesSingleByteSize("ä", "utf-8", 1));
+    try std.testing.expect(!matchesSingleByteSize("ä", "us-ascii", 1));
+    try std.testing.expect(!matchesSingleByteSize("ä", "unknown-8bit", 1));
+    try std.testing.expect(!matchesSingleByteSize("ä", "utf-16", 1));
+    try std.testing.expect(!matchesSingleByteSize("あ", "shift_jis", 1));
+    try std.testing.expect(!matchesSingleByteSize("€", "latin1", 1));
+    try std.testing.expect(!matchesSingleByteSize("�", "cp1252", 1));
+    try std.testing.expect(!matchesSingleByteSize("ASCII", "latin1", 5));
 }

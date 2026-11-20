@@ -70,6 +70,16 @@ function canonical(node, excluded) {
   return [node.namespaceURI,node.localName,attrs(node),raw ? node.textContent :
     Array.from(children).map(n => canonical(n,excluded)).filter(n => n !== null)];
 }
+function fillsBody(e) {
+  if (!e) return false;
+  const doc = e.ownerDocument;
+  const body = doc.body.getBoundingClientRect();
+  const css = doc.defaultView.getComputedStyle(doc.body);
+  const left = body.left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft);
+  const right = body.right - parseFloat(css.borderRightWidth) - parseFloat(css.paddingRight);
+  const box = e.getBoundingClientRect();
+  return Math.abs(box.left - left) <= 1 && Math.abs(box.right - right) <= 1;
+}
 function inspect(frame, assembled) {
   const doc = frame.contentDocument;
   if (!doc || !doc.body || !doc.head) throw new Error('frame document unavailable');
@@ -84,7 +94,7 @@ function inspect(frame, assembled) {
     const first = Array.from(doc.body.childNodes).find(n => n.nodeType === Node.ELEMENT_NODE ||
       (n.nodeType === Node.TEXT_NODE && cleanText(n.nodeValue)));
     const heading = root && Array.from(root.querySelectorAll('h1')).find(h => h.textContent === noteMarker);
-    note = {uniqueLink:matches.length === 1, rootInBody:!!root, firstInBody:root === first,
+    note = {fluidNote:fillsBody(root), fluidHeader:fillsBody(header), uniqueLink:matches.length === 1, rootInBody:!!root, firstInBody:root === first,
       hasMarker:!!heading, headingColor:heading ? style(heading).color : null,
       linkColor:link ? style(link).color : null, rootStyle:root ? style(root) : null,
       headerAdjacent:!!header && header.classList.contains('omagma-original-header')};
@@ -119,6 +129,15 @@ function load(url) {
   });
 }
 (async () => {
+  const standalone = await load('/fixture/new-message.html');
+  const authored = standalone.contentDocument.body.firstElementChild;
+  for (const width of [360, 960]) {
+    standalone.style.width = width + 'px';
+    const css = style(authored);
+    if (!fillsBody(authored) || css['padding-left'] !== '0px' || css['padding-right'] !== '0px')
+      throw new Error('new message did not fill the reading pane at ' + width + 'px');
+  }
+  standalone.remove();
   for (const input of inputs) {
     const result = {id:input.id};
     let source, output;
@@ -207,6 +226,7 @@ def assemble(binary, directory, manifest, cases):
     resources = {value["id"]: value for value in manifest.get("resources", [])}
     results = []
     with Client(binary, directory) as client:
+        standalone = client.request("draft.preview", draft={"bodyText": NOTE, "bodyFormat": "markdown"})["bodyHtml"]
         for case in cases:
             result = {"id": case["id"], "expectedOutcome": case["expectedOutcome"],
                       "sourceSha256": case["sourceSha256"], "errors": []}
@@ -256,12 +276,12 @@ def assemble(binary, directory, manifest, cases):
             results.append(result)
         require(client.request("cache.stats")["fixtureSends"] == 0, "compatibility test submitted mail")
         require(client.request("operation.list")["operations"] == [], "compatibility test created a submission operation")
-    return results
+    return results, standalone
 
 
-def browser_oracle(browser, directory, cases, assembled):
+def browser_oracle(browser, directory, cases, assembled, standalone):
     by_id = {item["id"]: item for item in assembled}
-    routes = {}
+    routes = {"/fixture/new-message.html": standalone.encode("utf-8")}
     inputs = []
     for index, case in enumerate(cases):
         source = f"/fixture/{index}/source.html"
@@ -369,9 +389,11 @@ def compare_case(case, assembled, browser):
     if output["counts"] != {"html": 1, "head": 1, "body": 1}:
         errors.append("output does not have one coherent browser document envelope")
     note = output["note"]
-    for key in ("uniqueLink", "rootInBody", "firstInBody", "hasMarker", "headerAdjacent"):
+    for key in ("uniqueLink", "rootInBody", "firstInBody", "hasMarker", "headerAdjacent", "fluidNote", "fluidHeader"):
         if not note[key]:
             errors.append("generated note boundary failed: " + key)
+    if note["rootStyle"] and any(note["rootStyle"][side] != "0px" for side in ("padding-left", "padding-right")):
+        errors.append("generated note added horizontal padding")
     if note["headingColor"] != "rgb(184, 74, 16)" or note["linkColor"] != "rgb(184, 74, 16)":
         errors.append("original CSS changed branded note heading/link colors")
     if source["receivedScriptExecuted"] or output["receivedScriptExecuted"]:
@@ -408,8 +430,8 @@ def main():
         directory = Path(temporary)
         assembled = []
         try:
-            assembled = assemble(binary, directory, manifest, cases)
-            observed = browser_oracle(browser, directory, cases, assembled)
+            assembled, standalone = assemble(binary, directory, manifest, cases)
+            observed = browser_oracle(browser, directory, cases, assembled, standalone)
         except Exception as error:
             if args.receipt:
                 args.receipt.parent.mkdir(parents=True, exist_ok=True)

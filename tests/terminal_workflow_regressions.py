@@ -27,6 +27,7 @@ SUITES = {
     "terminal_formatted_tui": (),
     "terminal_message_isolation": (),
     "terminal_subject_newlines": (),
+    "terminal_gmail_charset": (),
     "terminal_emoji_repaint": (),
     "terminal_calendar": (),
     "terminal_calendar_tui": (),

@@ -2996,12 +2996,19 @@ pub const Session = struct {
             const message = &messages[index];
             var scope: std.heap.ArenaAllocator = .init(s.allocator);
             defer scope.deinit();
-            if (!message.bodyCached and message.bodyCacheError.len == 0) {
+            const decoder_refusal = gmail_decode.messageRefusalCode(message.bodyCacheError);
+            if ((!message.bodyCached and message.bodyCacheError.len == 0) or decoder_refusal) {
                 if ((try store.readWithAllocator(scope.allocator(), message.id))) |cached| {
-                    var retained = cached;
-                    copyMembership(&retained, message.*);
-                    retained.bodyCached = retained.bodyCacheError.len == 0;
-                    message.* = retained;
+                    if (!std.mem.eql(u8, cached.threadId, message.threadId)) return error.MessageIdentityMismatch;
+                    // An automatic decoder upgrade must not hide the usable
+                    // old body when its replacement is refused. Keep that
+                    // body's stale receipt so a later open can try again.
+                    if (!decoder_refusal or cached.bodyNeedsRefresh) {
+                        var retained = cached;
+                        copyMembership(&retained, message.*);
+                        retained.bodyCached = retained.bodyCacheError.len == 0;
+                        message.* = retained;
+                    }
                 }
             }
             message.* = try gmail_decode.retainThreadMessage(message.*, a, &remaining);
@@ -3009,7 +3016,7 @@ pub const Session = struct {
             if (full) try store.rememberAttachments(message.*);
             if (store.state.generation == expected) try store.put(message.*, full) else if (full) try retainReadBody(store, message.*);
             response.deferredMessages += @intFromBool(!message.bodyCached and message.bodyCacheError.len == 0);
-            response.partial = response.partial or message.metadataPartial or message.bodyCacheError.len > 0;
+            response.partial = response.partial or message.metadataPartial or message.bodyCacheError.len > 0 or message.bodyNeedsRefresh;
         }
         response.partial = response.partial or response.deferredMessages > 0;
         response.messages = messages;
@@ -3438,7 +3445,7 @@ pub const Session = struct {
                 copyMembership(&m, entry.message);
                 // A row waiting for the improved decoder is re-read once on
                 // open; the retained copy remains the offline answer.
-                if (!s.options.fixtures and std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending)) {
+                if ((std.mem.eql(u8, j.text(req, "cmd"), "mail.read") and m.bodyNeedsRefresh) or (!s.options.fixtures and std.mem.eql(u8, entry.message.decodeWarning, storage.decoder_retry_pending))) {
                     retry_fallback = m;
                     break :retained;
                 }
@@ -3452,12 +3459,26 @@ pub const Session = struct {
             store.release();
             const fresh = s.remote(a, account, "mail.read", req) catch |err| {
                 const fallback = retry_fallback orelse return err;
-                if (err == error.OutOfMemory or err == error.Canceled) return err;
+                if (!@import("decoder_policy.zig").retainedBodyFallback(err) and !messageRefusal(err)) return err;
+                try s.reopenBody(a, store);
+                if (store.find(id)) |entry| if (!std.mem.eql(u8, fallback.threadId, entry.message.threadId)) return error.MessageIdentityMismatch;
+                return fallback;
+            };
+            if (!std.mem.eql(u8, j.text(fresh, "id"), id)) return error.MessageIdentityMismatch;
+            if (retry_fallback) |fallback| if (!std.mem.eql(u8, j.text(fresh, "threadId"), fallback.threadId)) return error.MessageIdentityMismatch;
+            var m = j.decode(t.Message, a, fresh) catch |err| {
+                const fallback = retry_fallback orelse return err;
+                if (!messageRefusal(err)) return err;
                 try s.reopenBody(a, store);
                 return fallback;
             };
-            var m = try j.decode(t.Message, a, fresh);
             try s.reopenBody(a, store);
+            if (!std.mem.eql(u8, m.id, id)) return error.MessageIdentityMismatch;
+            if (retry_fallback) |fallback| {
+                if (!std.mem.eql(u8, m.threadId, fallback.threadId)) return error.MessageIdentityMismatch;
+                if (m.bodyCacheError.len != 0) return fallback;
+                if (store.find(id)) |entry| copyMembership(&m, entry.message);
+            }
             try store.rememberAttachments(m);
             if (!allow_cached) _ = try store.upgradeInvitation(m);
             if (store.state.generation == expected) try store.put(m, true) else {
@@ -3476,6 +3497,10 @@ pub const Session = struct {
             s.reportProgress(.bodies, 0, 1);
             try s.fixtureProgressGate(a, source, .bodies, 0);
             var m = if (@import("send_memory.zig").command(j.text(req, "cmd"))) try gmail_decode.normalizeForCompose(v, a, j.get(source, "externalBodies")) else try s.normalize(a, source, v);
+            if (retry_fallback) |fallback| {
+                if (!std.mem.eql(u8, m.threadId, fallback.threadId)) return error.MessageIdentityMismatch;
+                if (m.bodyCacheError.len != 0) return fallback;
+            }
             if (store.find(id)) |existing| {
                 copyMembership(&m, existing.message);
             }
@@ -4913,8 +4938,15 @@ test "cache search has K account query mode cursors and metadata-only predicates
     try std.testing.expect(!cacheMatches(store.state.entries[0].message, "-in:inbox -in:trash"));
 }
 test "message refusal classification keeps integrity bounds and excludes systemic failures" {
-    for ([_]anyerror{ error.BodySizeMismatch, error.TooManyHeaders, error.InvalidEncodedWord, error.MalformedMessage, error.BodyTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep }) |err| try std.testing.expect(Session.messageRefusal(err));
-    for ([_]anyerror{ error.OutOfMemory, error.Canceled, error.Timeout, error.InvalidGrant, error.PermissionDenied, error.TokenRefreshFailed, error.RateLimited, error.CacheBusy, error.CacheIdentityMismatch }) |err| try std.testing.expect(!Session.messageRefusal(err));
+    for ([_]anyerror{ error.BodySizeMismatch, error.TooManyHeaders, error.InvalidEncodedWord, error.MalformedMessage, error.BodyTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep }) |err| {
+        try std.testing.expect(Session.messageRefusal(err));
+        try std.testing.expect(gmail_decode.messageRefusalCode(@errorName(err)));
+    }
+    for ([_]anyerror{ error.OutOfMemory, error.Canceled, error.Timeout, error.InvalidGrant, error.PermissionDenied, error.TokenRefreshFailed, error.RateLimited, error.CacheBusy, error.CacheIdentityMismatch, error.MessageIdentityMismatch }) |err| {
+        try std.testing.expect(!Session.messageRefusal(err));
+        try std.testing.expect(!gmail_decode.messageRefusalCode(@errorName(err)));
+    }
+    try std.testing.expect(!gmail_decode.messageRefusalCode("UnknownFutureRefusal"));
 }
 
 test "reply boundaries: fresh native compose reads retry only cached reader size refusals" {
@@ -5447,6 +5479,101 @@ test "UX backend: formatted forward preserves 32 CID resources and an ordinary P
     const related: [t.Limits.related_resources + 1]t.Attachment = @splat(draft.original.?.resources[0]);
     too_many.original.?.resources = &related;
     try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
+}
+
+test "legacy bodies: progressive decoder refusal preserves the old readable body and stale receipt" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/progressive-fallback", .{tmp.sub_path});
+    const account = "personal@example.com";
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    var store = try storage.Store.open(std.testing.io, a, root, account, options);
+    defer store.close();
+    try store.put(.{ .id = "neighbor", .threadId = "thread", .subject = "Retained envelope", .bodyText = "Retained readable body", .bodyHtml = "<p>Retained readable body</p>", .labels = &.{"INBOX"}, .attachments = &.{.{ .id = "file", .filename = "empty.txt", .size = 0 }} }, true);
+    store.find("neighbor").?.bodyDecoderRevision = 1;
+    try store.save();
+    const original_hash = try a.dupe(u8, store.find("neighbor").?.bodyHash);
+    const windows = @import("thread_window.zig");
+    var refused: t.Message = .{ .id = "neighbor", .threadId = "thread", .bodyCacheError = "UnsupportedCharset", .decodeWarning = "UnsupportedCharset", .metadataPartial = true, .labels = &.{"INBOX"} };
+    for ([_][]const u8{ "UnsupportedCharset", "MessageBudgetExceeded" }) |code| {
+        refused.bodyCacheError = code;
+        refused.decodeWarning = code;
+        const response = try session.retainProgressiveThread(a, &store, try j.value(a, windows.response(&.{refused}, 1, .{ .start = 0, .end = 1, .focus = 0 })), store.state.generation);
+        const retained = (try array(response, "messages"))[0];
+        try std.testing.expectEqualStrings("Retained readable body", j.text(retained, "bodyText"));
+        try std.testing.expectEqualStrings("<p>Retained readable body</p>", j.text(retained, "bodyHtml"));
+        try std.testing.expectEqualStrings("", j.text(retained, "bodyCacheError"));
+        try std.testing.expect(try j.boolean(retained, "bodyCached", false));
+        try std.testing.expect(try j.boolean(retained, "bodyNeedsRefresh", false));
+        try std.testing.expect(try j.boolean(response, "partial", false));
+        try std.testing.expectEqualStrings("empty.txt", j.text((try array(retained, "attachments"))[0], "filename"));
+        try std.testing.expectEqualStrings(original_hash, store.find("neighbor").?.bodyHash);
+        try std.testing.expectEqual(@as(u32, 1), store.find("neighbor").?.bodyDecoderRevision);
+        try std.testing.expect(store.bodyNeedsUpgrade("neighbor"));
+    }
+    refused.threadId = "other-thread";
+    try std.testing.expectError(error.MessageIdentityMismatch, session.retainProgressiveThread(a, &store, try j.value(a, windows.response(&.{refused}, 1, .{ .start = 0, .end = 1, .focus = 0 })), store.state.generation));
+    try std.testing.expectEqualStrings(original_hash, store.find("neighbor").?.bodyHash);
+}
+
+test "legacy bodies: ordinary selection refreshes revision one once while cached reads stay offline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const root = try std.fmt.allocPrint(a, "{s}/cache", .{fixture_root});
+    try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+    const account = "personal@example.com";
+    const raw =
+        \\{"account":"personal@example.com","messages":[{"id":"legacy-selection","threadId":"thread","internalDate":"9000000","labelIds":["SENT"],"payload":{"mimeType":"text/plain","headers":[{"name":"From","value":"peer@example.test"},{"name":"To","value":"personal@example.com"},{"name":"Subject","value":"Retained identity"}],"body":{"size":2,"data":"SGk"}}}]}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = raw });
+    const options: t.Options = .{ .fixtures = true, .fixture_root = fixture_root, .cache_dir = root };
+    {
+        var old = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer old.close();
+        try old.put(.{ .id = "legacy-selection", .threadId = "thread", .bodyText = "Old decoded body", .labels = &.{"INBOX"}, .unread = true }, true);
+        old.find("legacy-selection").?.bodyDecoderRevision = 1;
+        try old.save();
+    }
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const request = try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "legacy-selection" });
+    const cached = try session.cachedDispatch(a, account, request);
+    try std.testing.expectEqualStrings("Old decoded body", j.text(cached, "bodyText"));
+    try std.testing.expect(try j.boolean(cached, "bodyNeedsRefresh", false));
+    const cached_thread = try session.cachedDispatch(a, account, try j.value(a, .{ .cmd = "mail.thread", .account = account, .threadId = "thread" }));
+    try std.testing.expect(try j.boolean((try array(cached_thread, "messages"))[0], "bodyNeedsRefresh", false));
+    const fresh = try session.dispatch(a, request);
+    try std.testing.expectEqualStrings("Hi", j.text(fresh, "bodyText"));
+    try std.testing.expect(!try j.boolean(fresh, "bodyNeedsRefresh", false));
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = "{\"account\":\"personal@example.com\",\"messages\":[]}" });
+    try std.testing.expectEqualStrings("Hi", j.text(try session.dispatch(a, request), "bodyText"));
+    var stored = try storage.Store.open(std.testing.io, a, root, account, options);
+    defer stored.close();
+    try std.testing.expect(!stored.bodyNeedsUpgrade("legacy-selection"));
+    try std.testing.expectEqual(@as(u64, 1), stored.state.fixtureCalls);
+    try std.testing.expectEqualStrings("INBOX", stored.find("legacy-selection").?.message.labels[0]);
+    try std.testing.expect(stored.find("legacy-selection").?.message.unread);
 }
 
 test "legacy bodies: plain forward refreshes an old empty-file omission once and retains it after restart" {

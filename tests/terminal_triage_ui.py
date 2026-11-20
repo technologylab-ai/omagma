@@ -26,7 +26,7 @@ def check(binary, directory):
                              environment={"COLORTERM": "truecolor", "NO_COLOR": None})
     try:
         terminal.until(lambda: terminal.screen.mouse_tracking_mode == 1002)
-        terminal.until(lambda: 'Fixture account <personal@example.com>' in terminal.text() and terminal.ready())
+        terminal.until(lambda: 'Synthetic personal@example.com message 096.' in terminal.text() and terminal.ready())
         terminal.until(lambda: terminal.screen.locate('Projects') is not None)
         with Client(binary, directory) as client:
             before = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}

@@ -13,7 +13,10 @@ pub fn borrowed(a: std.mem.Allocator, value: anytype) !Value {
         .@"struct" => |info| blk: {
             if (info.is_tuple) @compileError("Mail response tuples need an explicit representation");
             var out = j.object(a);
-            inline for (info.field_names) |name| {
+            inline for (info.field_names) |name| member: {
+                if (comptime std.mem.eql(u8, name, "bodyNeedsRefresh")) {
+                    if (!@field(value, name)) break :member;
+                }
                 const field = try borrowed(a, @field(value, name));
                 // Match j.value's emit_null_optional_fields = false.
                 if (field != .null) try out.object.put(a, name, field);

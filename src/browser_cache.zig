@@ -33,6 +33,7 @@ const Message = struct {
     sentDate: ?[]const u8 = null,
     unread: bool = false,
     bodyCached: bool = false,
+    bodyDecoderRevision: u32 = 0,
     bodyCacheError: []const u8 = "",
     decodeWarning: []const u8 = "",
     metadataPartial: bool = false,
@@ -257,7 +258,7 @@ pub const Store = struct {
         for (entry.messages, messages) |m, *dest| {
             const files = try a.alloc(Attachment, m.attachments.len);
             for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
-            dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files };
+            dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyDecoderRevision = if (m.bodyCached and !m.bodyNeedsRefresh) decoder_policy.body_decoder_revision else 0, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files };
         }
         const contact_values = try a.alloc(Contact, entry.contacts.len);
         for (entry.contacts, contact_values) |c, *dest| dest.* = .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails, .readWarnings = c.readWarnings };
@@ -366,6 +367,7 @@ pub const Store = struct {
                 parsed.bodySource = old.bodySource;
                 parsed.bodyHtmlAmbiguous = old.bodyHtmlAmbiguous;
                 parsed.bodyCached = old.bodyCached;
+                parsed.bodyNeedsRefresh = old.bodyNeedsRefresh;
                 parsed.bodyCacheError = old.bodyCacheError;
                 // A complete later metadata response clears the list-wide
                 // allowance warning, while final body refusals stay visible.
@@ -552,6 +554,7 @@ pub const Store = struct {
             const files = try a.alloc(types.Attachment, m.attachments.len);
             for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
             dest.* = try copyMessage(a, .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files });
+            dest.bodyNeedsRefresh = m.bodyCached and m.bodyCacheError.len == 0 and m.bodyDecoderRevision < decoder_policy.body_decoder_revision;
             // Restore only changes retry eligibility; it never fetches mail.
             // Keep the prior display and membership until a successful read.
             if (doc.decoderRevision < decoder_policy.decoder_revision and decoder_policy.knownDecoderRefusal(dest.bodyCacheError) and decoder_policy.retriedByNewerDecoder(dest.bodyCacheError, doc.decoderRevision)) {

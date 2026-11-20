@@ -29,6 +29,39 @@ const fixture_contacts =
 ;
 const fixture = header ++ "\"messages\":" ++ fixture_messages ++ ",\"contacts\":" ++ fixture_contacts ++ ",\"contactsLoaded\":true}";
 
+test "legacy bodies: browser snapshots retain old bytes and refresh eligibility until a fresh read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.restore(0, fixture, false);
+    const old = (try store.read(0, "mail-inbox")).?;
+    try std.testing.expect(old.bodyNeedsRefresh);
+    try std.testing.expectEqualStrings("The violet lantern arrives.\nSecond literal line.", old.bodyText);
+    const metadata = [_]j.Value{try j.value(a, types.Message{ .id = old.id, .threadId = old.threadId, .subject = "Fresh metadata", .labels = &.{"INBOX"} })};
+    try store.replaceList(0, &metadata, 1000);
+    try std.testing.expect((try store.read(0, "mail-inbox")).?.bodyNeedsRefresh);
+    const persisted = try snapshot(a, &store, 0);
+    const doc = try parse(a, persisted);
+    const row = j.get(doc, "messages").?.array.items[0];
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(row, "bodyDecoderRevision", 999));
+    try store.restore(0, persisted, false);
+    try std.testing.expect((try store.read(0, "mail-inbox")).?.bodyNeedsRefresh);
+    var fresh = (try store.read(0, "mail-inbox")).?;
+    fresh.bodyText = "Fresh decoded body";
+    fresh.bodyNeedsRefresh = false;
+    try store.saveRead(0, fresh);
+    const upgraded = try snapshot(a, &store, 0);
+    try store.restore(0, upgraded, false);
+    const current = (try store.read(0, "mail-inbox")).?;
+    try std.testing.expect(!current.bodyNeedsRefresh);
+    try std.testing.expectEqualStrings("Fresh decoded body", current.bodyText);
+    try std.testing.expectEqualStrings("report.pdf", current.attachments[0].filename);
+    try std.testing.expectEqualStrings("INBOX", current.labels[0]);
+}
+
 fn parse(a: std.mem.Allocator, bytes: []const u8) !j.Value {
     return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" });
 }

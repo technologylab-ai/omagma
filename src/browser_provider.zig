@@ -12,6 +12,7 @@ const draft_storage = @import("browser_drafts.zig");
 const conversation = @import("terminal/conversation_draft.zig");
 const conversation_source = @import("terminal/conversation_source.zig");
 const gmail_decode = @import("terminal/gmail_decode.zig");
+const decoder_policy = @import("terminal/decoder_policy.zig");
 const mail_value = @import("terminal/mail_response_value.zig");
 const bounded = @import("bounded.zig");
 const Allocator = std.mem.Allocator;
@@ -791,9 +792,17 @@ pub const Provider = struct {
         return left.receivedAt < right.receivedAt or (left.receivedAt == right.receivedAt and std.mem.lessThan(u8, left.id, right.id));
     }
     fn read(self: *Provider, a: Allocator, index: usize, id: []const u8, cached: bool) !t.Message {
-        if (try self.cache.read(index, id)) |message| return message;
+        const retained = try self.cache.read(index, id);
+        if (retained) |message| if (cached or !message.bodyNeedsRefresh or self.live_count == 0) return message;
         if (cached or self.live_count == 0) return error.CacheMiss;
-        const message = try self.live_sessions[index].read(a, id);
+        const message = self.live_sessions[index].read(a, id) catch |err| {
+            if (retained) |message| if (decoder_policy.retainedBodyFallback(err) or gmail_decode.messageRefusal(err)) return message;
+            return err;
+        };
+        if (retained) |old| {
+            if (!std.mem.eql(u8, old.threadId, message.threadId)) return error.MessageIdentityMismatch;
+            if (message.bodyCacheError.len != 0) return old;
+        }
         return self.cacheRead(index, message);
     }
     fn directMailResult(self: *Provider, a: Allocator, index: usize, cmd: []const u8, id: []const u8) !Value {

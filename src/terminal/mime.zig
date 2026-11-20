@@ -63,8 +63,9 @@ pub fn parse(raw: []const u8, allocator: std.mem.Allocator) !ParsedMessage {
     return result;
 }
 
-/// Gmail FULL payload data has already been MIME-transfer decoded by Gmail;
-/// decode only the API's base64url envelope before charset conversion.
+/// Gmail FULL data is already MIME-transfer decoded. Some inline legacy text
+/// is also transcoded to UTF-8 while its headers and original size stay intact;
+/// recognize that narrow shape before applying the declared charset again.
 pub fn parseGmail(message: std.json.Value, allocator: std.mem.Allocator) !ParsedMessage {
     return try parseGmailExternal(message, allocator, null);
 }
@@ -721,7 +722,7 @@ const Context = struct {
         if (size > self.body_limit or size > self.decoded_limit - self.decoded) return error.DecodedMessageTooLarge;
         self.decoded += size;
     }
-    fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8, charset_alternative: bool) !void {
+    fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8, charset_alternative: bool, text_charset: ?[]const u8) !void {
         const attached = try isAttached(headers, filename);
         const decoded_filename = try displayHeader(filename, self.allocator);
         const calendar_type = std.ascii.eqlIgnoreCase(mime_type, "text/calendar");
@@ -769,7 +770,7 @@ const Context = struct {
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
-            const charset = parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8";
+            const charset = text_charset orelse parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8";
             const is_plain = std.ascii.eqlIgnoreCase(mime_type, "text/plain");
             const text = convertCharsetBounded(data, charset, self.allocator, self.body_limit) catch |err| {
                 if (self.lenient and (err == error.UnsupportedCharset or err == error.InvalidUtf8 or err == error.InvalidCharsetData or err == error.BodyTooLarge)) {
@@ -852,7 +853,7 @@ const Context = struct {
         const decoded = try decodeTransfer(entity.body, try header(entity.headers, "Content-Transfer-Encoding"), self.allocator);
         try self.accountBytes(decoded.len);
         const filename = (try filenameParameter(try header(entity.headers, "Content-Disposition"), "filename", self.allocator)) orelse (try filenameParameter(content_type, "name", self.allocator)) orelse "";
-        try self.add(entity.headers, if (mime_type.len == 0) "text/plain" else mime_type, filename, decoded, charset_alternative);
+        try self.add(entity.headers, if (mime_type.len == 0) "text/plain" else mime_type, filename, decoded, charset_alternative, null);
     }
     fn gmailPart(self: *Context, part: std.json.Value, depth: usize, charset_alternative: bool) anyerror!void {
         self.enter(depth) catch |err| {
@@ -987,7 +988,15 @@ const Context = struct {
             return;
         };
         const old_count = self.attachments.items.len;
-        try self.add(headers, mime_type, filename, decoded, charset_alternative);
+        // Gmail may expose UTF-8 bytes for inline legacy text, retaining its
+        // original charset and pre-transcode body.size. Valid UTF-8 alone is
+        // insufficient: literal legacy byte sequences can resemble it. Require
+        // an exact inverse single-byte size match, after all actual-byte caps.
+        // Attachments, calendars, external bodies and raw MIME stay untouched.
+        const declared_charset = parameter(try header(headers, "Content-Type"), "charset") orelse "";
+        const text_charset: ?[]const u8 = if (text_body and child_count == 0 and external_id == null and declared > 0 and
+            charsets.matchesSingleByteSize(decoded, declared_charset, @intCast(declared))) "utf-8" else null;
+        try self.add(headers, mime_type, filename, decoded, charset_alternative, text_charset);
         if (self.attachments.items.len > old_count) self.attachments.items[old_count].id = try self.allocator.dupe(u8, external_id orelse part_id);
     }
     fn finish(self: *Context, result: *ParsedMessage) !void {
@@ -3008,6 +3017,98 @@ const GmailSizeOracle = struct {
     }
 };
 
+const GmailCharsetOracle = struct {
+    fn part(a: std.mem.Allocator, kind: []const u8, charset: []const u8, size: i64, bytes: []const u8) !std.json.Value {
+        const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(bytes.len));
+        var value = try GmailSizeOracle.part(a, kind, size, std.base64.url_safe_no_pad.Encoder.encode(encoded, bytes));
+        const headers = try GmailSizeOracle.json(a, try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{
+            .{ .name = "Content-Type", .value = try std.fmt.allocPrint(a, "{s}; charset=\"{s}\"", .{ kind, charset }) },
+            .{ .name = "Content-Transfer-Encoding", .value = "quoted-printable" },
+        } }, .{}));
+        try value.object.put(a, "headers", try b.field(headers, "headers"));
+        return value;
+    }
+};
+
+test "Gmail charset: transcoded inline alternatives and genuine raw Latin-1 agree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const legacy = "f\xe4llt Gr\xfc\xdfe \xd6ffnung";
+    const expected = "fällt Grüße Öffnung";
+    const plain = try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", legacy.len, expected);
+    const html = try GmailCharsetOracle.part(a, "text/html", "iso-8859-1", legacy.len + 7, "<p>" ++ expected ++ "</p>");
+    var parent = try GmailSizeOracle.part(a, "multipart/alternative", 0, "");
+    try GmailSizeOracle.children(a, &parent, &.{ plain, html });
+    const parsed = try parseGmail(try GmailSizeOracle.wrap(a, parent), a);
+    try std.testing.expectEqualStrings(expected, parsed.body_text);
+    try std.testing.expectEqualStrings("<p>" ++ expected ++ "</p>", parsed.body_html);
+    try std.testing.expectEqualStrings("", parsed.decode_warning);
+    // RAW MIME keeps its declared charset and performs only one conversion.
+    const raw = try parse("Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nf=E4llt Gr=FC=DFe =D6ffnung", a);
+    try std.testing.expectEqualStrings(expected, raw.body_text);
+    const genuine = try parseGmail(try GmailSizeOracle.wrap(a, try GmailCharsetOracle.part(a, "text/plain", "latin1", legacy.len, legacy)), a);
+    try std.testing.expectEqualStrings(expected, genuine.body_text);
+}
+
+test "Gmail charset: Windows punctuation and literal mojibake keep their original meaning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const windows = "\x80 \x84Text\x93 \x96";
+    const expected = "€ „Text“ –";
+    const parsed = try parseGmail(try GmailSizeOracle.wrap(a, try GmailCharsetOracle.part(a, "text/plain", "windows-1252", windows.len, expected)), a);
+    try std.testing.expectEqualStrings(expected, parsed.body_text);
+    // Both pre-transcode legacy bytes and Gmail's transcoded literal agree.
+    for ([_][]const u8{ "\xc3\xa4", "Ã¤" }) |bytes| {
+        const literal = try parseGmail(try GmailSizeOracle.wrap(a, try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", 2, bytes)), a);
+        try std.testing.expectEqualStrings("Ã¤", literal.body_text);
+    }
+    for ([_]i64{ 0, 1, 3, 4 }) |size| {
+        const ambiguous = try parseGmail(try GmailSizeOracle.wrap(a, try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", size, "Ã¤")), a);
+        try std.testing.expectEqualStrings("ÃÂ¤", ambiguous.body_text);
+    }
+    var no_size = try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", 2, "Ã¤");
+    var body = try b.field(no_size, "body");
+    _ = body.object.swapRemove("size");
+    try no_size.object.put(a, "body", body);
+    const missing = try parseGmail(try GmailSizeOracle.wrap(a, no_size), a);
+    try std.testing.expectEqualStrings("ÃÂ¤", missing.body_text);
+}
+
+test "Gmail charset: text attachments external bodies and calendars do not opt into transcoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |named| {
+        var part = try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", 2, "Ã¤");
+        if (named) try part.object.put(a, "filename", .{ .string = "notes.txt" }) else {
+            var headers = try b.field(part, "headers");
+            try headers.array.append(try GmailSizeOracle.json(a, "{\"name\":\"Content-Disposition\",\"value\":\"attachment\"}"));
+            try part.object.put(a, "headers", headers);
+        }
+        const parsed = try parseGmail(try GmailSizeOracle.wrap(a, part), a);
+        try std.testing.expectEqual(@as(usize, 1), parsed.attachments.len);
+        try std.testing.expectEqualStrings("Ã¤", parsed.attachments[0].data);
+        try std.testing.expectEqualStrings("", parsed.body_text);
+    }
+    var external = try GmailCharsetOracle.part(a, "text/plain", "iso-8859-1", 2, "");
+    var body = try b.field(external, "body");
+    try body.object.put(a, "attachmentId", .{ .string = "legacy-inline" });
+    try external.object.put(a, "body", body);
+    const files = try GmailSizeOracle.json(a, "{\"legacy-inline\":{\"data\":\"w4PCpA\"}}");
+    const parsed_external = try parseGmailExternal(try GmailSizeOracle.wrap(a, external), a, files);
+    try std.testing.expectEqualStrings("ÃÂ¤", parsed_external.body_text);
+    const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:charset@example.test\r\nDTSTART:20261124T120000Z\r\nSUMMARY:Café\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var calendar_part = try GmailCharsetOracle.part(a, "text/calendar", "iso-8859-1", ics.len - 1, ics);
+    const calendar = try parseGmail(try GmailSizeOracle.wrap(a, calendar_part), a);
+    try std.testing.expect(std.mem.indexOf(u8, calendar.calendar.?, "CafÃ©") != null);
+    try calendar_part.object.put(a, "filename", .{ .string = "reminder.ics" });
+    const attached_calendar = try parseGmail(try GmailSizeOracle.wrap(a, calendar_part), a);
+    try std.testing.expectEqual(@as(usize, 1), attached_calendar.attachments.len);
+    try std.testing.expectEqualStrings(ics, attached_calendar.attachments[0].data);
+}
+
 test "Gmail inline size underestimates preserve literal full HTML and plain text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3384,7 +3485,7 @@ test "MIME charset: alternative fallback never masks all-unsupported bodies othe
     var zero: [0]u8 = .{};
     var fixed: std.heap.FixedBufferAllocator = .init(&zero);
     var context: Context = .{ .allocator = fixed.allocator() };
-    try std.testing.expectError(error.OutOfMemory, context.add(&.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }}, "text/plain", "", "Readable", true));
+    try std.testing.expectError(error.OutOfMemory, context.add(&.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }}, "text/plain", "", "Readable", true, null));
 }
 
 test "mail metadata: UTF-8 Message-ID and 985-byte reply parent fit physical wire lines" {
